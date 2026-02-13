@@ -84,3 +84,6 @@ USER.md
 !.agent/workflows/
 local/
 package-lock.json
+
+# Claude
+.claude/
