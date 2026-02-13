@@ -67,9 +67,9 @@ const persistPostgresPlugin = {
           });
           // Extract the last assistant message from the conversation
           const messages = event.messages ?? [];
-          const lastAssistant = [...messages].reverse().find(
-            (m: { role?: string }) => m.role === "assistant",
-          );
+          const lastAssistant = [...messages]
+            .reverse()
+            .find((m: { role?: string }) => m.role === "assistant");
           if (lastAssistant) {
             const content =
               typeof lastAssistant.content === "string"
@@ -80,7 +80,9 @@ const persistPostgresPlugin = {
               role: "assistant",
               content,
             });
-            api.logger.info(`persist-postgres: persisted assistant message for session ${sessionKey}`);
+            api.logger.info(
+              `persist-postgres: persisted assistant message for session ${sessionKey}`,
+            );
           }
         } catch (err) {
           api.logger.error(`persist-postgres: agent_end error: ${err}`);
@@ -103,7 +105,8 @@ const persistPostgresPlugin = {
           await insertMessage(sql, {
             conversationId: conv.id,
             role: "user",
-            content: typeof event.content === "string" ? event.content : JSON.stringify(event.content),
+            content:
+              typeof event.content === "string" ? event.content : JSON.stringify(event.content),
           });
         } catch (err) {
           api.logger.error(`persist-postgres: message_received error: ${err}`);
@@ -125,7 +128,8 @@ const persistPostgresPlugin = {
           await insertMessage(sql, {
             conversationId: conv.id,
             role: "assistant",
-            content: typeof event.content === "string" ? event.content : JSON.stringify(event.content),
+            content:
+              typeof event.content === "string" ? event.content : JSON.stringify(event.content),
           });
         } catch (err) {
           api.logger.error(`persist-postgres: message_sent error: ${err}`);

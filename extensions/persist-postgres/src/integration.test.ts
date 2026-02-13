@@ -1,3 +1,4 @@
+import postgres from "postgres";
 /**
  * Integration tests for persist-postgres plugin.
  *
@@ -7,7 +8,9 @@
  * Run with: DATABASE_URL=postgresql://postgres:postgres@localhost:5432/openclaw_e2e_test bun test extensions/persist-postgres/src/integration.test.ts
  */
 import { describe, test, expect, beforeAll, afterAll } from "vitest";
-import postgres from "postgres";
+import type { SessionEntry } from "../../../src/config/sessions/types.js";
+import type { OpenClawConfig } from "../../../src/config/types.js";
+import { listSessionsFromStore } from "../../../src/gateway/session-utils.js";
 import {
   ensureSchema,
   upsertConversation,
@@ -15,9 +18,6 @@ import {
   queryConversations,
   pgRowToSessionEntry,
 } from "./db.js";
-import { listSessionsFromStore } from "../../../src/gateway/session-utils.js";
-import type { SessionEntry } from "../../../src/config/sessions/types.js";
-import type { OpenClawConfig } from "../../../src/config/types.js";
 
 const DATABASE_URL =
   process.env.DATABASE_URL ?? "postgresql://postgres:postgres@localhost:5432/openclaw_e2e_test";
