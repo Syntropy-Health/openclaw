@@ -137,7 +137,7 @@ export async function queryConversations(
   let query = `SELECT * FROM lp_conversations WHERE 1=1`;
 
   if (opts.createdAfter !== undefined) {
-    query += ` AND started_at >= $1::timestamptz`;
+    query += ` AND started_at >= $${values.length + 1}::timestamptz`;
     values.push(new Date(opts.createdAfter).toISOString());
   }
   if (opts.createdBefore !== undefined) {
