@@ -25,6 +25,7 @@ export function createPgClient(databaseUrl: string) {
 /**
  * Ensure the lp_conversations and lp_messages tables exist.
  * Safe to call repeatedly (uses IF NOT EXISTS).
+ * Requires PostgreSQL 13+ (gen_random_uuid() is built-in since PG 13).
  */
 export async function ensureSchema(sql: postgres.Sql) {
   await sql`
@@ -85,15 +86,14 @@ export async function upsertConversation(
       ${opts.lastMessageAt ?? now}
     )
     ON CONFLICT (session_key) DO UPDATE SET
-      last_message_at = EXCLUDED.last_message_at,
-      message_count = lp_conversations.message_count + 1
+      last_message_at = EXCLUDED.last_message_at
     RETURNING *
   `;
   return rows[0] as PgSessionRow;
 }
 
 /**
- * Insert a message into PostgreSQL.
+ * Insert a message into PostgreSQL and increment the conversation's message_count.
  */
 export async function insertMessage(
   sql: postgres.Sql,
@@ -113,6 +113,11 @@ export async function insertMessage(
       ${opts.metadata ? sql.json(opts.metadata as postgres.JSONValue) : sql.json({})}
     )
     RETURNING *
+  `;
+  await sql`
+    UPDATE lp_conversations
+    SET message_count = message_count + 1
+    WHERE id = ${opts.conversationId}
   `;
   return rows[0] as PgMessageRow;
 }
