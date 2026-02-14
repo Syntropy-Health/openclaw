@@ -1,3 +1,4 @@
+import crypto from "node:crypto";
 import postgres from "postgres";
 
 export type PgSessionRow = {
@@ -29,7 +30,7 @@ export function createPgClient(databaseUrl: string) {
 export async function ensureSchema(sql: postgres.Sql) {
   await sql`
     CREATE TABLE IF NOT EXISTS lp_conversations (
-      id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+      id UUID PRIMARY KEY,
       channel VARCHAR(50) NOT NULL,
       session_key VARCHAR(512) NOT NULL UNIQUE,
       started_at TIMESTAMPTZ DEFAULT now(),
@@ -48,7 +49,7 @@ export async function ensureSchema(sql: postgres.Sql) {
 
   await sql`
     CREATE TABLE IF NOT EXISTS lp_messages (
-      id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+      id UUID PRIMARY KEY,
       conversation_id UUID REFERENCES lp_conversations(id) ON DELETE CASCADE,
       role VARCHAR(20) NOT NULL,
       content TEXT NOT NULL,
@@ -76,24 +77,25 @@ export async function upsertConversation(
   },
 ) {
   const now = new Date();
+  const id = crypto.randomUUID();
   const rows = await sql`
-    INSERT INTO lp_conversations (session_key, channel, started_at, last_message_at)
+    INSERT INTO lp_conversations (id, session_key, channel, started_at, last_message_at)
     VALUES (
+      ${id},
       ${opts.sessionKey},
       ${opts.channel},
       ${opts.startedAt ?? now},
       ${opts.lastMessageAt ?? now}
     )
     ON CONFLICT (session_key) DO UPDATE SET
-      last_message_at = EXCLUDED.last_message_at,
-      message_count = lp_conversations.message_count + 1
+      last_message_at = EXCLUDED.last_message_at
     RETURNING *
   `;
   return rows[0] as PgSessionRow;
 }
 
 /**
- * Insert a message into PostgreSQL.
+ * Insert a message into PostgreSQL and increment the conversation's message_count.
  */
 export async function insertMessage(
   sql: postgres.Sql,
@@ -104,16 +106,29 @@ export async function insertMessage(
     metadata?: Record<string, unknown>;
   },
 ) {
+  const id = crypto.randomUUID();
+  const metadataValue = opts.metadata
+    ? sql.json(opts.metadata as postgres.JSONValue)
+    : sql.json({});
   const rows = await sql`
-    INSERT INTO lp_messages (conversation_id, role, content, metadata)
+    INSERT INTO lp_messages (id, conversation_id, role, content, metadata)
     VALUES (
+      ${id},
       ${opts.conversationId},
       ${opts.role},
       ${opts.content},
-      ${opts.metadata ? sql.json(opts.metadata) : sql.json({})}
+      ${metadataValue}
     )
     RETURNING *
   `;
+
+  // Increment message_count atomically
+  await sql`
+    UPDATE lp_conversations
+    SET message_count = message_count + 1
+    WHERE id = ${opts.conversationId}
+  `;
+
   return rows[0] as PgMessageRow;
 }
 
@@ -132,7 +147,7 @@ export async function queryConversations(
     limit?: number;
   } = {},
 ) {
-  const values: unknown[] = [];
+  const values: (string | number)[] = [];
 
   let query = `SELECT * FROM lp_conversations WHERE 1=1`;
 

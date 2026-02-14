@@ -30,12 +30,11 @@ This PRD catalogs every issue and specifies the fix for each.
 
 ```ts
 const databaseUrl =
-  (api.pluginConfig?.databaseUrl as string | undefined) ??
-  process.env.DATABASE_URL ??
-  "";
+  (api.pluginConfig?.databaseUrl as string | undefined) ?? process.env.DATABASE_URL ?? "";
 ```
 
 **Acceptance criteria:**
+
 - Plugin uses `api.pluginConfig.databaseUrl` when configured
 - Falls back to `process.env.DATABASE_URL` if plugin config is not set
 - Plugin disables itself with a warning when neither source provides a value
@@ -45,10 +44,12 @@ const databaseUrl =
 **Source:** [Greptile review comment](https://github.com/openclaw/openclaw/pull/15424#discussion_r2804016123)
 
 **Problem:** The plugin persists the same logical user message via two overlapping hook paths:
+
 - `before_agent_start` persists `event.prompt` as a user message
 - `message_received` also persists inbound content as a user message
 
 Similarly for assistant replies:
+
 - `agent_end` extracts and persists the last assistant message
 - `message_sent` also persists outbound content as an assistant message
 
@@ -68,6 +69,7 @@ Recommended approach — remove the channel hooks entirely:
 If channel-only messages (no agent run) must also be persisted, deduplicate by checking whether the message was already inserted for the current session+timestamp window before inserting.
 
 **Acceptance criteria:**
+
 - A single inbound message is persisted exactly once in `lp_messages`
 - A single assistant reply is persisted exactly once in `lp_messages`
 - No duplicate rows for the same logical message
@@ -99,6 +101,7 @@ RETURNING *
 ```
 
 **Acceptance criteria:**
+
 - `message_count` increments only when a row is actually inserted into `lp_messages`
 - `message_count` accurately reflects the number of messages in the conversation
 - Existing tests updated to reflect correct count behavior
@@ -137,6 +140,7 @@ CREATE TABLE IF NOT EXISTS lp_conversations (
 ```
 
 **Acceptance criteria:**
+
 - Plugin starts successfully on PostgreSQL 12 and older without `pgcrypto`
 - Plugin starts successfully on managed Postgres services (e.g., Neon, Supabase, RDS) regardless of extension availability
 - UUID generation is handled application-side
@@ -172,6 +176,7 @@ const DATABASE_URL = process.env.DATABASE_URL ?? "";
 ```
 
 **Acceptance criteria:**
+
 - `pnpm test` passes without a running PostgreSQL instance
 - Integration tests run when `DATABASE_URL` is explicitly set
 - No hardcoded localhost connection strings
@@ -181,6 +186,7 @@ const DATABASE_URL = process.env.DATABASE_URL ?? "";
 **Source:** CI `check` job failure
 
 **Errors:**
+
 1. `db.ts(113,34): error TS2345` — `Record<string, unknown>` is not assignable to `JSONValue` when passing metadata to `sql.json()`
 2. `db.ts(163,28): error TS2345` — `unknown[]` is not assignable to `ParameterOrJSON<never>[]` in `sql.unsafe(query, values)`
 
@@ -193,7 +199,7 @@ ${opts.metadata ? sql.json(opts.metadata as Record<string, string | number | boo
 Or use a type assertion:
 
 ```ts
-sql.json(opts.metadata as postgres.JSONValue)
+sql.json(opts.metadata as postgres.JSONValue);
 ```
 
 **Fix for error 2:** Type the `values` array correctly:
@@ -209,6 +215,7 @@ return sql.unsafe(query, values as postgres.ParameterOrJSON<never>[]) as Promise
 ```
 
 **Acceptance criteria:**
+
 - `pnpm tsgo` passes with no errors in `extensions/persist-postgres/src/db.ts`
 
 ## Issue 7: TypeScript errors in `index.ts`
@@ -216,6 +223,7 @@ return sql.unsafe(query, values as postgres.ParameterOrJSON<never>[]) as Promise
 **Source:** CI `check` job failure
 
 **Errors:**
+
 1. `index.ts(72,19): error TS2769` — No overload matches the `.find()` call on `event.messages` (typed as `unknown[]`)
 2. `index.ts(75,36): error TS2339` — Property `content` does not exist on type `{}`
 3. `index.ts(76,33): error TS2339` — Property `content` does not exist on type `{}`
@@ -231,9 +239,7 @@ type AgentMessage = { role?: string; content?: string | unknown };
 const messages: AgentMessage[] = Array.isArray(event.messages)
   ? (event.messages as AgentMessage[])
   : [];
-const lastAssistant = [...messages]
-  .reverse()
-  .find((m) => m.role === "assistant");
+const lastAssistant = [...messages].reverse().find((m) => m.role === "assistant");
 if (lastAssistant?.content !== undefined) {
   const content =
     typeof lastAssistant.content === "string"
@@ -244,6 +250,7 @@ if (lastAssistant?.content !== undefined) {
 ```
 
 **Acceptance criteria:**
+
 - `pnpm tsgo` passes with no errors in `extensions/persist-postgres/src/index.ts`
 - Type safety is maintained without using `any`
 
@@ -259,16 +266,16 @@ if (lastAssistant?.content !== undefined) {
 
 ## Implementation priority
 
-| Priority | Issue | Effort | Impact |
-|----------|-------|--------|--------|
-| P0 | Issue 6: TS errors in db.ts | Small | Blocks CI |
-| P0 | Issue 7: TS errors in index.ts | Small | Blocks CI |
-| P0 | Issue 5: Integration test in CI | Small | Blocks CI |
-| P1 | Issue 2: Duplicate persistence | Medium | Data correctness |
-| P1 | Issue 3: Inflated message_count | Small | Data correctness |
-| P1 | Issue 1: Plugin config ignored | Small | Usability |
-| P2 | Issue 4: gen_random_uuid | Small | Compatibility |
-| P3 | Issue 8: Upstream TS error | N/A | Not our scope |
+| Priority | Issue                           | Effort | Impact           | Status    |
+| -------- | ------------------------------- | ------ | ---------------- | --------- |
+| P0       | Issue 6: TS errors in db.ts     | Small  | Blocks CI        | ✅ Fixed  |
+| P0       | Issue 7: TS errors in index.ts  | Small  | Blocks CI        | ✅ Fixed  |
+| P0       | Issue 5: Integration test in CI | Small  | Blocks CI        | ✅ Fixed  |
+| P1       | Issue 2: Duplicate persistence  | Medium | Data correctness | ✅ Fixed  |
+| P1       | Issue 3: Inflated message_count | Small  | Data correctness | ✅ Fixed  |
+| P1       | Issue 1: Plugin config ignored  | Small  | Usability        | ✅ Fixed  |
+| P2       | Issue 4: gen_random_uuid        | Small  | Compatibility    | ✅ Fixed  |
+| P3       | Issue 8: Upstream TS error      | N/A    | Not our scope    | — Skipped |
 
 ## Testing plan
 
