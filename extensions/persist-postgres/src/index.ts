@@ -7,9 +7,12 @@ const persistPostgresPlugin = {
   kind: "persistence" as const,
   description: "Persists sessions and messages to PostgreSQL instead of local files",
   register(api: OpenClawPluginApi) {
-    const databaseUrl = process.env.DATABASE_URL ?? "";
+    const databaseUrl =
+      (api.pluginConfig?.databaseUrl as string | undefined) ?? process.env.DATABASE_URL ?? "";
     if (!databaseUrl) {
-      api.logger.warn("persist-postgres: DATABASE_URL not set, plugin disabled");
+      api.logger.warn(
+        "persist-postgres: no databaseUrl in plugin config or DATABASE_URL env, plugin disabled",
+      );
       return;
     }
 
@@ -30,6 +33,9 @@ const persistPostgresPlugin = {
       "before_agent_start",
       async (event, ctx) => {
         try {
+          if (!event.prompt) {
+            return {};
+          }
           await ensureReady();
           const sessionKey = ctx?.sessionKey ?? "unknown";
           const conv = await upsertConversation(sql, {
@@ -37,14 +43,12 @@ const persistPostgresPlugin = {
             channel: "gateway",
             lastMessageAt: new Date(),
           });
-          if (event.prompt) {
-            await insertMessage(sql, {
-              conversationId: conv.id,
-              role: "user",
-              content: event.prompt,
-            });
-            api.logger.info(`persist-postgres: persisted user message for session ${sessionKey}`);
-          }
+          await insertMessage(sql, {
+            conversationId: conv.id,
+            role: "user",
+            content: event.prompt,
+          });
+          api.logger.info(`persist-postgres: persisted user message for session ${sessionKey}`);
         } catch (err) {
           api.logger.error(`persist-postgres: before_agent_start error: ${err}`);
         }
@@ -58,6 +62,12 @@ const persistPostgresPlugin = {
       "agent_end",
       async (event, ctx) => {
         try {
+          type Msg = { role?: string; content?: unknown };
+          const messages = (event.messages ?? []) as Msg[];
+          const lastAssistant = messages.toReversed().find((m) => m.role === "assistant");
+          if (!lastAssistant) {
+            return;
+          }
           await ensureReady();
           const sessionKey = ctx?.sessionKey ?? "unknown";
           const conv = await upsertConversation(sql, {
@@ -65,73 +75,20 @@ const persistPostgresPlugin = {
             channel: "gateway",
             lastMessageAt: new Date(),
           });
-          // Extract the last assistant message from the conversation
-          type Msg = { role?: string; content?: unknown };
-          const messages = (event.messages ?? []) as Msg[];
-          const lastAssistant = messages.toReversed().find((m) => m.role === "assistant");
-          if (lastAssistant) {
-            const content =
-              typeof lastAssistant.content === "string"
-                ? lastAssistant.content
-                : JSON.stringify(lastAssistant.content);
-            await insertMessage(sql, {
-              conversationId: conv.id,
-              role: "assistant",
-              content,
-            });
-            api.logger.info(
-              `persist-postgres: persisted assistant message for session ${sessionKey}`,
-            );
-          }
-        } catch (err) {
-          api.logger.error(`persist-postgres: agent_end error: ${err}`);
-        }
-      },
-      { priority: 50 },
-    );
-
-    // Also persist channel messages when available
-    api.on(
-      "message_received",
-      async (event) => {
-        try {
-          await ensureReady();
-          const conv = await upsertConversation(sql, {
-            sessionKey: event.from,
-            channel: "gateway",
-            lastMessageAt: new Date(),
-          });
-          await insertMessage(sql, {
-            conversationId: conv.id,
-            role: "user",
-            content:
-              typeof event.content === "string" ? event.content : JSON.stringify(event.content),
-          });
-        } catch (err) {
-          api.logger.error(`persist-postgres: message_received error: ${err}`);
-        }
-      },
-      { priority: 50 },
-    );
-
-    api.on(
-      "message_sent",
-      async (event) => {
-        try {
-          await ensureReady();
-          const conv = await upsertConversation(sql, {
-            sessionKey: event.to,
-            channel: "gateway",
-            lastMessageAt: new Date(),
-          });
+          const content =
+            typeof lastAssistant.content === "string"
+              ? lastAssistant.content
+              : JSON.stringify(lastAssistant.content);
           await insertMessage(sql, {
             conversationId: conv.id,
             role: "assistant",
-            content:
-              typeof event.content === "string" ? event.content : JSON.stringify(event.content),
+            content,
           });
+          api.logger.info(
+            `persist-postgres: persisted assistant message for session ${sessionKey}`,
+          );
         } catch (err) {
-          api.logger.error(`persist-postgres: message_sent error: ${err}`);
+          api.logger.error(`persist-postgres: agent_end error: ${err}`);
         }
       },
       { priority: 50 },

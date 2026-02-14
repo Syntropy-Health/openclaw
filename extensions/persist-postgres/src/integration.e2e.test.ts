@@ -159,13 +159,14 @@ describe("PostgreSQL conversation CRUD", () => {
     `;
     const afterTs = new Date(after[0].last_message_at).getTime();
     expect(afterTs).toBeGreaterThan(beforeTs);
-    expect(after[0].message_count).toBe(4); // incremented from 3
+    // message_count stays at 5 (seeded 3 + 2 insertMessage calls in beforeAll);
+    // upsert no longer increments count
+    expect(after[0].message_count).toBe(5);
 
     // Restore original timestamp for subsequent tests
     await sql`
       UPDATE lp_conversations
-      SET last_message_at = ${new Date(baseTime - 12 * hour).toISOString()}::timestamptz,
-          message_count = 3
+      SET last_message_at = ${new Date(baseTime - 12 * hour).toISOString()}::timestamptz
       WHERE id = ${convOldId}
     `;
   });
