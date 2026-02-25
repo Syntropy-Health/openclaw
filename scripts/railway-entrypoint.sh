@@ -155,7 +155,7 @@ if [ "$wa_needs_login" = true ]; then
 
   # Run login flow; QR prints to stdout (visible in Railway logs).
   # Timeout after 90s. Gateway is already running and healthy.
-  if timeout 90 node openclaw.mjs channels login 2>&1; then
+  if timeout 90 node openclaw.mjs channels login --channel whatsapp 2>&1; then
     echo ""
     echo "WhatsApp linked successfully! Restarting gateway to pick up creds..."
     # Restart gateway so it connects WhatsApp with the new creds
