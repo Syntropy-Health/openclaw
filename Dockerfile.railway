@@ -19,6 +19,11 @@ RUN pnpm install --frozen-lockfile
 
 USER node
 COPY --chown=node:node . .
+
+# Canvas A2UI sources are excluded by .dockerignore (vendor/, apps/);
+# create a stub bundle so the build script skips the bundling step.
+RUN touch src/canvas-host/a2ui/a2ui.bundle.js
+
 RUN pnpm build
 # Force pnpm for UI build (Bun may fail on ARM/Synology architectures)
 ENV OPENCLAW_PREFER_PNPM=1
