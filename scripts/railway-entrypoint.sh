@@ -35,8 +35,8 @@ echo "Model: $PRIMARY_MODEL (fallback: $FALLBACK_MODEL)"
 # Ensure state directories exist
 mkdir -p "$STATE_DIR" "$WA_AUTH_DIR"
 
-# Generate gateway config with Cerebras provider if none exists or missing whatsapp channel
-if [ ! -f "$CONFIG_FILE" ] || ! grep -q '"whatsapp"' "$CONFIG_FILE" 2>/dev/null; then
+# Generate gateway config with Cerebras provider if none exists or missing required fields
+if [ ! -f "$CONFIG_FILE" ] || ! grep -q '"allowFrom"' "$CONFIG_FILE" 2>/dev/null; then
   echo "Generating gateway config with Cerebras provider + WhatsApp channel..."
   cat > "$CONFIG_FILE" <<CONF
 {
@@ -50,7 +50,8 @@ if [ ! -f "$CONFIG_FILE" ] || ! grep -q '"whatsapp"' "$CONFIG_FILE" 2>/dev/null;
   },
   "channels": {
     "whatsapp": {
-      "dmPolicy": "open"
+      "dmPolicy": "open",
+      "allowFrom": ["*"]
     }
   },
   "web": {
