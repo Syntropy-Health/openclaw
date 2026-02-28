@@ -108,3 +108,7 @@ apps/ios/LocalSigning.xcconfig
 
 # AI and code generation artifacts
 .claude/
+
+# Agent guideline files (CLAUDE.md symlinks break Railway CLI upload)
+**/CLAUDE.md
+**/AGENTS.md
