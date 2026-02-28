@@ -47,6 +47,18 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      - name: Resolve symlinks for Railway CLI
+        run: |
+          # Railway CLI cannot index symlinks; replace them with real files or remove
+          find . -type l -name '*.md' | while read -r link; do
+            target=$(readlink -f "$link" 2>/dev/null)
+            if [ -f "$target" ]; then
+              cp --remove-destination "$target" "$link"
+            else
+              rm -f "$link"
+            fi
+          done
+
       - name: Install Railway CLI
         run: npm install -g @railway/cli
 
