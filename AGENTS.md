@@ -1,5 +1,7 @@
 # Repository Guidelines
 
+This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+
 - Repo: https://github.com/openclaw/openclaw
 - GitHub issues/comments/PR comments: use literal multiline strings or `-F - <<'EOF'` (or $'...') for real newlines; never embed "\\n".
 
@@ -65,6 +67,29 @@
 - Format check: `pnpm format` (oxfmt --check)
 - Format fix: `pnpm format:fix` (oxfmt --write)
 - Tests: `pnpm test` (vitest); coverage: `pnpm test:coverage`
+- Run a single test file: `pnpm vitest run path/to/file.test.ts`
+- Run tests matching a name: `pnpm vitest run -t "test name pattern"`
+- Watch mode: `pnpm test:watch`
+
+## Workspace Layout
+
+pnpm workspace packages: root (`.`), `ui/`, `packages/*`, `extensions/*`. Plugin/extension-only deps belong in the extension `package.json`, not root.
+
+## Anti-Redundancy & Source-of-Truth
+
+- Before creating any utility/formatter/helper, search for existing implementations first.
+- **Time formatting**: `src/infra/format-time` — never create local `formatAge`/`formatDuration`/`formatElapsedTime`.
+- **Terminal tables**: `src/terminal/table.ts` (`renderTable`).
+- **Terminal colors/themes**: `src/terminal/palette.ts` (shared CLI palette, no hardcoded colors).
+- **Progress/spinners**: `src/cli/progress.ts` (`osc-progress` + `@clack/prompts` spinner).
+- **CLI option wiring**: `src/cli/` with dependency injection via `createDefaultDeps`.
+- Avoid files that just re-export from another file — import directly from the original source.
+
+## Import Conventions
+
+- Use `.js` extension for cross-package imports (ESM).
+- Direct imports only — no re-export wrapper files.
+- Use `import type { X }` for type-only imports.
 
 ## Coding Style & Naming Conventions
 
@@ -77,6 +102,7 @@
 - Add brief code comments for tricky or non-obvious logic.
 - Keep files concise; extract helpers instead of “V2” copies. Use existing patterns for CLI options and dependency injection via `createDefaultDeps`.
 - Aim to keep files under ~700 LOC; guideline only (not a hard guardrail). Split/refactor when it improves clarity or testability.
+- Control UI (Lit-based): uses **legacy** decorators (`@state()`, `@property({ type: Number })`). Do not use standard `accessor` decorators — the Rollup pipeline does not support them. See `tsconfig.json` (`experimentalDecorators: true`, `useDefineForClassFields: false`).
 - Naming: use **OpenClaw** for product/app/docs headings; use `openclaw` for CLI command, package/binary, paths, and config keys.
 
 ## Release Channels (Naming)
