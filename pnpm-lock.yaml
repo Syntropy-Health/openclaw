@@ -403,6 +403,19 @@ importers:
         specifier: workspace:*
         version: link:../..
 
+  extensions/memory-graphiti:
+    dependencies:
+      '@getzep/zep-cloud':
+        specifier: ^3.16.0
+        version: 3.16.0
+      '@sinclair/typebox':
+        specifier: 0.34.48
+        version: 0.34.48
+    devDependencies:
+      openclaw:
+        specifier: workspace:*
+        version: link:../..
+
   extensions/memory-lancedb:
     dependencies:
       '@lancedb/lancedb':
@@ -1078,6 +1091,10 @@ packages:
 
   '@eshaz/web-worker@1.2.2':
     resolution: {integrity: sha512-WxXiHFmD9u/owrzempiDlBB1ZYqiLnm9s6aPc8AlFQalq2tKmqdmMr9GXOupDgzXtqnBipj8Un0gkIm7Sjf8mw==}
+
+  '@getzep/zep-cloud@3.16.0':
+    resolution: {integrity: sha512-uezcNVzzU5K65Lc4UQX7obWQFK7fw+2587DmN+eD2RcH4cUA6fgk16F0NQhay1yZAfCSO1wjKXLY3zB5ejRLrw==}
+    engines: {node: '>=18.0.0'}
 
   '@google/genai@1.41.0':
     resolution: {integrity: sha512-S4WGil+PG0NBQRAx+0yrQuM/TWOLn2gGEy5wn4IsoOI6ouHad0P61p3OWdhJ3aqr9kfj8o904i/jevfaGoGuIQ==}
@@ -6618,6 +6635,10 @@ snapshots:
 
   '@eshaz/web-worker@1.2.2':
     optional: true
+
+  '@getzep/zep-cloud@3.16.0':
+    dependencies:
+      zod: 3.25.76
 
   '@google/genai@1.41.0':
     dependencies:
