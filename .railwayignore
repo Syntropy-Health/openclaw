@@ -88,8 +88,8 @@ apps/ios/*.mobileprovision
 # Local untracked files
 .local/
 docs/.local/
-IDENTITY.md
-USER.md
+/IDENTITY.md
+/USER.md
 .tgz
 .idea
 
@@ -109,6 +109,7 @@ apps/ios/LocalSigning.xcconfig
 # AI and code generation artifacts
 .claude/
 
-# Agent guideline files (CLAUDE.md symlinks break Railway CLI upload)
-**/CLAUDE.md
-**/AGENTS.md
+# Root-level agent guideline files (not needed for deploy; symlinks are
+# resolved in CI pre-deploy step so they no longer break Railway CLI)
+/CLAUDE.md
+/AGENTS.md
