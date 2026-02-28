@@ -1,0 +1,19 @@
+{
+  "name": "@openclaw/memory-graphiti",
+  "version": "2026.2.20",
+  "private": true,
+  "description": "OpenClaw Graphiti-backed graph memory plugin with auto-recall/capture",
+  "type": "module",
+  "dependencies": {
+    "@getzep/zep-cloud": "^3.16.0",
+    "@sinclair/typebox": "0.34.48"
+  },
+  "devDependencies": {
+    "openclaw": "workspace:*"
+  },
+  "openclaw": {
+    "extensions": [
+      "./index.ts"
+    ]
+  }
+}

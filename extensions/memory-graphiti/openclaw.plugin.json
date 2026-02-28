@@ -1,0 +1,80 @@
+{
+  "id": "memory-graphiti",
+  "kind": "memory",
+  "uiHints": {
+    "apiKey": {
+      "label": "Zep Cloud API Key",
+      "sensitive": true,
+      "placeholder": "${GETZEP_API_KEY}",
+      "help": "Zep Cloud API key. When set, uses Zep Cloud instead of self-hosted Graphiti."
+    },
+    "serverUrl": {
+      "label": "Graphiti Server URL",
+      "placeholder": "http://localhost:8000",
+      "help": "URL of your self-hosted Graphiti REST API server. Used when apiKey is not set."
+    },
+    "userId": {
+      "label": "Zep Cloud User ID",
+      "placeholder": "auto-derived from groupId",
+      "help": "Fixed Zep Cloud user ID. If not set, derived from group ID strategy.",
+      "advanced": true
+    },
+    "groupIdStrategy": {
+      "label": "Group ID Strategy",
+      "help": "How to partition the knowledge graph: channel-sender (per user per channel), session (per conversation thread), or static (single shared graph)"
+    },
+    "staticGroupId": {
+      "label": "Static Group ID",
+      "placeholder": "main",
+      "help": "Group ID to use when strategy is 'static'",
+      "advanced": true
+    },
+    "autoCapture": {
+      "label": "Auto-Capture",
+      "help": "Automatically capture conversations into the knowledge graph after each agent turn"
+    },
+    "autoRecall": {
+      "label": "Auto-Recall",
+      "help": "Automatically inject relevant facts from the knowledge graph before each agent turn"
+    },
+    "maxFacts": {
+      "label": "Max Facts",
+      "placeholder": "10",
+      "help": "Maximum number of facts to inject during auto-recall",
+      "advanced": true
+    }
+  },
+  "configSchema": {
+    "type": "object",
+    "additionalProperties": false,
+    "properties": {
+      "apiKey": {
+        "type": "string"
+      },
+      "serverUrl": {
+        "type": "string"
+      },
+      "userId": {
+        "type": "string"
+      },
+      "groupIdStrategy": {
+        "type": "string",
+        "enum": ["channel-sender", "session", "static"]
+      },
+      "staticGroupId": {
+        "type": "string"
+      },
+      "autoCapture": {
+        "type": "boolean"
+      },
+      "autoRecall": {
+        "type": "boolean"
+      },
+      "maxFacts": {
+        "type": "number",
+        "minimum": 1,
+        "maximum": 100
+      }
+    }
+  }
+}
