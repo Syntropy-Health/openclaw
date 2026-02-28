@@ -39,12 +39,14 @@ const persistPostgresPlugin = {
       }
     }
 
-    // Persist the user prompt when an agent run starts
+    // Persist the user prompt when an agent run starts.
+    // before_agent_start fires twice: once for model resolution (no messages)
+    // and once for prompt building (has messages). Only persist on the second call.
     api.on(
       "before_agent_start",
       async (event, ctx) => {
         try {
-          if (!event.prompt) {
+          if (!event.prompt || !event.messages) {
             return {};
           }
           await ensureReady();
