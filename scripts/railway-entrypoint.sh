@@ -35,8 +35,9 @@ echo "Model: $PRIMARY_MODEL (fallback: $FALLBACK_MODEL)"
 # Ensure state directories exist
 mkdir -p "$STATE_DIR" "$WA_AUTH_DIR"
 
-# Generate gateway config with Cerebras provider if none exists or missing required fields
-if [ ! -f "$CONFIG_FILE" ] || ! grep -q '"allowFrom"' "$CONFIG_FILE" 2>/dev/null; then
+# Generate gateway config with Cerebras provider if none exists or stale
+# Regenerate if missing allowFrom or still has the old invalid controlUi key
+if [ ! -f "$CONFIG_FILE" ] || ! grep -q '"allowFrom"' "$CONFIG_FILE" 2>/dev/null || grep -q 'dangerouslyAllowHostHeaderOriginFallback' "$CONFIG_FILE" 2>/dev/null; then
   echo "Generating gateway config with Cerebras provider + WhatsApp channel..."
   cat > "$CONFIG_FILE" <<CONF
 {
@@ -60,7 +61,7 @@ if [ ! -f "$CONFIG_FILE" ] || ! grep -q '"allowFrom"' "$CONFIG_FILE" 2>/dev/null
   },
   "gateway": {
     "controlUi": {
-      "dangerouslyAllowHostHeaderOriginFallback": true
+      "allowedOrigins": ["*"]
     }
   },
   "models": {
