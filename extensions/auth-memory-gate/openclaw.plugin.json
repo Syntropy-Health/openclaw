@@ -1,0 +1,31 @@
+{
+  "id": "auth-memory-gate",
+  "uiHints": {
+    "databaseUrl": {
+      "label": "PostgreSQL URL",
+      "sensitive": true,
+      "placeholder": "postgresql://user:pass@host:5432/dbname",
+      "help": "PostgreSQL connection string (or use ${DATABASE_URL}). Must point to the same database as persist-user-identity."
+    }
+  },
+  "configSchema": {
+    "type": "object",
+    "additionalProperties": false,
+    "properties": {
+      "databaseUrl": {
+        "type": "string",
+        "description": "PostgreSQL connection string. Falls back to DATABASE_URL env var."
+      },
+      "requireVerified": {
+        "type": "boolean",
+        "description": "When true, memory scoping is gated behind verified identity. Unverified users see a gate message instead of scope.",
+        "default": false
+      },
+      "gateMessage": {
+        "type": "string",
+        "description": "Custom message shown to unverified users when requireVerified is true."
+      }
+    },
+    "required": []
+  }
+}

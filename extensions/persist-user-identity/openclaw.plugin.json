@@ -1,0 +1,41 @@
+{
+  "id": "persist-user-identity",
+  "uiHints": {
+    "databaseUrl": {
+      "label": "PostgreSQL URL",
+      "sensitive": true,
+      "placeholder": "postgresql://user:pass@host:5432/dbname",
+      "help": "PostgreSQL connection string (or use ${DATABASE_URL}). Shares database with persist-postgres."
+    },
+    "auth.jwtSecret": {
+      "label": "JWT Secret (HS256)",
+      "sensitive": true,
+      "placeholder": "your-hs256-secret",
+      "help": "Shared secret for verifying HS256 JWTs issued by your app"
+    },
+    "auth.verifyEndpoint": {
+      "label": "Token Verification Endpoint",
+      "placeholder": "https://myapp.com/api/verify-token",
+      "help": "POST endpoint that validates a token and returns { user_id, first_name, last_name }"
+    }
+  },
+  "configSchema": {
+    "type": "object",
+    "additionalProperties": false,
+    "properties": {
+      "databaseUrl": { "type": "string" },
+      "auth": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "mode": { "type": "string", "enum": ["jwt-hs256", "verify-endpoint"] },
+          "jwtSecret": { "type": "string" },
+          "verifyEndpoint": { "type": "string" },
+          "issuer": { "type": "string" },
+          "audience": { "type": "string" }
+        }
+      }
+    },
+    "required": []
+  }
+}
