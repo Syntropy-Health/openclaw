@@ -1,0 +1,18 @@
+{
+  "name": "@openclaw/auth-memory-gate",
+  "version": "2026.2.1",
+  "private": true,
+  "description": "Identity-scoped memory retrieval gate for OpenClaw",
+  "type": "module",
+  "dependencies": {
+    "postgres": "^3.4.5"
+  },
+  "devDependencies": {
+    "openclaw": "workspace:*"
+  },
+  "openclaw": {
+    "extensions": [
+      "./src/index.ts"
+    ]
+  }
+}
