@@ -12,6 +12,7 @@ set -euo pipefail
 # Required environment variables (set in Railway dashboard):
 #   CEREBRAS_API_KEY        - Cerebras API key (csk-...)
 #   OPENCLAW_GATEWAY_TOKEN  - Auth token for non-loopback binding
+#   DATABASE_URL            - PostgreSQL connection string for identity + persistence plugins
 #
 # Optional environment variables:
 #   PORT                    - Railway-assigned port (default: 3000)
@@ -19,6 +20,8 @@ set -euo pipefail
 #   OPENCLAW_SKIP_WA_LOGIN  - Set to "1" to skip the auto-login flow
 #   OPENCLAW_MODEL_PRIMARY  - Override primary model (default: cerebras/zai-glm-4.7)
 #   OPENCLAW_MODEL_FALLBACK - Override fallback model (default: cerebras/gpt-oss-120b)
+#   GETZEP_API_KEY          - Zep Cloud API key for memory-graphiti (optional)
+#   OPENCLAW_HARD_GATE      - Set to "1" to enable hard identity gate (default: 1)
 
 PORT="${PORT:-3000}"
 STATE_DIR="${OPENCLAW_STATE_DIR:-/home/node/.openclaw}"
@@ -26,11 +29,14 @@ WA_AUTH_DIR="${OPENCLAW_WA_AUTH_DIR:-$STATE_DIR/sessions/whatsapp/auth_info}"
 CONFIG_FILE="$STATE_DIR/openclaw.json"
 PRIMARY_MODEL="${OPENCLAW_MODEL_PRIMARY:-cerebras/zai-glm-4.7}"
 FALLBACK_MODEL="${OPENCLAW_MODEL_FALLBACK:-cerebras/gpt-oss-120b}"
+HARD_GATE="${OPENCLAW_HARD_GATE:-1}"
 
 echo "=== OpenClaw Railway Gateway ==="
 echo "Port: $PORT"
 echo "State dir: $STATE_DIR"
 echo "Model: $PRIMARY_MODEL (fallback: $FALLBACK_MODEL)"
+echo "Hard gate: $HARD_GATE"
+echo "Database: ${DATABASE_URL:+set (hidden)}${DATABASE_URL:-NOT SET}"
 
 # Ensure state directories exist
 mkdir -p "$STATE_DIR" "$WA_AUTH_DIR"
@@ -38,7 +44,14 @@ mkdir -p "$STATE_DIR" "$WA_AUTH_DIR"
 # Generate gateway config with Cerebras provider if none exists or stale
 # Regenerate if missing allowFrom or still has the old invalid controlUi key
 if [ ! -f "$CONFIG_FILE" ] || ! grep -q '"allowFrom"' "$CONFIG_FILE" 2>/dev/null || grep -q 'dangerouslyAllowHostHeaderOriginFallback' "$CONFIG_FILE" 2>/dev/null; then
-  echo "Generating gateway config with Cerebras provider + WhatsApp channel..."
+  # Determine hardGate as JSON boolean
+  if [ "$HARD_GATE" = "1" ]; then
+    HARD_GATE_JSON="true"
+  else
+    HARD_GATE_JSON="false"
+  fi
+
+  echo "Generating gateway config with Cerebras provider + WhatsApp channel + identity plugins..."
   cat > "$CONFIG_FILE" <<CONF
 {
   "agents": {
@@ -64,6 +77,32 @@ if [ ! -f "$CONFIG_FILE" ] || ! grep -q '"allowFrom"' "$CONFIG_FILE" 2>/dev/null
       "allowedOrigins": ["*"]
     }
   },
+  "plugins": {
+    "enabled": true,
+    "entries": {
+      "persist-postgres": {
+        "enabled": true
+      },
+      "persist-user-identity": {
+        "enabled": true
+      },
+      "auth-memory-gate": {
+        "enabled": true,
+        "config": {
+          "hardGate": $HARD_GATE_JSON,
+          "requireVerified": false
+        }
+      },
+      "memory-graphiti": {
+        "enabled": true,
+        "config": {
+          "groupIdStrategy": "identity",
+          "autoCapture": true,
+          "autoRecall": true
+        }
+      }
+    }
+  },
   "models": {
     "mode": "merge",
     "providers": {
@@ -87,10 +126,16 @@ else
   echo "Existing config found at $CONFIG_FILE"
 fi
 
-# Validate Cerebras API key is set
+# Validate required environment variables
 if [ -z "${CEREBRAS_API_KEY:-}" ]; then
   echo "WARNING: CEREBRAS_API_KEY is not set. Model calls will fail."
   echo "Set it in Railway dashboard: Settings > Variables > CEREBRAS_API_KEY"
+fi
+
+if [ -z "${DATABASE_URL:-}" ]; then
+  echo "WARNING: DATABASE_URL is not set. Identity + persistence plugins will be disabled."
+  echo "Set it in Railway dashboard: Settings > Variables > DATABASE_URL"
+  echo "  e.g. postgresql://user:pass@host:5432/dbname"
 fi
 
 # Build auth args
