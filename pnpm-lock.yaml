@@ -243,7 +243,23 @@ importers:
         specifier: ^4.0.18
         version: 4.0.18(@opentelemetry/api@1.9.0)(@types/node@25.2.3)(@vitest/browser-playwright@4.0.18)(jiti@2.6.1)(lightningcss@1.30.2)(tsx@4.21.0)(yaml@2.8.2)
 
+  extensions/auth-memory-gate:
+    dependencies:
+      postgres:
+        specifier: ^3.4.5
+        version: 3.4.8
+    devDependencies:
+      openclaw:
+        specifier: workspace:*
+        version: link:../..
+
   extensions/bluebubbles:
+    devDependencies:
+      openclaw:
+        specifier: workspace:*
+        version: link:../..
+
+  extensions/catch-phrases:
     devDependencies:
       openclaw:
         specifier: workspace:*
@@ -403,6 +419,22 @@ importers:
         specifier: workspace:*
         version: link:../..
 
+  extensions/memory-graphiti:
+    dependencies:
+      '@getzep/zep-cloud':
+        specifier: ^3.16.0
+        version: 3.18.0
+      '@sinclair/typebox':
+        specifier: 0.34.48
+        version: 0.34.48
+      postgres:
+        specifier: ^3.4.5
+        version: 3.4.8
+    devDependencies:
+      openclaw:
+        specifier: workspace:*
+        version: link:../..
+
   extensions/memory-lancedb:
     dependencies:
       '@lancedb/lancedb':
@@ -485,6 +517,16 @@ importers:
         specifier: workspace:*
         version: link:../..
 
+  extensions/persist-user-identity:
+    dependencies:
+      postgres:
+        specifier: ^3.4.5
+        version: 3.4.8
+    devDependencies:
+      openclaw:
+        specifier: workspace:*
+        version: link:../..
+
   extensions/signal:
     devDependencies:
       openclaw:
@@ -492,6 +534,16 @@ importers:
         version: link:../..
 
   extensions/slack:
+    devDependencies:
+      openclaw:
+        specifier: workspace:*
+        version: link:../..
+
+  extensions/syntropy:
+    dependencies:
+      postgres:
+        specifier: ^3.4.5
+        version: 3.4.8
     devDependencies:
       openclaw:
         specifier: workspace:*
@@ -1078,6 +1130,10 @@ packages:
 
   '@eshaz/web-worker@1.2.2':
     resolution: {integrity: sha512-WxXiHFmD9u/owrzempiDlBB1ZYqiLnm9s6aPc8AlFQalq2tKmqdmMr9GXOupDgzXtqnBipj8Un0gkIm7Sjf8mw==}
+
+  '@getzep/zep-cloud@3.18.0':
+    resolution: {integrity: sha512-Yca399So17gt+rTEC9RmQYxd1EziB5U9fv7tqLOD4KXIsDEEXbpwSFOb76HgYuLy3jORBm2FOo9H7ZHM4jt6eQ==}
+    engines: {node: '>=18.0.0'}
 
   '@google/genai@1.41.0':
     resolution: {integrity: sha512-S4WGil+PG0NBQRAx+0yrQuM/TWOLn2gGEy5wn4IsoOI6ouHad0P61p3OWdhJ3aqr9kfj8o904i/jevfaGoGuIQ==}
@@ -6618,6 +6674,10 @@ snapshots:
 
   '@eshaz/web-worker@1.2.2':
     optional: true
+
+  '@getzep/zep-cloud@3.18.0':
+    dependencies:
+      zod: 3.25.76
 
   '@google/genai@1.41.0':
     dependencies:
