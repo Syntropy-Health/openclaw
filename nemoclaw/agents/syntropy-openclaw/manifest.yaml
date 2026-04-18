@@ -1,0 +1,100 @@
+# Syntropy Health agent manifest for NemoClaw.
+# Extends the base OpenClaw agent with WhatsApp messaging, Syntropy API
+# access, and 5 proprietary extensions for multi-tenant health data gateway.
+#
+# Copyright (c) 2026 Syntropy Health Inc. All rights reserved.
+# Proprietary and confidential.
+
+name: syntropy-openclaw
+display_name: "Syntropy Shrine (OpenClaw)"
+description: "Multi-channel health AI gateway with identity-scoped memory and 9 health tools"
+version_constraint: ">=2026.4.2"
+language: nodejs
+license: Proprietary
+homepage: "https://syntropyhealth.com"
+
+# ── Binary & process ────────────────────────────────────────────
+install_method: npm
+binary_path: /usr/local/bin/openclaw
+version_command: "openclaw --version"
+expected_version: "2026.4.2"
+gateway_command: "openclaw gateway run"
+
+# ── Health probe ────────────────────────────────────────────────
+health_probe:
+  url: "http://localhost:18789/"
+  port: 18789
+  timeout_seconds: 30
+
+# ── Dashboard / UI ──────────────────────────────────────────────
+forward_ports:
+  - 18789
+
+# ── Configuration ───────────────────────────────────────────────
+config:
+  immutable_dir: /sandbox/.openclaw
+  writable_dir: /sandbox/.openclaw-data
+  config_file: openclaw.json
+  format: json
+
+# ── State directories ──────────────────────────────────────────
+# Symlinked from immutable_dir -> writable_dir so the agent can
+# write state while the config directory stays Landlock read-only.
+state_dirs:
+  - agents
+  - extensions
+  - workspace
+  - skills
+  - hooks
+  - identity
+  - devices
+  - canvas
+  - cron
+  - memory
+  - telegram
+  - credentials
+
+# ── Authentication ──────────────────────────────────────────────
+device_pairing: true
+web_auth_method: device_pairing
+
+# ── Messaging platforms ─────────────────────────────────────────
+# Extends base OpenClaw with WhatsApp (primary Syntropy channel).
+messaging_platforms:
+  supported:
+    - telegram
+    - discord
+    - slack
+    - whatsapp
+
+# ── Inference ───────────────────────────────────────────────────
+# Routed through OpenShell inference gateway (inference.local).
+# Provider credentials stay on host, never enter the sandbox.
+inference:
+  provider_type: gateway_managed
+  proxy_support: explicit
+
+# ── Phone-home hosts ───────────────────────────────────────────
+# OpenClaw defaults plus Syntropy-specific endpoints.
+phone_home_hosts:
+  - openclaw.ai
+  - docs.openclaw.ai
+  - clawhub.ai
+  - api.syntropyhealth.com
+  - api.getzep.com
+
+# ── Package registry ───────────────────────────────────────────
+package_registry:
+  hosts:
+    - registry.npmjs.org
+  binary: /usr/local/bin/npm
+
+# ── Policy additions ───────────────────────────────────────────
+# Presets that should be applied alongside the base sandbox policy.
+_policy_additions:
+  presets:
+    - syntropy
+    - zep
+    - whatsapp
+    - postgresql
+    - slack

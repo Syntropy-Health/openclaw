@@ -119,3 +119,70 @@ The `fly.toml` in the repo root configures:
 - Region: `iad`
 - VM: `shared-cpu-2x`, 2048MB RAM
 - Persistent volume: `/data`
+
+## NemoClaw Deployment (Sandbox Mode)
+
+For production deployments requiring security hardening, run the gateway inside a [NemoClaw](https://github.com/NVIDIA/NemoClaw) sandbox. This adds:
+
+- **Filesystem isolation** (Landlock LSM) — agent can only write to `/sandbox/.openclaw-data`
+- **Network egress control** (deny-by-default L7 proxy) — only approved endpoints reachable
+- **Credential isolation** — secrets stay on host, never enter the sandbox
+- **Secret scanning** — blocks credential leakage into agent memory writes
+
+### Prerequisites
+
+- NemoClaw CLI: `npm install -g nemoclaw`
+- OpenShell runtime (installed during `nemoclaw onboard`)
+- Linux kernel 6.1+ for full Landlock support (best_effort fallback available)
+- 5GB disk, 2GB RAM minimum
+
+### Quick Start
+
+```bash
+cd nemoclaw/
+./scripts/deploy-syntropy.sh
+```
+
+Or step by step:
+
+```bash
+# 1. Stage config artifacts
+./scripts/deploy-syntropy.sh --stage-only
+
+# 2. Onboard with Syntropy agent
+nemoclaw onboard --agent syntropy-openclaw --inference-provider anthropic
+
+# 3. Apply combined network policy
+openshell policy set --policy nemoclaw/policies/syntropy-sandbox.yaml shrine-openclaw
+
+# 4. Validate
+./scripts/deploy-syntropy.sh --validate-only
+```
+
+### Network Policies
+
+The combined policy (`nemoclaw/policies/syntropy-sandbox.yaml`) allows egress to:
+
+| Endpoint                  | Protocol         | Purpose                          |
+| ------------------------- | ---------------- | -------------------------------- |
+| `api.syntropyhealth.com`  | REST             | MCP health tools, pairing verify |
+| `api.getzep.com`          | REST             | Graph memory (Zep Cloud)         |
+| `web.whatsapp.com`        | WebSocket        | WhatsApp message transport       |
+| `monorail.proxy.rlwy.net` | TCP              | PostgreSQL database              |
+| `*.slack.com`             | REST + WebSocket | Slack API + Socket Mode          |
+| `api.anthropic.com`       | REST             | Inference (Anthropic)            |
+
+All other egress is blocked. See `nemoclaw/README.md` for full details.
+
+### Credential Management
+
+Credentials are stored on the host at `~/.nemoclaw/credentials.json` and injected into the gateway process by OpenShell. They never appear inside the sandbox filesystem.
+
+### Troubleshooting
+
+| Issue                            | Solution                                                                             |
+| -------------------------------- | ------------------------------------------------------------------------------------ |
+| Gateway can't reach Syntropy API | Check `openshell policy get --full shrine-openclaw` for `syntropy_api` entry         |
+| WhatsApp WebSocket drops         | Verify `web.whatsapp.com` uses `access: full` (CONNECT tunnel), not `protocol: rest` |
+| DB connection refused            | Confirm PostgreSQL host in policy matches `DATABASE_URL` hostname                    |
+| "Landlock not available" warning | Kernel < 6.1 — runs in `best_effort` mode (functional but degraded isolation)        |

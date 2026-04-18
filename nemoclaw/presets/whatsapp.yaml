@@ -1,0 +1,43 @@
+# WhatsApp Web — network policy preset for NemoClaw sandbox.
+# Allows egress to WhatsApp endpoints for the Baileys WebSocket adapter.
+# WebSocket transport uses CONNECT tunnel to avoid HTTP idle timeout.
+#
+# Copyright (c) 2026 Syntropy Health Inc. All rights reserved.
+# Proprietary and confidential.
+
+preset:
+  name: whatsapp
+  description: "WhatsApp Web — Baileys WebSocket and media CDN"
+
+network_policies:
+  whatsapp:
+    name: whatsapp
+    endpoints:
+      # WebSocket for message transport — CONNECT tunnel required.
+      # Baileys maintains a persistent WebSocket connection; the L7
+      # proxy's HTTP idle timeout (~2 min) would kill it. Using
+      # access: full (CONNECT tunnel) avoids HTTP-level timeouts.
+      # Same pattern as Discord gateway (see NemoClaw #409).
+      - host: web.whatsapp.com
+        port: 443
+        access: full
+      # Media CDN for images, voice notes, and documents
+      - host: mmg.whatsapp.net
+        port: 443
+        protocol: rest
+        enforcement: enforce
+        tls: terminate
+        rules:
+          - allow: { method: GET, path: "/**" }
+          - allow: { method: POST, path: "/**" }
+      # Alternate media endpoint
+      - host: media.whatsapp.com
+        port: 443
+        protocol: rest
+        enforcement: enforce
+        tls: terminate
+        rules:
+          - allow: { method: GET, path: "/**" }
+          - allow: { method: POST, path: "/**" }
+    binaries:
+      - { path: /usr/local/bin/node }

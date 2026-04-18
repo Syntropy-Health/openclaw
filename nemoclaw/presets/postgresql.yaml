@@ -1,0 +1,39 @@
+# PostgreSQL — network policy preset for NemoClaw sandbox.
+# Allows raw TCP egress to the PostgreSQL database host.
+# Used by persist-user-identity, auth-memory-gate, memory-graphiti,
+# persist-postgres, and syntropy plugins for identity, tokens, and messages.
+#
+# NOTE: PostgreSQL uses a binary wire protocol over TCP, NOT HTTP.
+# Do not use protocol: rest or rules (method/path) — they don't apply.
+# Use access: full for raw TCP passthrough.
+#
+# The DB host varies by environment. Set the actual hostname when applying
+# this preset. Common hosts:
+#   - Railway:  <project>.railway.app
+#   - Supabase: db.<project>.supabase.co
+#   - Local:    localhost (not applicable in sandbox)
+#
+# Copyright (c) 2026 Syntropy Health Inc. All rights reserved.
+# Proprietary and confidential.
+
+preset:
+  name: postgresql
+  description: "PostgreSQL database — identity, tokens, and message persistence"
+
+network_policies:
+  postgresql:
+    name: postgresql
+    endpoints:
+      # Production database (Railway)
+      # Replace this host with the actual Railway PostgreSQL hostname
+      # before applying the policy.
+      - host: monorail.proxy.rlwy.net
+        port: 5432
+        access: full
+      # Staging database (Supabase) — optional
+      # Uncomment and set the actual hostname if using Supabase.
+      # - host: db.example.supabase.co
+      #   port: 5432
+      #   access: full
+    binaries:
+      - { path: /usr/local/bin/node }
