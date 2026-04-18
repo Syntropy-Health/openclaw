@@ -55,6 +55,7 @@
         "enabled": true,
         "config": {
           "hardGate": true,
+          "$comment:requireVerified": "false allows users to interact with the bot during the pairing flow itself (!verify command). hardGate blocks health tool access for unverified users independently.",
           "requireVerified": false
         }
       },

@@ -25,9 +25,10 @@ network_policies:
     name: postgresql
     endpoints:
       # Production database (Railway)
-      # Replace this host with the actual Railway PostgreSQL hostname
-      # before applying the policy.
-      - host: monorail.proxy.rlwy.net
+      # IMPORTANT: Replace this placeholder with your actual Railway
+      # PostgreSQL hostname (e.g., containers-us-west-NNN.railway.app)
+      # before applying the policy. The placeholder will fail immediately.
+      - host: REPLACE_ME.railway.app
         port: 5432
         access: full
       # Staging database (Supabase) — optional

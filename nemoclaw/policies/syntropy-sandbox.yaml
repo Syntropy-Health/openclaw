@@ -259,11 +259,12 @@ network_policies:
       - { path: /usr/local/bin/node }
 
   # PostgreSQL — identity DB, token storage, message persistence
-  # IMPORTANT: Update host to match your actual DB hostname.
+  # IMPORTANT: Replace placeholder with your actual DB hostname
+  # (e.g., containers-us-west-NNN.railway.app) before applying.
   postgresql:
     name: postgresql
     endpoints:
-      - host: monorail.proxy.rlwy.net
+      - host: REPLACE_ME.railway.app
         port: 5432
         access: full
     binaries:
@@ -277,6 +278,7 @@ network_policies:
         port: 443
         protocol: rest
         enforcement: enforce
+        tls: terminate
         rules:
           - allow: { method: GET, path: "/**" }
           - allow: { method: POST, path: "/**" }
@@ -284,6 +286,7 @@ network_policies:
         port: 443
         protocol: rest
         enforcement: enforce
+        tls: terminate
         rules:
           - allow: { method: GET, path: "/**" }
           - allow: { method: POST, path: "/**" }
@@ -291,6 +294,7 @@ network_policies:
         port: 443
         protocol: rest
         enforcement: enforce
+        tls: terminate
         rules:
           - allow: { method: GET, path: "/**" }
           - allow: { method: POST, path: "/**" }

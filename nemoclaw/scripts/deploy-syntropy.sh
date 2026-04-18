@@ -139,9 +139,23 @@ deploy() {
   done
 
   # Copy sandbox-adapted openclaw.json
-  openshell sandbox cp \
-    "$NEMOCLAW_CONFIG_DIR/config/openclaw.json" \
-    "$SANDBOX_NAME:/sandbox/.openclaw/openclaw.json"
+  # NOTE: /sandbox/.openclaw is read-only under Landlock. The config must
+  # be staged BEFORE the sandbox arms its filesystem policy. We use
+  # openshell sandbox cp with --pre-start which copies into the image
+  # layer before Landlock is applied. If --pre-start is not available,
+  # fall back to shields-down copy.
+  if openshell sandbox cp --help 2>&1 | grep -q "pre-start"; then
+    openshell sandbox cp --pre-start \
+      "$NEMOCLAW_CONFIG_DIR/config/openclaw.json" \
+      "$SANDBOX_NAME:/sandbox/.openclaw/openclaw.json"
+  else
+    log_warn "  --pre-start not available; using shields-down copy"
+    openshell shields down "$SANDBOX_NAME" --reason "staging openclaw.json" --timeout 30
+    openshell sandbox cp \
+      "$NEMOCLAW_CONFIG_DIR/config/openclaw.json" \
+      "$SANDBOX_NAME:/sandbox/.openclaw/openclaw.json"
+    openshell shields up "$SANDBOX_NAME"
+  fi
   log_info "  Config: openclaw.json"
 
   # Apply combined policy if available
