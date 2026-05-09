@@ -3,11 +3,55 @@
  *
  * Each tool wraps a Syntropy MCP tool, calling it via HTTP with the
  * user's stored API token (standard Bearer auth).
+ *
+ * ──────────────────────────────────────────────────────────────────────────
+ * Schema source of truth
+ * ──────────────────────────────────────────────────────────────────────────
+ * Tool argument shapes here MUST stay aligned with the Syntropy contracts:
+ *
+ *   Canonical Pydantic models:
+ *     apps/Syntropy-Journals/syntropy_journals/app/data/schemas/contracts.py
+ *     (StrEnum classes: MealType, CheckInType, etc.)
+ *
+ *   Generated JSON Schema (consumed by chrome-shrine, shopify-protocols, mobile):
+ *     shared/schemas/syntropy.schema.json (in SyntropyHealth-Applications monorepo)
+ *
+ * The SJ MCP server validates payloads server-side; mismatches here cause
+ * the LLM to send invalid args (e.g. omitting valid enum values from the
+ * tool surface), which manifests as user-visible 4xx responses on the SJ
+ * `/mcp` endpoint. Keep enums encoded as TypeBox literal unions so the
+ * agent sees the exact valid values.
+ *
+ * If you find drift, fix it here (or, better, generate from the canonical
+ * JSON Schema — tracked in the parent monorepo's plan).
  */
 
 import type { AgentToolResult } from "@mariozechner/pi-agent-core";
 import { Type, type TObject } from "@sinclair/typebox";
 import { callSyntropyTool, type SyntropyToolResult } from "./client.js";
+
+// ---------------------------------------------------------------------------
+// Schema-aligned enums (mirror StrEnum values from contracts.py)
+// ---------------------------------------------------------------------------
+
+/**
+ * `MealType` — mirrors `contracts.py:MealType` (6 values).
+ *
+ * Encoded as a Union of Literals so the LLM sees exactly the valid enum
+ * values in the tool schema, and TypeBox rejects unknown values before
+ * the network call to the SJ MCP.
+ */
+const MealTypeSchema = Type.Union(
+  [
+    Type.Literal("breakfast"),
+    Type.Literal("lunch"),
+    Type.Literal("dinner"),
+    Type.Literal("snack"),
+    Type.Literal("supplement"),
+    Type.Literal("beverage"),
+  ],
+  { description: "Meal type — one of: breakfast, lunch, dinner, snack, supplement, beverage" },
+);
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -49,7 +93,7 @@ const TOOL_DEFS: ToolDef[] = [
       "Log a food entry to the user's Syntropy health journal with optional macro breakdown.",
     parameters: Type.Object({
       food_name: Type.String({ description: "Food item name or description" }),
-      meal_type: Type.Optional(Type.String({ description: "breakfast, lunch, dinner, or snack" })),
+      meal_type: Type.Optional(MealTypeSchema),
       calories: Type.Optional(Type.Number({ description: "Calories" })),
       protein: Type.Optional(Type.Number({ description: "Protein in grams" })),
       carbs: Type.Optional(Type.Number({ description: "Carbs in grams" })),
@@ -113,7 +157,7 @@ const TOOL_DEFS: ToolDef[] = [
       "Parse natural language food description into structured entries with macro totals.",
     parameters: Type.Object({
       food_text: Type.String({ description: "Natural language food description" }),
-      meal_type: Type.Optional(Type.String({ description: "breakfast, lunch, dinner, or snack" })),
+      meal_type: Type.Optional(MealTypeSchema),
     }),
   },
   {
