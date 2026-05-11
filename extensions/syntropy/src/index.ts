@@ -24,25 +24,8 @@
 import type { OpenClawPluginApi } from "openclaw/plugin-sdk";
 import postgres from "postgres";
 import { ensureSyntropySchema } from "./db.js";
+import { deriveChannel, derivePeerId } from "./session-key.js";
 import { createAllTools } from "./tools.js";
-
-// ---------------------------------------------------------------------------
-// Session key parsing (inlined to avoid cross-extension dependency)
-// ---------------------------------------------------------------------------
-
-function deriveChannel(sessionKey: string): string {
-  const parts = sessionKey.split(":");
-  return parts.length >= 3 && parts[0] === "agent" ? parts[2] : "unknown";
-}
-
-function derivePeerId(sessionKey: string): string {
-  const parts = sessionKey.split(":");
-  if (parts.length < 3 || parts[0] !== "agent") return sessionKey;
-  const rest = parts.slice(2);
-  const directIdx = rest.indexOf("direct");
-  if (directIdx >= 0 && directIdx < rest.length - 1) return rest.slice(directIdx + 1).join(":");
-  return rest.length >= 2 ? rest.slice(1).join(":") : (rest[0] ?? sessionKey);
-}
 
 // ---------------------------------------------------------------------------
 // Identity + token resolution
