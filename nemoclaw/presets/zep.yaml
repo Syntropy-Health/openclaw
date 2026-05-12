@@ -1,0 +1,31 @@
+# Zep Cloud — network policy preset for NemoClaw sandbox.
+# Allows egress to the Zep Cloud API for graph-based conversation memory.
+# Used by the memory-graphiti plugin for auto-recall and auto-capture.
+#
+# Copyright (c) 2026 Syntropy Health Inc. All rights reserved.
+# Proprietary and confidential.
+
+preset:
+  name: zep
+  description: "Zep Cloud — graph memory for identity-scoped conversations"
+
+network_policies:
+  zep_cloud:
+    name: zep_cloud
+    endpoints:
+      - host: api.getzep.com
+        port: 443
+        protocol: rest
+        enforcement: enforce
+        tls: terminate
+        rules:
+          # Memory search and episode retrieval
+          - allow: { method: GET, path: "/**" }
+          # Memory capture, graph operations
+          - allow: { method: POST, path: "/**" }
+          # Session/user updates
+          - allow: { method: PUT, path: "/**" }
+          # Memory deletion
+          - allow: { method: DELETE, path: "/**" }
+    binaries:
+      - { path: /usr/local/bin/node }

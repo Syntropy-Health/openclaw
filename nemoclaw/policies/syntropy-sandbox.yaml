@@ -1,0 +1,308 @@
+# Combined sandbox policy for Syntropy Health OpenClaw gateway.
+# Merges the base NemoClaw OpenClaw sandbox policy with Syntropy-specific
+# presets: syntropy API, Zep Cloud, WhatsApp, PostgreSQL, and Slack.
+#
+# Apply with:
+#   openshell policy set --policy syntropy-sandbox.yaml shrine-openclaw
+#
+# Base policy: NemoClaw/nemoclaw-blueprint/policies/openclaw-sandbox.yaml
+# Additional presets: syntropy, zep, whatsapp, postgresql, slack
+#
+# Copyright (c) 2026 Syntropy Health Inc. All rights reserved.
+# Proprietary and confidential.
+
+version: 1
+
+filesystem_policy:
+  # SECURITY: must be false — see NemoClaw #804
+  include_workdir: false
+  read_only:
+    - /usr
+    - /lib
+    - /proc
+    - /dev/urandom
+    - /app
+    - /etc
+    - /var/log
+    - /sandbox
+    - /sandbox/.openclaw
+  read_write:
+    - /tmp
+    - /dev/null
+    - /sandbox/.openclaw-data
+    - /sandbox/.nemoclaw
+
+landlock:
+  compatibility: best_effort
+
+process:
+  run_as_user: sandbox
+  run_as_group: sandbox
+
+network_policies:
+
+  # ── Base OpenClaw policies (from NemoClaw defaults) ────────────
+
+  claude_code:
+    name: claude_code
+    endpoints:
+      - host: api.anthropic.com
+        port: 443
+        protocol: rest
+        enforcement: enforce
+        tls: terminate
+        rules:
+          - allow: { method: POST, path: "/v1/messages" }
+          - allow: { method: POST, path: "/v1/messages/batches" }
+          - allow: { method: GET, path: "/v1/messages/batches/**" }
+          - allow: { method: POST, path: "/v1/complete" }
+      - host: statsig.anthropic.com
+        port: 443
+        protocol: rest
+        enforcement: enforce
+        tls: terminate
+        rules:
+          - allow: { method: POST, path: "/**" }
+      - host: sentry.io
+        port: 443
+        protocol: rest
+        enforcement: enforce
+        tls: terminate
+        rules:
+          - allow: { method: GET, path: "/**" }
+    binaries:
+      - { path: /usr/local/bin/claude }
+
+  nvidia:
+    name: nvidia
+    endpoints:
+      - host: integrate.api.nvidia.com
+        port: 443
+        protocol: rest
+        enforcement: enforce
+        tls: terminate
+        rules:
+          - allow: { method: POST, path: "/v1/chat/completions" }
+          - allow: { method: POST, path: "/v1/completions" }
+          - allow: { method: POST, path: "/v1/embeddings" }
+          - allow: { method: GET, path: "/v1/models" }
+          - allow: { method: GET, path: "/v1/models/**" }
+      - host: inference-api.nvidia.com
+        port: 443
+        protocol: rest
+        enforcement: enforce
+        tls: terminate
+        rules:
+          - allow: { method: POST, path: "/v1/chat/completions" }
+          - allow: { method: POST, path: "/v1/completions" }
+          - allow: { method: POST, path: "/v1/embeddings" }
+          - allow: { method: GET, path: "/v1/models" }
+          - allow: { method: GET, path: "/v1/models/**" }
+    binaries:
+      - { path: /usr/local/bin/claude }
+      - { path: /usr/local/bin/openclaw }
+
+  clawhub:
+    name: clawhub
+    endpoints:
+      - host: clawhub.ai
+        port: 443
+        protocol: rest
+        enforcement: enforce
+        tls: terminate
+        rules:
+          - allow: { method: GET, path: "/**" }
+          - allow: { method: POST, path: "/**" }
+    binaries:
+      - { path: /usr/local/bin/openclaw }
+      - { path: /usr/local/bin/node }
+
+  openclaw_api:
+    name: openclaw_api
+    endpoints:
+      - host: openclaw.ai
+        port: 443
+        protocol: rest
+        enforcement: enforce
+        tls: terminate
+        rules:
+          - allow: { method: GET, path: "/**" }
+          - allow: { method: POST, path: "/**" }
+    binaries:
+      - { path: /usr/local/bin/openclaw }
+      - { path: /usr/local/bin/node }
+
+  openclaw_docs:
+    name: openclaw_docs
+    endpoints:
+      - host: docs.openclaw.ai
+        port: 443
+        protocol: rest
+        enforcement: enforce
+        tls: terminate
+        rules:
+          - allow: { method: GET, path: "/**" }
+    binaries:
+      - { path: /usr/local/bin/openclaw }
+
+  npm_registry:
+    name: npm_registry
+    endpoints:
+      - host: registry.npmjs.org
+        port: 443
+        protocol: rest
+        enforcement: enforce
+        tls: terminate
+        rules:
+          - allow: { method: GET, path: "/**" }
+    binaries:
+      - { path: /usr/local/bin/openclaw }
+
+  telegram:
+    name: telegram
+    endpoints:
+      - host: api.telegram.org
+        port: 443
+        protocol: rest
+        enforcement: enforce
+        tls: terminate
+        rules:
+          - allow: { method: GET, path: "/bot*/**" }
+          - allow: { method: POST, path: "/bot*/**" }
+          - allow: { method: GET, path: "/file/bot*/**" }
+    binaries:
+      - { path: /usr/local/bin/node }
+
+  discord:
+    name: discord
+    endpoints:
+      - host: discord.com
+        port: 443
+        protocol: rest
+        enforcement: enforce
+        tls: terminate
+        rules:
+          - allow: { method: GET, path: "/**" }
+          - allow: { method: POST, path: "/**" }
+      - host: gateway.discord.gg
+        port: 443
+        access: full
+      - host: cdn.discordapp.com
+        port: 443
+        protocol: rest
+        enforcement: enforce
+        tls: terminate
+        rules:
+          - allow: { method: GET, path: "/**" }
+    binaries:
+      - { path: /usr/local/bin/node }
+
+  # ── Syntropy-specific policies ─────────────────────────────────
+
+  # Syntropy Health API — MCP health tools + pairing verification
+  syntropy_api:
+    name: syntropy_api
+    endpoints:
+      - host: api.syntropyhealth.com
+        port: 443
+        protocol: rest
+        enforcement: enforce
+        tls: terminate
+        rules:
+          - allow: { method: POST, path: "/mcp" }
+          - allow: { method: POST, path: "/api/ext/pairing/verify" }
+          - allow: { method: GET, path: "/api/ext/users/search" }
+    binaries:
+      - { path: /usr/local/bin/node }
+
+  # Zep Cloud — graph memory backend for identity-scoped conversations
+  zep_cloud:
+    name: zep_cloud
+    endpoints:
+      - host: api.getzep.com
+        port: 443
+        protocol: rest
+        enforcement: enforce
+        tls: terminate
+        rules:
+          - allow: { method: GET, path: "/**" }
+          - allow: { method: POST, path: "/**" }
+          - allow: { method: PUT, path: "/**" }
+          - allow: { method: DELETE, path: "/**" }
+    binaries:
+      - { path: /usr/local/bin/node }
+
+  # WhatsApp Web — Baileys WebSocket + media CDN
+  whatsapp:
+    name: whatsapp
+    endpoints:
+      - host: web.whatsapp.com
+        port: 443
+        access: full
+      - host: mmg.whatsapp.net
+        port: 443
+        protocol: rest
+        enforcement: enforce
+        tls: terminate
+        rules:
+          - allow: { method: GET, path: "/**" }
+          - allow: { method: POST, path: "/**" }
+      - host: media.whatsapp.com
+        port: 443
+        protocol: rest
+        enforcement: enforce
+        tls: terminate
+        rules:
+          - allow: { method: GET, path: "/**" }
+          - allow: { method: POST, path: "/**" }
+    binaries:
+      - { path: /usr/local/bin/node }
+
+  # PostgreSQL — identity DB, token storage, message persistence
+  # IMPORTANT: Replace placeholder with your actual DB hostname
+  # (e.g., containers-us-west-NNN.railway.app) before applying.
+  postgresql:
+    name: postgresql
+    endpoints:
+      - host: REPLACE_ME.railway.app
+        port: 5432
+        access: full
+    binaries:
+      - { path: /usr/local/bin/node }
+
+  # Slack — Socket Mode WebSocket + REST API
+  slack:
+    name: slack
+    endpoints:
+      - host: slack.com
+        port: 443
+        protocol: rest
+        enforcement: enforce
+        tls: terminate
+        rules:
+          - allow: { method: GET, path: "/**" }
+          - allow: { method: POST, path: "/**" }
+      - host: api.slack.com
+        port: 443
+        protocol: rest
+        enforcement: enforce
+        tls: terminate
+        rules:
+          - allow: { method: GET, path: "/**" }
+          - allow: { method: POST, path: "/**" }
+      - host: hooks.slack.com
+        port: 443
+        protocol: rest
+        enforcement: enforce
+        tls: terminate
+        rules:
+          - allow: { method: GET, path: "/**" }
+          - allow: { method: POST, path: "/**" }
+      - host: wss-primary.slack.com
+        port: 443
+        access: full
+      - host: wss-backup.slack.com
+        port: 443
+        access: full
+    binaries:
+      - { path: /usr/local/bin/node }

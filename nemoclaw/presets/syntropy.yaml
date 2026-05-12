@@ -1,0 +1,29 @@
+# Syntropy Health API — network policy preset for NemoClaw sandbox.
+# Allows egress to the Syntropy MCP endpoint (health tools) and
+# pairing verification endpoint (identity linking).
+#
+# Copyright (c) 2026 Syntropy Health Inc. All rights reserved.
+# Proprietary and confidential.
+
+preset:
+  name: syntropy
+  description: "Syntropy Health API — pairing verification, MCP health tools"
+
+network_policies:
+  syntropy_api:
+    name: syntropy_api
+    endpoints:
+      - host: api.syntropyhealth.com
+        port: 443
+        protocol: rest
+        enforcement: enforce
+        tls: terminate
+        rules:
+          # JSON-RPC MCP endpoint — 9 health tools (log_food, get_diet_score, etc.)
+          - allow: { method: POST, path: "/mcp" }
+          # Pairing code verification — called by persist-user-identity on !verify
+          - allow: { method: POST, path: "/api/ext/pairing/verify" }
+          # User lookup — called by persist-user-identity on !identify
+          - allow: { method: GET, path: "/api/ext/users/search" }
+    binaries:
+      - { path: /usr/local/bin/node }

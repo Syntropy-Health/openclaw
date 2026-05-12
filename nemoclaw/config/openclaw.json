@@ -1,0 +1,106 @@
+{
+  "$comment": "Sandbox-adapted config for NemoClaw deployment. Credentials are injected by OpenShell into the gateway process — never hardcode secrets here. Production URLs replace localhost references from the dev config.",
+  "agents": {
+    "defaults": {
+      "model": {
+        "primary": "cerebras/qwen-3-235b-a22b-instruct-2507"
+      }
+    }
+  },
+  "session": {
+    "dmScope": "per-channel-peer"
+  },
+  "channels": {
+    "slack": {
+      "enabled": true,
+      "mode": "socket",
+      "dmPolicy": "open",
+      "allowFrom": ["*"]
+    },
+    "whatsapp": {
+      "enabled": true,
+      "dmPolicy": "open",
+      "allowFrom": ["*"]
+    }
+  },
+  "plugins": {
+    "enabled": true,
+    "allow": [
+      "persist-user-identity",
+      "persist-postgres",
+      "auth-memory-gate",
+      "memory-graphiti",
+      "voice-call",
+      "whatsapp",
+      "catch-phrases",
+      "syntropy"
+    ],
+    "entries": {
+      "persist-user-identity": {
+        "enabled": true,
+        "config": {
+          "auth": {
+            "mode": "passcode-endpoint",
+            "passcodeVerifyUrl": "https://api.syntropyhealth.com/api/ext/pairing/verify",
+            "userLookupUrl": "https://api.syntropyhealth.com/api/ext/users/search",
+            "apiToken": ""
+          }
+        }
+      },
+      "persist-postgres": {
+        "enabled": true,
+        "config": {}
+      },
+      "auth-memory-gate": {
+        "enabled": true,
+        "config": {
+          "hardGate": true,
+          "$comment:requireVerified": "false allows users to interact with the bot during the pairing flow itself (!verify command). hardGate blocks health tool access for unverified users independently.",
+          "requireVerified": false
+        }
+      },
+      "memory-graphiti": {
+        "enabled": true,
+        "config": {
+          "groupIdStrategy": "identity",
+          "autoCapture": true,
+          "autoRecall": true,
+          "maxFacts": 10
+        }
+      },
+      "voice-call": {
+        "enabled": true,
+        "config": {
+          "provider": "twilio",
+          "inboundPolicy": "open",
+          "serve": {
+            "port": 3001,
+            "bind": "0.0.0.0",
+            "path": "/webhook/voice"
+          }
+        }
+      },
+      "catch-phrases": {
+        "enabled": true,
+        "config": {
+          "phrases": [
+            {
+              "trigger": "I want to bring health & joy to the world",
+              "response": "Aye aye, that's the way to a prosperous race! I'm happy you found me to champion the mission",
+              "matchMode": "startsWith"
+            }
+          ]
+        }
+      },
+      "syntropy": {
+        "enabled": true,
+        "config": {
+          "syntropyBaseUrl": "https://api.syntropyhealth.com"
+        }
+      }
+    },
+    "slots": {
+      "memory": "memory-graphiti"
+    }
+  }
+}
