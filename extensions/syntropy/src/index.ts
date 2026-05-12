@@ -27,6 +27,7 @@ import { TtlCache } from "./cache.js";
 import { parseSyntropyConfig } from "./config.js";
 import { ensureSyntropySchema } from "./db.js";
 import { createAllTools } from "./tools.js";
+import { createSupabaseVault, type SyntropyVault } from "./vault.js";
 
 // Per-session ResolvedUser cache parameters — bounded to prevent unbounded
 // growth on long-running gateways. 10 min TTL means stale tokens drop out
@@ -65,11 +66,12 @@ interface ResolvedUser {
 
 async function resolveUser(
   sql: postgres.Sql,
+  vault: SyntropyVault | null,
   channel: string,
   peerId: string,
 ): Promise<ResolvedUser | null> {
   const rows = await sql`
-    SELECT u.id, u.external_id, st.auth_token
+    SELECT u.id, u.external_id, st.auth_token, st.vault_secret_name
     FROM lp_users u
     JOIN lp_user_channels uc ON uc.user_id = u.id
     LEFT JOIN syntropy_tokens st ON st.user_id = u.id
@@ -78,11 +80,23 @@ async function resolveUser(
     LIMIT 1
   `;
   const row = rows[0];
-  if (!row?.external_id || !row?.auth_token) return null;
+  if (!row?.external_id) return null;
+
+  // Prefer vault path (post-migration); fall back to legacy plaintext (pre-migration).
+  let authToken: string | null = null;
+  const vaultSecretName = row.vault_secret_name as string | null;
+  if (vaultSecretName && vault) {
+    authToken = await vault.get(vaultSecretName);
+  } else if (row.auth_token) {
+    authToken = row.auth_token as string;
+  }
+
+  if (!authToken) return null;
+
   return {
     userId: row.id as string,
     externalId: row.external_id as string,
-    authToken: row.auth_token as string,
+    authToken,
   };
 }
 
@@ -123,15 +137,25 @@ const syntropyPlugin = {
       );
       return;
     }
-    const { syntropyBaseUrl, databaseUrl } = config;
+    const { syntropyBaseUrl, databaseUrl, supabaseUrl, supabaseServiceRoleKey } = config;
 
     const sql = postgres(databaseUrl, { max: 5 });
+
+    // Supabase Vault is the production storage for `sj_*` tokens.
+    // In dev, Supabase credentials are optional — the plugin falls back to
+    // the legacy plaintext `auth_token` column (see db.ts and resolveUser).
+    const vault: SyntropyVault | null =
+      supabaseUrl && supabaseServiceRoleKey
+        ? createSupabaseVault(supabaseUrl, supabaseServiceRoleKey)
+        : null;
 
     ensureSyntropySchema(sql).catch((err) =>
       api.logger.error(`syntropy: schema init failed: ${err}`),
     );
 
-    api.logger.info(`syntropy: enabled (base=${syntropyBaseUrl})`);
+    api.logger.info(
+      `syntropy: enabled (base=${syntropyBaseUrl}, vault=${vault ? "supabase" : "legacy-plaintext"})`,
+    );
 
     // Cache resolved user per session key — populated by before_agent_start,
     // consumed by the synchronous tool factory. Bounded by TTL + size so
@@ -156,7 +180,7 @@ const syntropyPlugin = {
           if (!peerId || peerId === "main" || peerId === "unknown") return {};
 
           const cacheKey = `${channel}:${peerId}`;
-          const user = await resolveUser(sql, channel, peerId);
+          const user = await resolveUser(sql, vault, channel, peerId);
 
           if (!user) {
             resolvedUsers.delete(cacheKey);

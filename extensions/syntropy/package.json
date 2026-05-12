@@ -5,6 +5,7 @@
   "description": "Syntropy Health integration — identity gate, token storage, health tools",
   "type": "module",
   "dependencies": {
+    "@supabase/supabase-js": "^2.105.4",
     "postgres": "^3.4.5"
   },
   "devDependencies": {

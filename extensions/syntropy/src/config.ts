@@ -24,6 +24,11 @@ import { Value } from "@sinclair/typebox/value";
 const ConfigSchema = Type.Object({
   syntropyBaseUrl: Type.String({ minLength: 1 }),
   databaseUrl: Type.String({ minLength: 1 }),
+  // Supabase Vault credentials — required in production for token storage.
+  // Optional in dev so the plugin can run without Supabase against a legacy
+  // plaintext fallback path (see resolveUser).
+  supabaseUrl: Type.Optional(Type.String({ minLength: 1 })),
+  supabaseServiceRoleKey: Type.Optional(Type.String({ minLength: 1 })),
 });
 
 function isValidUrl(s: string): boolean {
@@ -85,9 +90,27 @@ export function parseSyntropyConfig(
         ? env.DATABASE_URL
         : undefined;
 
+  const supabaseUrl =
+    typeof input.supabaseUrl === "string" && input.supabaseUrl.length > 0
+      ? input.supabaseUrl
+      : typeof env.SUPABASE_URL === "string" && env.SUPABASE_URL.length > 0
+        ? env.SUPABASE_URL
+        : undefined;
+
+  const supabaseServiceRoleKey =
+    typeof input.supabaseServiceRoleKey === "string" && input.supabaseServiceRoleKey.length > 0
+      ? input.supabaseServiceRoleKey
+      : typeof env.SUPABASE_SERVICE_ROLE_KEY === "string" &&
+          env.SUPABASE_SERVICE_ROLE_KEY.length > 0
+        ? env.SUPABASE_SERVICE_ROLE_KEY
+        : undefined;
+
   const candidate: Record<string, unknown> = {};
   if (syntropyBaseUrl !== undefined) candidate.syntropyBaseUrl = syntropyBaseUrl;
   if (databaseUrl !== undefined) candidate.databaseUrl = databaseUrl;
+  if (supabaseUrl !== undefined) candidate.supabaseUrl = supabaseUrl;
+  if (supabaseServiceRoleKey !== undefined)
+    candidate.supabaseServiceRoleKey = supabaseServiceRoleKey;
 
   const envLabel = isProduction ? "production" : env.NODE_ENV || "development";
 
@@ -105,9 +128,29 @@ export function parseSyntropyConfig(
     );
   }
 
+  // Production demands Supabase Vault for token storage — fail-fast on missing.
+  if (isProduction) {
+    const missing: string[] = [];
+    if (candidate.supabaseUrl === undefined) missing.push("supabaseUrl");
+    if (candidate.supabaseServiceRoleKey === undefined) missing.push("supabaseServiceRoleKey");
+    if (missing.length > 0) {
+      throw new Error(
+        `syntropy plugin config invalid (NODE_ENV=${envLabel}): missing required field(s): ${missing.join(", ")}`,
+      );
+    }
+  }
+
+  if (candidate.supabaseUrl !== undefined && !isValidUrl(candidate.supabaseUrl as string)) {
+    throw new Error(
+      `syntropy plugin config invalid (NODE_ENV=${envLabel}): /supabaseUrl: must be a parseable URL`,
+    );
+  }
+
   // Return only the validated shape — strips any extra fields the caller passed in.
   return {
     syntropyBaseUrl: candidate.syntropyBaseUrl as string,
     databaseUrl: candidate.databaseUrl as string,
+    supabaseUrl: candidate.supabaseUrl as string | undefined,
+    supabaseServiceRoleKey: candidate.supabaseServiceRoleKey as string | undefined,
   };
 }
