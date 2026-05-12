@@ -22,36 +22,30 @@
  * `/mcp` endpoint. Keep enums encoded as TypeBox literal unions so the
  * agent sees the exact valid values.
  *
- * If you find drift, fix it here (or, better, generate from the canonical
- * JSON Schema — tracked in the parent monorepo's plan).
+ * Enum schemas (`MealTypeSchema`, etc.) are imported from `./generated/`
+ * — auto-generated from `shared/schemas/enums.json` in the parent monorepo.
+ * Schema-drift CI catches divergence between this generated file and the
+ * canonical source. The other 8 tools use simple primitives (string/number)
+ * with no drift risk.
  */
 
 import type { AgentToolResult } from "@mariozechner/pi-agent-core";
 import { Type, type TObject } from "@sinclair/typebox";
 import { callSyntropyTool, type SyntropyToolResult } from "./client.js";
+import { MealTypeSchema } from "./generated/enums.generated.js";
 
 // ---------------------------------------------------------------------------
-// Schema-aligned enums (mirror StrEnum values from contracts.py)
+// Schema-aligned enums
 // ---------------------------------------------------------------------------
-
-/**
- * `MealType` — mirrors `contracts.py:MealType` (6 values).
- *
- * Encoded as a Union of Literals so the LLM sees exactly the valid enum
- * values in the tool schema, and TypeBox rejects unknown values before
- * the network call to the SJ MCP.
- */
-const MealTypeSchema = Type.Union(
-  [
-    Type.Literal("breakfast"),
-    Type.Literal("lunch"),
-    Type.Literal("dinner"),
-    Type.Literal("snack"),
-    Type.Literal("supplement"),
-    Type.Literal("beverage"),
-  ],
-  { description: "Meal type — one of: breakfast, lunch, dinner, snack, supplement, beverage" },
-);
+//
+// `MealTypeSchema` and any other enum-typed tool arguments are generated
+// from `shared/schemas/enums.json` (the monorepo's canonical schema source)
+// via `npm run codegen:openclaw-enums` in `shared/schemas/`. The output
+// lives in `./generated/enums.generated.ts` and is checked in. Schema-drift
+// CI fails any PR that diverges the generated file from `enums.json`.
+//
+// To add a new enum to this file, append its name to `ENUMS_TO_EMIT` in
+// `shared/schemas/scripts/generate-typebox-enums.mjs` then regenerate.
 
 // ---------------------------------------------------------------------------
 // Helpers
