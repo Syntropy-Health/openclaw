@@ -23,8 +23,17 @@
 
 import type { OpenClawPluginApi } from "openclaw/plugin-sdk";
 import postgres from "postgres";
+import { TtlCache } from "./cache.js";
+import { parseSyntropyConfig } from "./config.js";
 import { ensureSyntropySchema } from "./db.js";
 import { createAllTools } from "./tools.js";
+
+// Per-session ResolvedUser cache parameters — bounded to prevent unbounded
+// growth on long-running gateways. 10 min TTL means stale tokens drop out
+// after server-side rotation; 10k entries comfortably exceeds expected
+// active-user count per gateway instance.
+const USER_CACHE_TTL_MS = 10 * 60 * 1000;
+const USER_CACHE_MAX_SIZE = 10_000;
 
 // ---------------------------------------------------------------------------
 // Session key parsing (inlined to avoid cross-extension dependency)
@@ -100,15 +109,21 @@ const syntropyPlugin = {
     "Requires persist-user-identity and auth-memory-gate plugins.",
 
   register(api: OpenClawPluginApi) {
-    const baseUrl =
-      (api.pluginConfig?.syntropyBaseUrl as string | undefined) ?? "http://localhost:3000";
-    const databaseUrl =
-      (api.pluginConfig?.databaseUrl as string | undefined) ?? process.env.DATABASE_URL ?? "";
-
-    if (!databaseUrl) {
-      api.logger.warn("syntropy: no databaseUrl or DATABASE_URL — plugin disabled");
+    let config;
+    try {
+      config = parseSyntropyConfig(
+        api.pluginConfig as Record<string, unknown> | undefined,
+        process.env,
+      );
+    } catch (err) {
+      // In production, missing config is a fail-fast: don't silently route to
+      // localhost. In dev, parseSyntropyConfig falls back gracefully.
+      api.logger.error(
+        `syntropy: ${err instanceof Error ? err.message : String(err)} — plugin disabled`,
+      );
       return;
     }
+    const { syntropyBaseUrl, databaseUrl } = config;
 
     const sql = postgres(databaseUrl, { max: 5 });
 
@@ -116,11 +131,15 @@ const syntropyPlugin = {
       api.logger.error(`syntropy: schema init failed: ${err}`),
     );
 
-    api.logger.info(`syntropy: enabled (base=${baseUrl})`);
+    api.logger.info(`syntropy: enabled (base=${syntropyBaseUrl})`);
 
     // Cache resolved user per session key — populated by before_agent_start,
-    // consumed by the synchronous tool factory.
-    const resolvedUsers = new Map<string, ResolvedUser>();
+    // consumed by the synchronous tool factory. Bounded by TTL + size so
+    // long-running gateways don't accumulate stale entries indefinitely.
+    const resolvedUsers = new TtlCache<string, ResolvedUser>({
+      ttlMs: USER_CACHE_TTL_MS,
+      maxSize: USER_CACHE_MAX_SIZE,
+    });
 
     // -----------------------------------------------------------------
     // Hook: before_agent_start (priority 35)
@@ -171,7 +190,7 @@ const syntropyPlugin = {
         const user = resolvedUsers.get(cacheKey);
         if (!user) return null;
 
-        return createAllTools(baseUrl, user.authToken);
+        return createAllTools(syntropyBaseUrl, user.authToken);
       } catch (err) {
         api.logger.error(`syntropy: tool factory error: ${err}`);
         return null;
