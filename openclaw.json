@@ -40,8 +40,8 @@
         "config": {
           "auth": {
             "mode": "passcode-endpoint",
-            "passcodeVerifyUrl": "http://localhost:3000/api/ext/pairing/verify",
-            "userLookupUrl": "http://localhost:3000/api/ext/users/search",
+            "passcodeVerifyUrl": "https://syntropy-api-production.up.railway.app/api/ext/pairing/verify",
+            "userLookupUrl": "https://syntropy-api-production.up.railway.app/api/ext/users/search",
             "apiToken": ""
           }
         }
@@ -93,7 +93,7 @@
       "syntropy": {
         "enabled": true,
         "config": {
-          "syntropyBaseUrl": "http://localhost:3000"
+          "syntropyBaseUrl": "https://syntropy-api-production.up.railway.app"
         }
       }
     },
