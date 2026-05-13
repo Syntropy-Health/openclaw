@@ -82,7 +82,6 @@ const READ_METHODS = new Set([
   "talk.config",
   "mesh.plan",
   "mesh.status",
-  "gateway.plugins.diagnostics",
 ]);
 const WRITE_METHODS = new Set([
   "send",

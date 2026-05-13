@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 import { pluginsDiagnosticsHandlers } from "./plugins-diagnostics.js";
 import type { GatewayRequestContext } from "./types.js";
 
@@ -38,10 +38,6 @@ async function callDiagnostics() {
 beforeEach(() => {
   mocks.resolveBundledPluginsDir.mockReset();
   mocks.getActivePluginRegistry.mockReset();
-});
-
-afterEach(() => {
-  vi.clearAllMocks();
 });
 
 describe("gateway.plugins.diagnostics handler", () => {

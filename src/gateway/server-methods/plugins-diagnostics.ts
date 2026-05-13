@@ -43,9 +43,16 @@ function toDiagnosticsRecord(record: PluginRecord): PluginDiagnosticsRecord {
 }
 
 /**
- * Read-only RPC method exposing plugin-registry diagnostics. Surfaces the
+ * Admin-only RPC method exposing plugin-registry diagnostics. Surfaces the
  * decision-level state that the in-process `debugLoader` writes to stderr,
  * so an operator can curl the live gateway without SSH access.
+ *
+ * Scope: requires `operator.admin` (NOT in READ_METHODS or WRITE_METHODS).
+ *
+ * Rationale: the payload includes absolute filesystem paths for every
+ * registered plugin (the `source` field), which discloses internal
+ * directory layout. Gate behind the admin scope so the bootstrap operator
+ * token is the only credential that can retrieve it.
  *
  * Method name: `gateway.plugins.diagnostics`
  *
