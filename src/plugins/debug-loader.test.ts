@@ -22,12 +22,12 @@ describe("debugLoader", () => {
     expect(spy).toHaveBeenCalledWith("OPENCLAW_PLUGIN_LOADER: discovery candidates=8\n");
   });
 
-  test("treats env var = 'true' as enabled", () => {
+  test("treats env var = 'true' as enabled and emits exact prefixed line", () => {
     process.env.OPENCLAW_DEBUG_PLUGIN_LOADER = "true";
     resetDebugLoaderCacheForTests();
     const spy = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
     debugLoader("x");
-    expect(spy).toHaveBeenCalled();
+    expect(spy).toHaveBeenCalledWith("OPENCLAW_PLUGIN_LOADER: x\n");
   });
 
   test("treats env var = '0' as disabled", () => {

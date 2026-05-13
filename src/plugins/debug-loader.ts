@@ -18,8 +18,18 @@ function isEnabled(): boolean {
   return cachedEnabled;
 }
 
-/** Test-only — reset the cached env-var lookup between cases. */
+/**
+ * Test-only escape hatch — reset the cached env-var lookup between cases.
+ *
+ * DO NOT call from production code. The cache exists to make `debugLoader`
+ * cheap (no env read per call); resetting it from a non-test path defeats
+ * that and races with concurrent callers. Vitest is the only legitimate
+ * consumer. Guarded by NODE_ENV to silently no-op in production.
+ */
 export function resetDebugLoaderCacheForTests(): void {
+  if (process.env.NODE_ENV === "production") {
+    return;
+  }
   cachedEnabled = null;
 }
 
