@@ -53,7 +53,16 @@ function main() {
     return;
   }
 
-  const dataConfig = readJson(DATA_CONFIG);
+  let dataConfig;
+  try {
+    dataConfig = readJson(DATA_CONFIG);
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    log(`WARN: ${DATA_CONFIG} unreadable/corrupt (${msg}) — reseeding from ${APP_CONFIG}`);
+    fs.writeFileSync(DATA_CONFIG, JSON.stringify(appConfig, null, 2));
+    log(`seeded ${DATA_CONFIG} from ${APP_CONFIG} (recovery)`);
+    return;
+  }
 
   if (appConfig.plugins) {
     dataConfig.plugins = appConfig.plugins;

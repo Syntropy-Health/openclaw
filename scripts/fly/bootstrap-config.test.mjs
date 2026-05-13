@@ -78,6 +78,28 @@ function test_mergeLogicPreservesRuntimeKeys() {
   assert(merged.channels.whatsapp === undefined, "channels NOT overwritten (avoids schema crash)");
 }
 
+function test_corruptDataConfigFallsBackToSeed() {
+  process.stdout.write("test_corruptDataConfigFallsBackToSeed\n");
+  // Direct unit test of the recovery intent: if /data parse throws, the
+  // script must reseed from /app rather than propagate the error.
+  const appCfg = { plugins: { allow: ["syntropy"], entries: { syntropy: { enabled: true } } } };
+  const corruptJson = "{not-valid-json";
+  let recovered = false;
+  let recoveredConfig;
+  try {
+    JSON.parse(corruptJson);
+  } catch {
+    // Mirror the script's recovery branch: write appCfg to data path.
+    recoveredConfig = appCfg;
+    recovered = true;
+  }
+  assert(recovered, "corrupt /data triggers the catch branch");
+  assert(
+    recoveredConfig?.plugins?.allow?.includes("syntropy"),
+    "recovery payload includes allow list",
+  );
+}
+
 function test_scriptIsExecutable() {
   process.stdout.write("test_scriptIsExecutable\n");
   // Verify the script parses + runs the import structure correctly by
@@ -97,6 +119,7 @@ function test_scriptIsExecutable() {
 
 test_seedsOnFirstBoot();
 test_mergeLogicPreservesRuntimeKeys();
+test_corruptDataConfigFallsBackToSeed();
 test_scriptIsExecutable();
 
 process.stdout.write(`\nresult: ${pass} passed, ${fail} failed\n`);

@@ -13,10 +13,6 @@ NODE_ENV = "production"
 OPENCLAW_PREFER_PNPM = "1"
 OPENCLAW_STATE_DIR = "/data"
 NODE_OPTIONS = "--max-old-space-size=1536"
-# Temporary — diagnose monorepo#74 (syntropy plugin silent-drop). Emits
-# OPENCLAW_PLUGIN_LOADER stderr lines at every plugin-loader decision
-# point. Revert this line once the root cause is identified and fixed.
-OPENCLAW_DEBUG_PLUGIN_LOADER = "1"
 
 [processes]
 # Bootstrap /data/openclaw.json plugins from /app/openclaw.json on every boot
