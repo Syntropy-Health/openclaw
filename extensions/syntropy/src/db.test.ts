@@ -42,7 +42,12 @@ function makeMockSql(replies: unknown[][] = [[]]) {
   return { sql: sql as unknown as Parameters<typeof ensureSyntropySchema>[0], calls };
 }
 
-/** Mock `SyntropyVault` — get/set spies. */
+/** Mock `SyntropyVault` — get/set/delete spies.
+ *
+ * `SyntropyVault` is a class with a private `sql` member, so a plain object
+ * literal can't structurally satisfy it. The cast through `unknown` is
+ * justified here because we control all call sites — the mock only ever
+ * has its public-method surface invoked by `db.ts`. */
 function makeMockVault(initialStore: Record<string, string> = {}): SyntropyVault {
   const store: Record<string, string> = { ...initialStore };
   return {
@@ -50,7 +55,10 @@ function makeMockVault(initialStore: Record<string, string> = {}): SyntropyVault
     set: vi.fn(async (name: string, value: string) => {
       store[name] = value;
     }),
-  };
+    delete: vi.fn(async (name: string) => {
+      delete store[name];
+    }),
+  } as unknown as SyntropyVault;
 }
 
 describe("ensureSyntropySchema", () => {

@@ -133,7 +133,7 @@ export function createSyntropyVault(sql: postgres.Sql): SyntropyVault {
       // even though we identify the function by name. Args bind via $1, $2.
       const rows = await sql.unsafe(
         `SELECT ${fnName}(${args.map((_, i) => `$${i + 1}`).join(", ")}) AS result`,
-        args as unknown[],
+        args as unknown as never[],
       );
       const value = rows[0]?.result;
       return (value ?? null) as T | null;
@@ -141,7 +141,7 @@ export function createSyntropyVault(sql: postgres.Sql): SyntropyVault {
     async callVoid(fnName: string, args: readonly unknown[]): Promise<void> {
       await sql.unsafe(
         `SELECT ${fnName}(${args.map((_, i) => `$${i + 1}`).join(", ")})`,
-        args as unknown[],
+        args as unknown as never[],
       );
     },
   };
