@@ -2,6 +2,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { resolveConfigDir, resolveUserPath } from "../utils.js";
 import { resolveBundledPluginsDir } from "./bundled-dir.js";
+import { debugLoader } from "./debug-loader.js";
 import {
   getPackageManifestMetadata,
   type OpenClawPackageManifest,
@@ -360,5 +361,14 @@ export function discoverOpenClawPlugins(params: {
     });
   }
 
+  debugLoader(`discovery candidates=${candidates.length} diagnostics=${diagnostics.length}`);
+  for (const c of candidates) {
+    debugLoader(
+      `  candidate idHint=${c.idHint} origin=${c.origin} rootDir=${c.rootDir} source=${c.source}`,
+    );
+  }
+  for (const d of diagnostics) {
+    debugLoader(`  discovery-diagnostic level=${d.level} message=${d.message}`);
+  }
   return { candidates, diagnostics };
 }

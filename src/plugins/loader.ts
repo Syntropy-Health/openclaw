@@ -14,6 +14,7 @@ import {
   resolveMemorySlotDecision,
   type NormalizedPluginsConfig,
 } from "./config-state.js";
+import { debugLoader } from "./debug-loader.js";
 import { discoverOpenClawPlugins } from "./discovery.js";
 import { initializeGlobalHookRunner } from "./hook-runner-global.js";
 import { loadPluginManifestRegistry } from "./manifest-registry.js";
@@ -184,11 +185,19 @@ export function loadOpenClawPlugins(options: PluginLoadOptions = {}): PluginRegi
   const logger = options.logger ?? defaultLogger();
   const validateOnly = options.mode === "validate";
   const normalized = normalizePluginsConfig(cfg.plugins);
+  const cacheEnabled = options.cache !== false;
+  debugLoader(
+    `loadOpenClawPlugins entry — workspaceDir=${options.workspaceDir ?? "<unset>"} ` +
+      `validateOnly=${validateOnly} cacheEnabled=${cacheEnabled}`,
+  );
+  debugLoader(
+    `plugins.allow=${JSON.stringify(normalized.allow ?? null)} ` +
+      `entries=${JSON.stringify(Object.keys(normalized.entries ?? {}))}`,
+  );
   const cacheKey = buildCacheKey({
     workspaceDir: options.workspaceDir,
     plugins: normalized,
   });
-  const cacheEnabled = options.cache !== false;
   if (cacheEnabled) {
     const cached = registryCache.get(cacheKey);
     if (cached) {
@@ -211,6 +220,10 @@ export function loadOpenClawPlugins(options: PluginLoadOptions = {}): PluginRegi
     workspaceDir: options.workspaceDir,
     extraPaths: normalized.loadPaths,
   });
+  debugLoader(
+    `post-discovery: ${discovery.candidates.length} candidates, ` +
+      `${discovery.diagnostics.length} diagnostics`,
+  );
   const manifestRegistry = loadPluginManifestRegistry({
     config: cfg,
     workspaceDir: options.workspaceDir,
@@ -218,6 +231,13 @@ export function loadOpenClawPlugins(options: PluginLoadOptions = {}): PluginRegi
     candidates: discovery.candidates,
     diagnostics: discovery.diagnostics,
   });
+  debugLoader(
+    `post-manifest-registry: ${manifestRegistry.plugins.length} manifests, ` +
+      `${manifestRegistry.diagnostics.length} diagnostics`,
+  );
+  for (const m of manifestRegistry.plugins) {
+    debugLoader(`  manifest id=${m.id} rootDir=${m.rootDir}`);
+  }
   pushDiagnostics(registry.diagnostics, manifestRegistry.diagnostics);
 
   // Lazy: avoid creating the Jiti loader when all plugins are disabled (common in unit tests).
@@ -257,6 +277,14 @@ export function loadOpenClawPlugins(options: PluginLoadOptions = {}): PluginRegi
   for (const candidate of discovery.candidates) {
     const manifestRecord = manifestByRoot.get(candidate.rootDir);
     if (!manifestRecord) {
+      debugLoader(
+        `  SKIP candidate idHint=${candidate.idHint} reason=no-manifest-record-for-rootDir rootDir=${candidate.rootDir}`,
+      );
+      registry.diagnostics.push({
+        level: "warn",
+        source: candidate.source,
+        message: `no manifest record for plugin candidate (rootDir=${candidate.rootDir}) — package missing openclaw.plugin.json or rootDir mismatch`,
+      });
       continue;
     }
     const pluginId = manifestRecord.id;
@@ -280,6 +308,9 @@ export function loadOpenClawPlugins(options: PluginLoadOptions = {}): PluginRegi
     }
 
     const enableState = resolveEnableState(pluginId, candidate.origin, normalized);
+    debugLoader(
+      `  candidate ${pluginId} enableState.enabled=${enableState.enabled} reason=${enableState.reason ?? "<ok>"}`,
+    );
     const entry = normalized.entries[pluginId];
     const record = createPluginRecord({
       id: pluginId,
@@ -319,6 +350,7 @@ export function loadOpenClawPlugins(options: PluginLoadOptions = {}): PluginRegi
     }
 
     let mod: OpenClawPluginModule | null = null;
+    debugLoader(`  jiti-load ${record.id} source=${candidate.source}`);
     try {
       mod = getJiti()(candidate.source) as OpenClawPluginModule;
     } catch (err) {
@@ -447,6 +479,7 @@ export function loadOpenClawPlugins(options: PluginLoadOptions = {}): PluginRegi
       }
       registry.plugins.push(record);
       seenIds.set(pluginId, candidate.origin);
+      debugLoader(`  REGISTERED ${record.id} status=${record.status}`);
     } catch (err) {
       logger.error(
         `[plugins] ${record.id} failed during register from ${record.source}: ${String(err)}`,
@@ -476,5 +509,11 @@ export function loadOpenClawPlugins(options: PluginLoadOptions = {}): PluginRegi
   }
   setActivePluginRegistry(registry, cacheKey);
   initializeGlobalHookRunner(registry);
+  debugLoader(
+    `loadOpenClawPlugins return — total=${registry.plugins.length} ` +
+      `loaded=${registry.plugins.filter((p) => p.status === "loaded").length} ` +
+      `disabled=${registry.plugins.filter((p) => p.status === "disabled").length} ` +
+      `error=${registry.plugins.filter((p) => p.status === "error").length}`,
+  );
   return registry;
 }

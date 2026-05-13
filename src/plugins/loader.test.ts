@@ -2,7 +2,8 @@ import { randomUUID } from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { afterAll, afterEach, describe, expect, it } from "vitest";
+import { afterAll, afterEach, describe, expect, it, vi } from "vitest";
+import { resetDebugLoaderCacheForTests } from "./debug-loader.js";
 import { loadOpenClawPlugins } from "./loader.js";
 
 type TempPlugin = { dir: string; file: string; id: string };
@@ -488,5 +489,48 @@ describe("loadOpenClawPlugins", () => {
     const overridden = entries.find((entry) => entry.status === "disabled");
     expect(loaded?.origin).toBe("config");
     expect(overridden?.origin).toBe("bundled");
+  });
+});
+
+describe("loadOpenClawPlugins instrumentation", () => {
+  afterEach(() => {
+    delete process.env.OPENCLAW_DEBUG_PLUGIN_LOADER;
+    resetDebugLoaderCacheForTests();
+  });
+
+  it("emits no OPENCLAW_PLUGIN_LOADER stderr lines when env var unset", () => {
+    process.env.OPENCLAW_BUNDLED_PLUGINS_DIR = "/nonexistent/bundled/plugins";
+    const spy = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
+    try {
+      loadOpenClawPlugins({ cache: false, config: { plugins: {} } });
+    } finally {
+      const hits = spy.mock.calls.filter((c) => String(c[0]).startsWith("OPENCLAW_PLUGIN_LOADER:"));
+      spy.mockRestore();
+      expect(hits).toHaveLength(0);
+    }
+  });
+
+  it("pushes warn diagnostic for candidate without a manifest record", () => {
+    process.env.OPENCLAW_BUNDLED_PLUGINS_DIR = "/nonexistent/bundled/plugins";
+    // Write a plugin .js file but intentionally OMIT the openclaw.plugin.json
+    // manifest so the manifest registry has no record for the candidate's rootDir.
+    const dir = makeTempDir();
+    const file = path.join(dir, "ghost.js");
+    fs.writeFileSync(file, `export default { id: "ghost", register() {} };`, "utf-8");
+
+    const registry = loadOpenClawPlugins({
+      cache: false,
+      workspaceDir: dir,
+      config: {
+        plugins: {
+          load: { paths: [file] },
+          allow: ["ghost"],
+        },
+      },
+    });
+
+    const noManifest = registry.diagnostics.find((d) => d.message.includes("no manifest record"));
+    expect(noManifest).toBeDefined();
+    expect(noManifest?.level).toBe("warn");
   });
 });
