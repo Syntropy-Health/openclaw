@@ -40,7 +40,6 @@ process:
   run_as_group: sandbox
 
 network_policies:
-
   # ── Base OpenClaw policies (from NemoClaw defaults) ────────────
 
   claude_code:
