@@ -1,137 +1,137 @@
 /**
- * Unit tests for the SyntropyVault wrapper around Supabase Vault.
+ * Unit tests for the SyntropyVault wrapper.
  *
  * The wrapper exposes a tiny name→value KV interface backed by three
- * SECURITY DEFINER RPCs in the mobile Supabase project:
+ * SECURITY DEFINER Postgres functions:
  *
  *   app_syntropy_token_set(p_name text, p_plaintext text) returns void
  *   app_syntropy_token_get(p_name text) returns text  -- null if missing
  *   app_syntropy_token_delete(p_name text) returns void
  *
- * These RPCs wrap `vault.create_secret`, `vault.decrypted_secrets`, and
- * `vault.delete_secret` respectively. Defining them on the Supabase side
- * (rather than directly hitting `vault.secrets`) gives us:
- *   - One audited surface to grant `service_role` access to
- *   - A stable contract decoupled from the Supabase Vault internal schema
- *
- * Tests use a mock RpcCaller so we never need a live Supabase project.
+ * Tests use an injected `SqlExecutor` mock so we never need a live
+ * Postgres / Supabase project.
  */
 
 import { describe, test, expect, vi } from "vitest";
-import { SyntropyVault, type RpcCaller } from "./vault.js";
+import { SyntropyVault, type SqlExecutor } from "./vault.js";
 
-function createMockRpc(impl: (fn: string, args: Record<string, unknown>) => unknown): RpcCaller {
-  return {
-    call: vi.fn(async (fn: string, args: Record<string, unknown>) =>
-      impl(fn, args),
-    ) as RpcCaller["call"],
+function createMockSql(
+  scalarImpl: (fn: string, args: readonly unknown[]) => unknown = () => null,
+): { sql: SqlExecutor; calls: Array<{ kind: "scalar" | "void"; fn: string; args: unknown[] }> } {
+  const calls: Array<{ kind: "scalar" | "void"; fn: string; args: unknown[] }> = [];
+  const sql: SqlExecutor = {
+    callScalar: vi.fn(async (fn: string, args: readonly unknown[]) => {
+      calls.push({ kind: "scalar", fn, args: [...args] });
+      return scalarImpl(fn, args) as never;
+    }) as SqlExecutor["callScalar"],
+    callVoid: vi.fn(async (fn: string, args: readonly unknown[]) => {
+      calls.push({ kind: "void", fn, args: [...args] });
+    }),
   };
+  return { sql, calls };
 }
 
 describe("SyntropyVault.set", () => {
   test("calls app_syntropy_token_set with name + plaintext", async () => {
-    const calls: Array<{ fn: string; args: Record<string, unknown> }> = [];
-    const rpc = createMockRpc((fn, args) => {
-      calls.push({ fn, args });
-      return null;
-    });
-    const vault = new SyntropyVault(rpc);
+    const { sql, calls } = createMockSql();
+    const vault = new SyntropyVault(sql);
     await vault.set("syntropy_user_abc", "sj_secret_xyz");
     expect(calls).toEqual([
-      {
-        fn: "app_syntropy_token_set",
-        args: { p_name: "syntropy_user_abc", p_plaintext: "sj_secret_xyz" },
-      },
+      { kind: "void", fn: "app_syntropy_token_set", args: ["syntropy_user_abc", "sj_secret_xyz"] },
     ]);
   });
 
-  test("rejects on RPC error", async () => {
-    const rpc = createMockRpc(() => {
-      throw new Error("network down");
-    });
-    const vault = new SyntropyVault(rpc);
+  test("rejects on SQL error", async () => {
+    const sql: SqlExecutor = {
+      callScalar: async () => null,
+      callVoid: async () => {
+        throw new Error("network down");
+      },
+    };
+    const vault = new SyntropyVault(sql);
     await expect(vault.set("name", "value")).rejects.toThrow(/network down/);
   });
 
   test("rejects on empty name", async () => {
-    const rpc = createMockRpc(() => null);
-    const vault = new SyntropyVault(rpc);
+    const { sql } = createMockSql();
+    const vault = new SyntropyVault(sql);
     await expect(vault.set("", "value")).rejects.toThrow(/name/);
   });
 
   test("rejects on empty plaintext", async () => {
-    const rpc = createMockRpc(() => null);
-    const vault = new SyntropyVault(rpc);
+    const { sql } = createMockSql();
+    const vault = new SyntropyVault(sql);
     await expect(vault.set("name", "")).rejects.toThrow(/plaintext/);
   });
 });
 
 describe("SyntropyVault.get", () => {
   test("returns plaintext for an existing name", async () => {
-    const rpc = createMockRpc((fn, args) => {
-      expect(fn).toBe("app_syntropy_token_get");
-      expect(args).toEqual({ p_name: "syntropy_user_abc" });
-      return "sj_secret_xyz";
-    });
-    const vault = new SyntropyVault(rpc);
+    const { sql, calls } = createMockSql(() => "sj_secret_xyz");
+    const vault = new SyntropyVault(sql);
     const got = await vault.get("syntropy_user_abc");
     expect(got).toBe("sj_secret_xyz");
+    expect(calls).toEqual([
+      { kind: "scalar", fn: "app_syntropy_token_get", args: ["syntropy_user_abc"] },
+    ]);
   });
 
-  test("returns null when the secret is missing (RPC returns null)", async () => {
-    const rpc = createMockRpc(() => null);
-    const vault = new SyntropyVault(rpc);
+  test("returns null when the secret is missing (SQL returns null)", async () => {
+    const { sql } = createMockSql(() => null);
+    const vault = new SyntropyVault(sql);
     const got = await vault.get("does-not-exist");
     expect(got).toBeNull();
   });
 
-  test("returns null when the secret is missing (RPC returns undefined)", async () => {
-    const rpc = createMockRpc(() => undefined);
-    const vault = new SyntropyVault(rpc);
+  test("returns null when the SQL returns undefined", async () => {
+    const { sql } = createMockSql(() => undefined);
+    const vault = new SyntropyVault(sql);
     const got = await vault.get("does-not-exist");
     expect(got).toBeNull();
   });
 
-  test("rejects on RPC error", async () => {
-    const rpc = createMockRpc(() => {
-      throw new Error("upstream timeout");
-    });
-    const vault = new SyntropyVault(rpc);
+  test("rejects on SQL error", async () => {
+    const sql: SqlExecutor = {
+      callScalar: async () => {
+        throw new Error("upstream timeout");
+      },
+      callVoid: async () => {},
+    };
+    const vault = new SyntropyVault(sql);
     await expect(vault.get("name")).rejects.toThrow(/upstream timeout/);
   });
 
   test("rejects on empty name", async () => {
-    const rpc = createMockRpc(() => null);
-    const vault = new SyntropyVault(rpc);
+    const { sql } = createMockSql();
+    const vault = new SyntropyVault(sql);
     await expect(vault.get("")).rejects.toThrow(/name/);
   });
 });
 
 describe("SyntropyVault.delete", () => {
   test("calls app_syntropy_token_delete with name", async () => {
-    const calls: Array<{ fn: string; args: Record<string, unknown> }> = [];
-    const rpc = createMockRpc((fn, args) => {
-      calls.push({ fn, args });
-      return null;
-    });
-    const vault = new SyntropyVault(rpc);
+    const { sql, calls } = createMockSql();
+    const vault = new SyntropyVault(sql);
     await vault.delete("syntropy_user_abc");
     expect(calls).toEqual([
-      { fn: "app_syntropy_token_delete", args: { p_name: "syntropy_user_abc" } },
+      { kind: "void", fn: "app_syntropy_token_delete", args: ["syntropy_user_abc"] },
     ]);
   });
 
-  test("rejects on RPC error", async () => {
-    const rpc = createMockRpc(() => {
-      throw new Error("forbidden");
-    });
-    const vault = new SyntropyVault(rpc);
+  test("rejects on SQL error", async () => {
+    const sql: SqlExecutor = {
+      callScalar: async () => null,
+      callVoid: async () => {
+        throw new Error("forbidden");
+      },
+    };
+    const vault = new SyntropyVault(sql);
     await expect(vault.delete("name")).rejects.toThrow(/forbidden/);
   });
 
   test("rejects on empty name", async () => {
-    const rpc = createMockRpc(() => null);
-    const vault = new SyntropyVault(rpc);
+    const { sql } = createMockSql();
+    const vault = new SyntropyVault(sql);
     await expect(vault.delete("")).rejects.toThrow(/name/);
   });
 });

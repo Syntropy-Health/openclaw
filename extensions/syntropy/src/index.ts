@@ -27,7 +27,7 @@ import { TtlCache } from "./cache.js";
 import { parseSyntropyConfig } from "./config.js";
 import { ensureSyntropySchema } from "./db.js";
 import { createAllTools } from "./tools.js";
-import { createSupabaseVault, type SyntropyVault } from "./vault.js";
+import { createSyntropyVault, vaultRpcsInstalled, type SyntropyVault } from "./vault.js";
 
 // Per-session ResolvedUser cache parameters — bounded to prevent unbounded
 // growth on long-running gateways. 10 min TTL means stale tokens drop out
@@ -137,25 +137,32 @@ const syntropyPlugin = {
       );
       return;
     }
-    const { syntropyBaseUrl, databaseUrl, supabaseUrl, supabaseServiceRoleKey } = config;
+    const { syntropyBaseUrl, databaseUrl } = config;
 
     const sql = postgres(databaseUrl, { max: 5 });
 
-    // Supabase Vault is the production storage for `sj_*` tokens.
-    // In dev, Supabase credentials are optional — the plugin falls back to
-    // the legacy plaintext `auth_token` column (see db.ts and resolveUser).
-    const vault: SyntropyVault | null =
-      supabaseUrl && supabaseServiceRoleKey
-        ? createSupabaseVault(supabaseUrl, supabaseServiceRoleKey)
-        : null;
+    // Supabase Vault is the production storage for `sj_*` tokens. Backed by
+    // the same Postgres connection we already use for `lp_users` etc.
+    // (SJ + openclaw share the Supabase project `vouzkcwwkpqsgiquemwp`.)
+    // We probe for the SECURITY DEFINER RPCs at startup and fall back to
+    // the legacy plaintext `auth_token` column path when they aren't
+    // installed yet (pre-migration deploys, local dev).
+    let vault: SyntropyVault | null = null;
 
-    ensureSyntropySchema(sql).catch((err) =>
-      api.logger.error(`syntropy: schema init failed: ${err}`),
-    );
+    ensureSyntropySchema(sql)
+      .then(async () => {
+        if (await vaultRpcsInstalled(sql)) {
+          vault = createSyntropyVault(sql);
+          api.logger.info("syntropy: vault=supabase (RPCs installed)");
+        } else {
+          api.logger.warn(
+            "syntropy: vault=legacy-plaintext — install supabase-migrations/0001 to enable vault path",
+          );
+        }
+      })
+      .catch((err) => api.logger.error(`syntropy: schema init failed: ${err}`));
 
-    api.logger.info(
-      `syntropy: enabled (base=${syntropyBaseUrl}, vault=${vault ? "supabase" : "legacy-plaintext"})`,
-    );
+    api.logger.info(`syntropy: enabled (base=${syntropyBaseUrl})`);
 
     // Cache resolved user per session key — populated by before_agent_start,
     // consumed by the synchronous tool factory. Bounded by TTL + size so
