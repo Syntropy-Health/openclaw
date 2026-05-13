@@ -40,6 +40,8 @@ export function loadGatewayPlugins(params: {
         : `[plugins] ${diag.message}`;
       if (diag.level === "error") {
         params.log.error(message);
+      } else if (diag.level === "warn") {
+        params.log.warn(message);
       } else {
         params.log.info(message);
       }
