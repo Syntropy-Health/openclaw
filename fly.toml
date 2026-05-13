@@ -19,7 +19,10 @@ NODE_OPTIONS = "--max-old-space-size=1536"
 OPENCLAW_DEBUG_PLUGIN_LOADER = "1"
 
 [processes]
-app = "node dist/index.js gateway --allow-unconfigured --port 3000 --bind lan"
+# Bootstrap /data/openclaw.json plugins from /app/openclaw.json on every boot
+# so the committed source-of-truth config takes effect on the Fly volume.
+# See scripts/fly/bootstrap-config.mjs + monorepo#74.
+app = "sh -c 'node /app/scripts/fly/bootstrap-config.mjs && exec node dist/index.js gateway --allow-unconfigured --port 3000 --bind lan'"
 
 [http_service]
 internal_port = 3000

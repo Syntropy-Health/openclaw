@@ -21,6 +21,15 @@ COPY ui/package.json ./ui/package.json
 COPY patches ./patches
 COPY scripts ./scripts
 
+# Stage workspace-member package.json files so pnpm-workspace discovery resolves
+# every member's dependencies during the install step. Without this, extensions/*
+# package.json files arrive later via `COPY . .` and the install above silently
+# misses their dependencies (manifesting as runtime `Cannot find module 'postgres'`
+# in postgres-using extensions: syntropy, persist-postgres, persist-user-identity,
+# memory-graphiti). See monorepo#74 root cause investigation.
+COPY extensions ./extensions
+COPY packages ./packages
+
 RUN pnpm install --frozen-lockfile
 
 # Optionally install Chromium and Xvfb for browser automation.
