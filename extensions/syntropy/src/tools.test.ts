@@ -60,11 +60,22 @@ describe("createAllTools", () => {
     expect(tool, "log_food tool present").toBeDefined();
     const mealProp = (tool!.parameters as { properties: Record<string, unknown> }).properties
       ?.meal_type as { anyOf?: Array<{ const: string }> } | undefined;
-    if (mealProp?.anyOf) {
-      const values = mealProp.anyOf.map((v) => v.const).sort();
-      expect(values).toEqual(
-        ["beverage", "breakfast", "dinner", "lunch", "snack", "supplement"].sort(),
-      );
-    }
+
+    // Assert the schema shape unconditionally. If codegen ever switches the
+    // generated MealTypeSchema from `Type.Union([Type.Literal(...)])` (which
+    // emits `{ anyOf: [...] }`) to e.g. `Type.String({ enum: [...] })` (which
+    // emits `{ enum: [...], type: "string" }`), this drift guard must FAIL
+    // LOUD — not silently pass with `anyOf` undefined.
+    expect(mealProp, "meal_type schema missing — codegen drift").toBeDefined();
+    expect(
+      mealProp?.anyOf,
+      "meal_type must be a TypeBox Union (anyOf shape) — if this fails, the generator " +
+        "in shared/schemas/scripts/generate-typebox-enums.mjs has drifted away from Type.Union",
+    ).toBeDefined();
+
+    const values = mealProp!.anyOf!.map((v) => v.const).sort();
+    expect(values).toEqual(
+      ["beverage", "breakfast", "dinner", "lunch", "snack", "supplement"].sort(),
+    );
   });
 });

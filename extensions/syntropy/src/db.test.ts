@@ -47,7 +47,15 @@ function makeMockSql(replies: unknown[][] = [[]]) {
  * `SyntropyVault` is a class with a private `sql` member, so a plain object
  * literal can't structurally satisfy it. The cast through `unknown` is
  * justified here because we control all call sites — the mock only ever
- * has its public-method surface invoked by `db.ts`. */
+ * has its public-method surface invoked by `db.ts`.
+ *
+ * SCOPE NOTE: this mock bypasses `SyntropyVault`'s constructor guards
+ * (the empty-name checks in vault.ts). Those invariants are exercised in
+ * `vault.test.ts`. Here we only verify that `db.ts` orchestrates the Vault
+ * API surface (call shape + ordering) — NOT that the Vault class itself
+ * enforces its preconditions. Don't widen this mock to act as a full
+ * SyntropyVault substitute; keep the boundary so each unit test stays
+ * focused. */
 function makeMockVault(initialStore: Record<string, string> = {}): SyntropyVault {
   const store: Record<string, string> = { ...initialStore };
   return {
