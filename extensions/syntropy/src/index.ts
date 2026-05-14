@@ -26,6 +26,7 @@ import postgres from "postgres";
 import { TtlCache } from "./cache.js";
 import { parseSyntropyConfig } from "./config.js";
 import { ensureSyntropySchema } from "./db.js";
+import { deriveChannel, derivePeerId } from "./session-key.js";
 import { createAllTools } from "./tools.js";
 import { createSyntropyVault, vaultRpcsInstalled, type SyntropyVault } from "./vault.js";
 
@@ -36,23 +37,7 @@ import { createSyntropyVault, vaultRpcsInstalled, type SyntropyVault } from "./v
 const USER_CACHE_TTL_MS = 10 * 60 * 1000;
 const USER_CACHE_MAX_SIZE = 10_000;
 
-// ---------------------------------------------------------------------------
-// Session key parsing (inlined to avoid cross-extension dependency)
-// ---------------------------------------------------------------------------
-
-function deriveChannel(sessionKey: string): string {
-  const parts = sessionKey.split(":");
-  return parts.length >= 3 && parts[0] === "agent" ? parts[2] : "unknown";
-}
-
-function derivePeerId(sessionKey: string): string {
-  const parts = sessionKey.split(":");
-  if (parts.length < 3 || parts[0] !== "agent") return sessionKey;
-  const rest = parts.slice(2);
-  const directIdx = rest.indexOf("direct");
-  if (directIdx >= 0 && directIdx < rest.length - 1) return rest.slice(directIdx + 1).join(":");
-  return rest.length >= 2 ? rest.slice(1).join(":") : (rest[0] ?? sessionKey);
-}
+// Session-key parsing moved to ./session-key.ts for testability.
 
 // ---------------------------------------------------------------------------
 // Identity + token resolution

@@ -28,8 +28,8 @@ health_probe:
 
 # ── Dashboard / UI ──────────────────────────────────────────────
 forward_ports:
-  - 18789  # OpenClaw gateway health probe / dashboard
-  - 3001   # Twilio voice-call webhook receiver (inbound)
+  - 18789 # OpenClaw gateway health probe / dashboard
+  - 3001 # Twilio voice-call webhook receiver (inbound)
 
 # ── Configuration ───────────────────────────────────────────────
 config:
@@ -96,8 +96,8 @@ package_registry:
 # "slack" comes from NemoClaw's built-in presets (nemoclaw-blueprint/policies/presets/slack.yaml).
 _policy_additions:
   presets:
-    - syntropy       # nemoclaw/presets/syntropy.yaml
-    - zep            # nemoclaw/presets/zep.yaml
-    - whatsapp       # nemoclaw/presets/whatsapp.yaml
-    - postgresql     # nemoclaw/presets/postgresql.yaml
-    - slack          # NemoClaw built-in preset
+    - syntropy # nemoclaw/presets/syntropy.yaml
+    - zep # nemoclaw/presets/zep.yaml
+    - whatsapp # nemoclaw/presets/whatsapp.yaml
+    - postgresql # nemoclaw/presets/postgresql.yaml
+    - slack # NemoClaw built-in preset
