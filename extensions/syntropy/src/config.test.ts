@@ -113,4 +113,61 @@ describe("parseSyntropyConfig", () => {
       expect((err as Error).message).toMatch(/production/);
     }
   });
+
+  // -------------------------------------------------------------------------
+  // SYN-33 — KG-direct fields (Phase C). Optional; absent values stay
+  // absent so downstream feature-flag logic can detect "not configured"
+  // vs "explicitly disabled" via undefined.
+  // -------------------------------------------------------------------------
+
+  test("kgBaseUrl + enableKgDirect are optional — absent stays absent", () => {
+    const cfg = parseSyntropyConfig(
+      { syntropyBaseUrl: "https://api.syntropy.example", databaseUrl: "postgres://localhost/db" },
+      { NODE_ENV: "production" },
+    );
+    expect(cfg.kgBaseUrl).toBeUndefined();
+    expect(cfg.enableKgDirect).toBeUndefined();
+  });
+
+  test("kgBaseUrl is wired through when provided", () => {
+    const cfg = parseSyntropyConfig(
+      {
+        syntropyBaseUrl: "https://api.syntropy.example",
+        databaseUrl: "postgres://localhost/db",
+        kgBaseUrl: "https://kg-mcp-test.up.railway.app",
+        enableKgDirect: true,
+      },
+      { NODE_ENV: "production" },
+    );
+    expect(cfg.kgBaseUrl).toBe("https://kg-mcp-test.up.railway.app");
+    expect(cfg.enableKgDirect).toBe(true);
+  });
+
+  test("kgBaseUrl rejects unparseable URL with field-tagged error", () => {
+    expect(() =>
+      parseSyntropyConfig(
+        {
+          syntropyBaseUrl: "https://api.syntropy.example",
+          databaseUrl: "postgres://localhost/db",
+          kgBaseUrl: "not-a-url",
+        },
+        { NODE_ENV: "production" },
+      ),
+    ).toThrow(/kgBaseUrl/);
+  });
+
+  test("enableKgDirect=false is preserved as explicit opt-out", () => {
+    const cfg = parseSyntropyConfig(
+      {
+        syntropyBaseUrl: "https://api.syntropy.example",
+        databaseUrl: "postgres://localhost/db",
+        kgBaseUrl: "https://kg-mcp-test.up.railway.app",
+        enableKgDirect: false,
+      },
+      { NODE_ENV: "production" },
+    );
+    // false !== undefined — index.ts uses this to distinguish "user
+    // explicitly disabled" from "not configured at all".
+    expect(cfg.enableKgDirect).toBe(false);
+  });
 });

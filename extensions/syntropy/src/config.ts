@@ -24,6 +24,12 @@ import { Value } from "@sinclair/typebox/value";
 const ConfigSchema = Type.Object({
   syntropyBaseUrl: Type.String({ minLength: 1 }),
   databaseUrl: Type.String({ minLength: 1 }),
+  // KG-direct optional fields — added in SYN-33 Phase C. The extension can
+  // talk to shrine-diet-bioactivity's kg-mcp using the same sj_* Bearer
+  // (ADR-001 §2). When kgBaseUrl is unset OR enableKgDirect is false the
+  // 3 KG-direct tools are not registered.
+  kgBaseUrl: Type.Optional(Type.String({ minLength: 1 })),
+  enableKgDirect: Type.Optional(Type.Boolean()),
 });
 
 // Vault access is now via the same `databaseUrl` connection (SJ + openclaw
@@ -95,6 +101,16 @@ export function parseSyntropyConfig(
   if (syntropyBaseUrl !== undefined) candidate.syntropyBaseUrl = syntropyBaseUrl;
   if (databaseUrl !== undefined) candidate.databaseUrl = databaseUrl;
 
+  // KG-direct (SYN-33). Only forwarded when the caller set them; absent
+  // values stay absent so downstream feature-flag logic in index.ts knows
+  // to disable the tool registration silently rather than fail.
+  if (typeof input.kgBaseUrl === "string" && input.kgBaseUrl.length > 0) {
+    candidate.kgBaseUrl = input.kgBaseUrl;
+  }
+  if (typeof input.enableKgDirect === "boolean") {
+    candidate.enableKgDirect = input.enableKgDirect;
+  }
+
   const envLabel = isProduction ? "production" : env.NODE_ENV || "development";
 
   if (!Value.Check(ConfigSchema, candidate)) {
@@ -111,9 +127,23 @@ export function parseSyntropyConfig(
     );
   }
 
-  // Return only the validated shape — strips any extra fields the caller passed in.
-  return {
+  if (candidate.kgBaseUrl !== undefined && !isValidUrl(candidate.kgBaseUrl as string)) {
+    throw new Error(
+      `syntropy plugin config invalid (NODE_ENV=${envLabel}): /kgBaseUrl: must be a parseable URL`,
+    );
+  }
+
+  // Return only the validated shape — strips any extra fields the caller
+  // passed in. KG-direct fields are only included when explicitly set so
+  // existing tests that compare against `{ syntropyBaseUrl, databaseUrl }`
+  // continue to pass (Vitest toEqual treats undefined values strictly).
+  const result: SyntropyConfig = {
     syntropyBaseUrl: candidate.syntropyBaseUrl as string,
     databaseUrl: candidate.databaseUrl as string,
   };
+  if (candidate.kgBaseUrl !== undefined) result.kgBaseUrl = candidate.kgBaseUrl as string;
+  if (candidate.enableKgDirect !== undefined) {
+    result.enableKgDirect = candidate.enableKgDirect as boolean;
+  }
+  return result;
 }
