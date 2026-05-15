@@ -26,6 +26,7 @@ import postgres from "postgres";
 import { TtlCache } from "./cache.js";
 import { parseSyntropyConfig } from "./config.js";
 import { ensureSyntropySchema } from "./db.js";
+import { createAllKgTools } from "./kg-tools.js";
 import { deriveChannel, derivePeerId } from "./session-key.js";
 import { createAllTools } from "./tools.js";
 import { createSyntropyVault, vaultRpcsInstalled, type SyntropyVault } from "./vault.js";
@@ -122,7 +123,11 @@ const syntropyPlugin = {
       );
       return;
     }
-    const { syntropyBaseUrl, databaseUrl } = config;
+    const { syntropyBaseUrl, databaseUrl, kgBaseUrl, enableKgDirect } = config;
+    // SYN-33 — KG-direct tools register only when explicitly configured
+    // (kgBaseUrl set) and not explicitly opted out (enableKgDirect !== false).
+    // Absent enableKgDirect defaults to true; explicit false is a hard opt-out.
+    const kgEnabled = kgBaseUrl !== undefined && enableKgDirect !== false;
 
     const sql = postgres(databaseUrl, { max: 5 });
 
@@ -147,7 +152,9 @@ const syntropyPlugin = {
       })
       .catch((err) => api.logger.error(`syntropy: schema init failed: ${err}`));
 
-    api.logger.info(`syntropy: enabled (base=${syntropyBaseUrl})`);
+    api.logger.info(
+      `syntropy: enabled (base=${syntropyBaseUrl}, kg=${kgEnabled ? kgBaseUrl : "disabled"})`,
+    );
 
     // Cache resolved user per session key — populated by before_agent_start,
     // consumed by the synchronous tool factory. Bounded by TTL + size so
@@ -206,7 +213,13 @@ const syntropyPlugin = {
         const user = resolvedUsers.get(cacheKey);
         if (!user) return null;
 
-        return createAllTools(syntropyBaseUrl, user.authToken);
+        const sjTools = createAllTools(syntropyBaseUrl, user.authToken);
+        if (!kgEnabled) return sjTools;
+        // SYN-33 — KG-direct tools share the same sj_* Bearer (ADR-001 §2);
+        // no second token exchange. kg-mcp does atomic quota_check_and_debit
+        // server-side per ADR-001 §5 — the extension is metering-unaware.
+        const kgTools = createAllKgTools(kgBaseUrl, user.authToken);
+        return [...sjTools, ...kgTools];
       } catch (err) {
         api.logger.error(`syntropy: tool factory error: ${err}`);
         return null;
