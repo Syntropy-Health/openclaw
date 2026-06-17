@@ -30,23 +30,22 @@ const outFile = path.join(outDir, "results.json");
 try {
   spawnSync(
     vitestBin,
-    [
-      "run",
-      "--config",
-      "vitest.sealed.config.ts",
-      "--reporter=json",
-      `--outputFile=${outFile}`,
-    ],
-    { cwd: repoRoot, encoding: "utf8", stdio: ["ignore", "ignore", "inherit"] },
+    ["run", "--config", "vitest.sealed.config.ts", "--reporter=json", `--outputFile=${outFile}`],
+    // stderr is NOT inherited and NOT captured: vitest diagnostics (assertion
+    // diffs, file:line, stack traces) must never bridge to the implementer, who
+    // runs `referee run`. Only the coarse RESULT lines below reach stdout. The
+    // machine-readable verdicts go to the JSON outputFile, which we parse.
+    { cwd: repoRoot, encoding: "utf8", stdio: ["ignore", "ignore", "ignore"] },
   );
 
   let report;
   try {
     report = JSON.parse(readFileSync(outFile, "utf8"));
   } catch {
-    // No output file → suite failed to run at all (compile error, no tests).
-    // Emit nothing; referee will report total=0 (a red flag the runner failed),
-    // and stderr (inherited above) carries the diagnostic for a human.
+    // No output file → suite failed to run at all (e.g. the whole project
+    // failed to compile, or there are genuinely no sealed tests). Emit nothing;
+    // the referee reports total=0, which is itself a red flag that the runner
+    // could not produce verdicts.
     process.exit(0);
   }
 
@@ -59,7 +58,16 @@ try {
 
   for (const file of report.testResults ?? []) {
     const base = path.basename(file.name || "suite").replace(/\.sealed\.test\.ts$/, "");
-    for (const a of file.assertionResults ?? []) {
+    const assertions = file.assertionResults ?? [];
+    // A file that failed to COLLECT (compile error, missing import, throw at
+    // module load) has status "failed" but zero assertions. Surface that as a
+    // distinct coarse category so the implementer sees a real failure signal
+    // instead of a misleading total=0. No assertion text leaks — just a label.
+    if (assertions.length === 0 && file.status === "failed") {
+      console.log("RESULT fail build/load");
+      continue;
+    }
+    for (const a of assertions) {
       // Category = top-level describe, else file basename. Slash-namespaced.
       const category = slug((a.ancestorTitles && a.ancestorTitles[0]) || base);
       if (a.status === "passed") console.log(`RESULT pass ${category}`);
