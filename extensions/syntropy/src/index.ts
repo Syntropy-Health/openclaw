@@ -24,9 +24,11 @@
 import type { OpenClawPluginApi } from "openclaw/plugin-sdk";
 import postgres from "postgres";
 import { TtlCache } from "./cache.js";
+import { callSyntropyTool, type SyntropyToolResult } from "./client.js";
 import { parseSyntropyConfig } from "./config.js";
 import { ensureSyntropySchema } from "./db.js";
 import { createAllKgTools } from "./kg-tools.js";
+import { resolveProfileContext } from "./profile-context.js";
 import { deriveChannel, derivePeerId } from "./session-key.js";
 import { createAllTools } from "./tools.js";
 import { createSyntropyVault, vaultRpcsInstalled, type SyntropyVault } from "./vault.js";
@@ -90,7 +92,7 @@ async function resolveUser(
 // Plugin
 // ---------------------------------------------------------------------------
 
-const SYNTROPY_GATE = `[SYNTROPY_GATE]
+export const SYNTROPY_GATE = `[SYNTROPY_GATE]
 status: LOCKED
 reason: No Syntropy auth token found for this user.
 
@@ -100,6 +102,41 @@ The user needs to complete pairing first:
 2. Click "Link Device" to get a 6-digit code
 3. Type: !verify <code>
 [/SYNTROPY_GATE]`;
+
+/**
+ * Decide the `before_agent_start` result for a (possibly-resolved) user —
+ * extracted from the hook closure so the wiring is unit-testable without a DB.
+ *
+ * - **Unpaired** (`user === null`): clear any cached identity/profile for this
+ *   key (so a stale block from a prior pairing can't leak post-unpair) and gate.
+ * - **Paired**: cache the user for the sync tool factory, then inject the
+ *   health-profile block as `prependContext` (SYN-206) — without the agent
+ *   calling the profile tool. Identity-scoped by `cacheKey`; failure-safe
+ *   (a null/failed/empty profile yields `{}`, never blocks the reply).
+ */
+export async function decideProfileInjection(opts: {
+  user: ResolvedUser | null;
+  cacheKey: string;
+  resolvedUsers: TtlCache<string, ResolvedUser>;
+  profileBlocks: TtlCache<string, string>;
+  fetchProfile: (authToken: string) => Promise<SyntropyToolResult>;
+}): Promise<{ prependContext?: string }> {
+  const { user, cacheKey, resolvedUsers, profileBlocks, fetchProfile } = opts;
+
+  if (!user) {
+    resolvedUsers.delete(cacheKey);
+    profileBlocks.delete(cacheKey);
+    return { prependContext: SYNTROPY_GATE };
+  }
+
+  resolvedUsers.set(cacheKey, user);
+  const block = await resolveProfileContext({
+    cache: profileBlocks,
+    cacheKey,
+    fetchProfile: () => fetchProfile(user.authToken),
+  });
+  return block ? { prependContext: block } : {};
+}
 
 const syntropyPlugin = {
   id: "syntropy",
@@ -164,6 +201,16 @@ const syntropyPlugin = {
       maxSize: USER_CACHE_MAX_SIZE,
     });
 
+    // Cache the formatted [SYNTROPY_PROFILE] block per session key — populated
+    // by resolveProfileContext from before_agent_start so a paired user's
+    // profile is injected without the agent calling the health-profile tool.
+    // Same 10-min TTL / 10k bound as resolvedUsers; keyed by the same
+    // ${channel}:${peerId} so a user can never receive another user's profile.
+    const profileBlocks = new TtlCache<string, string>({
+      ttlMs: USER_CACHE_TTL_MS,
+      maxSize: USER_CACHE_MAX_SIZE,
+    });
+
     // -----------------------------------------------------------------
     // Hook: before_agent_start (priority 35)
     // -----------------------------------------------------------------
@@ -181,14 +228,14 @@ const syntropyPlugin = {
           const cacheKey = `${channel}:${peerId}`;
           const user = await resolveUser(sql, vault, channel, peerId);
 
-          if (!user) {
-            resolvedUsers.delete(cacheKey);
-            return { prependContext: SYNTROPY_GATE };
-          }
-
-          // Cache for the tool factory
-          resolvedUsers.set(cacheKey, user);
-          return {};
+          return await decideProfileInjection({
+            user,
+            cacheKey,
+            resolvedUsers,
+            profileBlocks,
+            fetchProfile: (authToken) =>
+              callSyntropyTool(syntropyBaseUrl, authToken, "get_health_profile", {}),
+          });
         } catch (err) {
           api.logger.error(`syntropy: before_agent_start error: ${err}`);
           return {};
