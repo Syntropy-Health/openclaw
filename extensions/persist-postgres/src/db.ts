@@ -126,6 +126,63 @@ export async function insertMessage(
 }
 
 /**
+ * Upsert the conversation AND persist one message in a SINGLE atomic statement.
+ *
+ * Equivalent to `upsertConversation` immediately followed by `insertMessage`,
+ * but collapsed into one round-trip so the two writes can never be torn apart
+ * by a crash (which would otherwise leave a conversation row with a touched
+ * `last_message_at` but no message / un-incremented `message_count`).
+ *
+ * The `message_count` increment is folded into the conversation upsert's
+ * `ON CONFLICT` clause (insert with `1`, bump by `1` on conflict) rather than a
+ * separate trailing UPDATE. This is deliberate: data-modifying CTEs all see the
+ * same snapshot and cannot observe rows their siblings insert, so a trailing
+ * `UPDATE … WHERE id = (SELECT id FROM conv)` would match zero rows for a
+ * brand-new conversation and leave its count at 0 instead of 1. Folding the
+ * bump into the upsert touches the conversation row exactly once and yields the
+ * same counts as the two-statement path (new → 1, existing → prev + 1).
+ */
+export async function persistMessage(
+  sql: postgres.Sql,
+  opts: {
+    sessionKey: string;
+    channel: string;
+    role: MessageRole;
+    content: string;
+    metadata?: Record<string, unknown>;
+    startedAt?: Date;
+    lastMessageAt?: Date;
+  },
+) {
+  const now = new Date();
+  const rows = await sql`
+    WITH conv AS (
+      INSERT INTO lp_conversations (session_key, channel, started_at, last_message_at, message_count)
+      VALUES (
+        ${opts.sessionKey},
+        ${opts.channel},
+        ${opts.startedAt ?? now},
+        ${opts.lastMessageAt ?? now},
+        1
+      )
+      ON CONFLICT (session_key) DO UPDATE SET
+        last_message_at = EXCLUDED.last_message_at,
+        message_count = lp_conversations.message_count + 1
+      RETURNING id
+    )
+    INSERT INTO lp_messages (conversation_id, role, content, metadata)
+    VALUES (
+      (SELECT id FROM conv),
+      ${opts.role},
+      ${opts.content},
+      ${sql.json((opts.metadata ?? {}) as postgres.JSONValue)}
+    )
+    RETURNING *
+  `;
+  return rows[0] as PgMessageRow;
+}
+
+/**
  * Query conversations with optional date-range filters.
  * Mirrors the createdAfter/createdBefore/updatedAfter/updatedBefore
  * params from the sessions.list API.

@@ -15,6 +15,7 @@ import {
   ensureSchema,
   upsertConversation,
   insertMessage,
+  persistMessage,
   queryConversations,
   pgRowToSessionEntry,
   type PgSessionRow,
@@ -346,5 +347,86 @@ describe("listSessionsFromStore with PostgreSQL-sourced sessions", () => {
     });
     expect(result.sessions.length).toBe(1);
     expect(result.sessions[0].displayName).toContain("new-session");
+  });
+});
+
+// oc-hygiene #8 — persistMessage merges upsertConversation + insertMessage into
+// ONE atomic statement. These assert it is behavior-equivalent to the two-call
+// path the hooks previously used, including the snapshot edge case: a brand-new
+// conversation must land at message_count = 1 (a naive trailing-UPDATE CTE would
+// leave it at 0, since sibling CTEs can't see each other's inserted rows).
+describe("persistMessage (combined upsert + insert CTE)", () => {
+  test("brand-new conversation: creates conv, inserts message, count = 1", async () => {
+    const key = `${testPrefix}:pm-new`;
+    const msg = await persistMessage(sql, {
+      sessionKey: key,
+      channel: "gateway",
+      role: "user",
+      content: "first message",
+      metadata: { src: "pm-test" },
+    });
+
+    // returns the inserted message row
+    expect(msg.role).toBe("user");
+    expect(msg.content).toBe("first message");
+
+    const [conv] = await sql`
+      SELECT message_count FROM lp_conversations WHERE session_key = ${key}
+    `;
+    // THE TRAP: must be 1, not 0
+    expect(conv.message_count).toBe(1);
+
+    const msgs = await sql`
+      SELECT * FROM lp_messages WHERE conversation_id = ${msg.conversation_id}
+    `;
+    expect(msgs.length).toBe(1);
+    expect(msgs[0].metadata).toEqual({ src: "pm-test" });
+  });
+
+  test("existing conversation: bumps count by 1 and touches last_message_at", async () => {
+    const key = `${testPrefix}:pm-existing`;
+    await persistMessage(sql, { sessionKey: key, channel: "gateway", role: "user", content: "m1" });
+
+    const newTs = new Date(baseTime + 5 * hour);
+    await persistMessage(sql, {
+      sessionKey: key,
+      channel: "gateway",
+      role: "assistant",
+      content: "m2",
+      lastMessageAt: newTs,
+    });
+
+    const [conv] = await sql`
+      SELECT message_count, last_message_at FROM lp_conversations WHERE session_key = ${key}
+    `;
+    expect(conv.message_count).toBe(2);
+    expect(new Date(conv.last_message_at).getTime()).toBe(newTs.getTime());
+
+    const msgs = await sql`
+      SELECT role FROM lp_messages WHERE conversation_id = (
+        SELECT id FROM lp_conversations WHERE session_key = ${key}
+      ) ORDER BY created_at
+    `;
+    expect(msgs.map((m) => m.role)).toEqual(["user", "assistant"]);
+  });
+
+  test("equivalent to upsertConversation + insertMessage on the same key", async () => {
+    // two-call path (the old hook behavior)
+    const keyOld = `${testPrefix}:pm-equiv-old`;
+    const convA = await upsertConversation(sql, { sessionKey: keyOld, channel: "gateway" });
+    await insertMessage(sql, { conversationId: convA.id, role: "user", content: "x" });
+
+    // combined path
+    const keyNew = `${testPrefix}:pm-equiv-new`;
+    await persistMessage(sql, {
+      sessionKey: keyNew,
+      channel: "gateway",
+      role: "user",
+      content: "x",
+    });
+
+    const [a] = await sql`SELECT message_count FROM lp_conversations WHERE session_key = ${keyOld}`;
+    const [b] = await sql`SELECT message_count FROM lp_conversations WHERE session_key = ${keyNew}`;
+    expect(b.message_count).toBe(a.message_count); // both 1
   });
 });

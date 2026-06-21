@@ -1,5 +1,5 @@
 import type { OpenClawPluginApi } from "openclaw/plugin-sdk";
-import { createPgClient, ensureSchema, upsertConversation, insertMessage } from "./db.js";
+import { createPgClient, ensureSchema, persistMessage } from "./db.js";
 
 const persistPostgresPlugin = {
   id: "persist-postgres",
@@ -49,13 +49,10 @@ const persistPostgresPlugin = {
           }
           await ensureReady();
           const sessionKey = ctx?.sessionKey ?? "unknown";
-          const conv = await upsertConversation(sql, {
+          await persistMessage(sql, {
             sessionKey,
             channel: "gateway",
             lastMessageAt: new Date(),
-          });
-          await insertMessage(sql, {
-            conversationId: conv.id,
             role: "user",
             content: event.prompt,
           });
@@ -81,17 +78,14 @@ const persistPostgresPlugin = {
           }
           await ensureReady();
           const sessionKey = ctx?.sessionKey ?? "unknown";
-          const conv = await upsertConversation(sql, {
-            sessionKey,
-            channel: "gateway",
-            lastMessageAt: new Date(),
-          });
           const content =
             typeof lastAssistant.content === "string"
               ? lastAssistant.content
               : JSON.stringify(lastAssistant.content);
-          await insertMessage(sql, {
-            conversationId: conv.id,
+          await persistMessage(sql, {
+            sessionKey,
+            channel: "gateway",
+            lastMessageAt: new Date(),
             role: "assistant",
             content,
           });
