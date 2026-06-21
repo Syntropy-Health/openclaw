@@ -120,12 +120,25 @@ export async function decideProfileInjection(opts: {
   resolvedUsers: TtlCache<string, ResolvedUser>;
   profileBlocks: TtlCache<string, string>;
   fetchProfile: (authToken: string) => Promise<SyntropyToolResult>;
+  /** Optional single-flight map (dedup concurrent profile fetches). */
+  profileInFlight?: Map<string, Promise<string | null>>;
+  /** Optional short-TTL "no usable profile" memo (skip per-turn re-fetch). */
+  profileNegative?: TtlCache<string, true>;
 }): Promise<{ prependContext?: string }> {
-  const { user, cacheKey, resolvedUsers, profileBlocks, fetchProfile } = opts;
+  const {
+    user,
+    cacheKey,
+    resolvedUsers,
+    profileBlocks,
+    fetchProfile,
+    profileInFlight,
+    profileNegative,
+  } = opts;
 
   if (!user) {
     resolvedUsers.delete(cacheKey);
     profileBlocks.delete(cacheKey);
+    profileNegative?.delete(cacheKey);
     return { prependContext: SYNTROPY_GATE };
   }
 
@@ -134,6 +147,8 @@ export async function decideProfileInjection(opts: {
     cache: profileBlocks,
     cacheKey,
     fetchProfile: () => fetchProfile(user.authToken),
+    inFlight: profileInFlight,
+    negativeCache: profileNegative,
   });
   return block ? { prependContext: block } : {};
 }
@@ -211,6 +226,19 @@ const syntropyPlugin = {
       maxSize: USER_CACHE_MAX_SIZE,
     });
 
+    // Single-flight: concurrent messages from one user that both miss the
+    // profile cache share ONE get_health_profile fetch instead of racing two.
+    const profileInFlight = new Map<string, Promise<string | null>>();
+
+    // Short-TTL memo of "no usable profile" so an empty/unusable profile isn't
+    // re-fetched from SJ on EVERY turn (the positive cache only holds real
+    // blocks). 60s ≪ the 10-min positive TTL so web-app edits still appear soon.
+    const PROFILE_NEGATIVE_TTL_MS = 60_000;
+    const profileNegative = new TtlCache<string, true>({
+      ttlMs: PROFILE_NEGATIVE_TTL_MS,
+      maxSize: USER_CACHE_MAX_SIZE,
+    });
+
     // -----------------------------------------------------------------
     // Hook: before_agent_start (priority 35)
     // -----------------------------------------------------------------
@@ -233,6 +261,8 @@ const syntropyPlugin = {
             cacheKey,
             resolvedUsers,
             profileBlocks,
+            profileInFlight,
+            profileNegative,
             fetchProfile: (authToken) =>
               callSyntropyTool(syntropyBaseUrl, authToken, "get_health_profile", {}),
           });

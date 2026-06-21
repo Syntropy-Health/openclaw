@@ -26,42 +26,76 @@ import { formatProfileBlock } from "./profile.js";
  * @param opts.cache         TtlCache keyed by the session cacheKey → formatted block.
  * @param opts.cacheKey      `${channel}:${peerId}` identity-scoping key.
  * @param opts.fetchProfile  Thunk that fetches the SJ `get_health_profile` result.
+ * @param opts.inFlight      Optional single-flight map: coalesces concurrent
+ *                           cold-key misses onto one fetch (dedup under burst).
+ *                           Omit → unchanged behaviour (each miss fetches).
+ * @param opts.negativeCache Optional short-TTL memo of "no usable profile": when a
+ *                           fetch succeeds but yields no block, skip re-fetching
+ *                           until this TTL expires. Omit → unchanged behaviour (an
+ *                           empty profile re-fetches every turn). NOT set on
+ *                           transient (`!ok`) failures.
  *
  * Behavior:
- * 1. Cache hit → return the cached block; `fetchProfile` is NOT called.
- * 2. Cache miss → `await fetchProfile()`:
- *    - not ok (`ok === false`) → `null` (inject nothing), not cached.
+ * 1. Positive cache hit → return the cached block; `fetchProfile` is NOT called.
+ * 1b. Negative cache hit (if provided) → return `null` without fetching.
+ * 2. Single-flight (if provided): await a concurrent in-flight fetch for the same
+ *    key instead of starting a second one.
+ * 3. Cache miss → `await fetchProfile()`:
+ *    - not ok (`ok === false`) → `null`, not cached (transient — re-check next turn).
  *    - ok → `formatProfileBlock(result.data)`:
- *      - non-empty string → cache and return it.
- *      - `null` → `null`, NOT cached (re-check next turn).
- * 3. `fetchProfile` rejects/throws → caught, returns `null`.
+ *      - non-empty string → positive-cache and return it.
+ *      - `null` → negative-cache (if provided) and return `null`.
+ * 4. `fetchProfile` rejects/throws → caught, returns `null`.
  */
 export async function resolveProfileContext(opts: {
   cache: TtlCache<string, string>;
   cacheKey: string;
   fetchProfile: () => Promise<SyntropyToolResult>;
+  inFlight?: Map<string, Promise<string | null>>;
+  negativeCache?: TtlCache<string, true>;
 }): Promise<string | null> {
-  const { cache, cacheKey, fetchProfile } = opts;
+  const { cache, cacheKey, fetchProfile, inFlight, negativeCache } = opts;
 
   // Whole body is failure-safe: any throw — a rejecting/throwing fetch, the
   // formatter, or even a hostile cache.get/set — collapses to null so the
   // caller injects nothing. resolveProfileContext MUST NOT throw for any input.
   try {
-    // 1. Cache hit — serve without re-hitting SJ.
+    // 1. Positive cache hit — serve without re-hitting SJ.
     const cached = cache.get(cacheKey);
     if (typeof cached === "string") return cached;
 
-    // 2. Cache miss — fetch, format, cache only usable blocks.
-    const result = await fetchProfile();
-    if (!result.ok) return null;
+    // 1b. Negative cache hit — a recent fetch found no usable profile; don't
+    //     hammer SJ on every turn until the short negative TTL expires.
+    if (negativeCache?.get(cacheKey)) return null;
 
-    const block = formatProfileBlock(result.data);
-    if (block === null) return null; // unusable — do NOT cache, re-check next turn.
+    // 2. Single-flight — coalesce concurrent cold-key misses onto one fetch.
+    const existing = inFlight?.get(cacheKey);
+    if (existing) return await existing;
 
-    cache.set(cacheKey, block);
-    return block;
+    // 3. Cache miss — fetch, format, cache only usable blocks.
+    const work = (async (): Promise<string | null> => {
+      const result = await fetchProfile();
+      if (!result.ok) return null; // transient — not negative-cached, re-fetch next turn.
+
+      const block = formatProfileBlock(result.data);
+      if (block === null) {
+        negativeCache?.set(cacheKey, true); // empty/unusable — memo briefly.
+        return null;
+      }
+
+      cache.set(cacheKey, block);
+      return block;
+    })();
+
+    if (!inFlight) return await work;
+    inFlight.set(cacheKey, work);
+    try {
+      return await work;
+    } finally {
+      inFlight.delete(cacheKey);
+    }
   } catch {
-    // 3. Failure-safe — never propagate.
+    // 4. Failure-safe — never propagate.
     return null;
   }
 }
