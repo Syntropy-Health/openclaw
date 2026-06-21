@@ -2,12 +2,35 @@ export type GroupIdStrategy = "channel-sender" | "session" | "static" | "identit
 
 /**
  * Backend mode: "cloud" uses Zep Cloud SDK, "self-hosted" uses raw Graphiti REST API.
- * Auto-detected from config: if apiKey is present → cloud, else → self-hosted.
+ * Legacy derived field, kept for backward-compat with readers of `cfg.mode`
+ * (createClient's fallback path). Prefer `backend` for new code.
  */
 export type BackendMode = "cloud" | "self-hosted";
 
+/**
+ * Explicit backend selection. The locked PHI posture defaults to "self-hosted".
+ * QA→prod is a config swap (set backend: zep-cloud + apiKey).
+ */
+export type BackendType = "self-hosted" | "zep-cloud";
+
 export type GraphitiConfig = {
-  /** Backend mode — auto-detected from apiKey / serverUrl presence. */
+  /**
+   * Explicit backend. Resolution order in the parser:
+   *   1. explicit `backend` wins
+   *   2. else apiKey present → inferred "zep-cloud" (+ deprecationWarning)
+   *   3. else default "self-hosted"
+   * A parsed config ALWAYS sets this. It is optional on the type only so that
+   * legacy callers passing un-parsed cfg objects (no `backend`) still typecheck
+   * against createClient's backward-compat fallback.
+   */
+  backend?: BackendType;
+  /**
+   * Deprecation notice surfaced by the parser when the backend was inferred
+   * implicitly from apiKey presence. config.ts has no logger, so it is carried
+   * here and logged by index.ts at register().
+   */
+  deprecationWarning?: string;
+  /** Legacy derived backend mode — preserved for `cfg.mode` readers. */
   mode: BackendMode;
   /** Zep Cloud API key (cloud mode). Supports ${GETZEP_API_KEY}. */
   apiKey?: string;
@@ -35,6 +58,7 @@ export type GroupIdContext = {
 };
 
 const ALLOWED_KEYS = [
+  "backend",
   "apiKey",
   "serverUrl",
   "userId",
@@ -47,6 +71,8 @@ const ALLOWED_KEYS = [
 ];
 
 const VALID_STRATEGIES: GroupIdStrategy[] = ["channel-sender", "session", "static", "identity"];
+
+const VALID_BACKENDS: BackendType[] = ["self-hosted", "zep-cloud"];
 
 function assertAllowedKeys(value: Record<string, unknown>, allowed: string[], label: string) {
   const unknown = Object.keys(value).filter((key) => !allowed.includes(key));
@@ -137,15 +163,50 @@ export const graphitiConfigSchema = {
       serverUrl = normalizeUrl(resolveEnvVars(cfg.serverUrl));
     }
 
-    // Require at least one backend
-    if (!apiKey && !serverUrl) {
-      throw new Error(
-        "Either apiKey (for Zep Cloud) or serverUrl (for self-hosted Graphiti) is required",
-      );
+    // ------------------------------------------------------------------
+    // Resolve backend (explicit field replaces implicit apiKey detection)
+    // ------------------------------------------------------------------
+    let backend: BackendType;
+    let deprecationWarning: string | undefined;
+
+    if (cfg.backend !== undefined) {
+      // 1. explicit backend wins
+      if (typeof cfg.backend !== "string" || !VALID_BACKENDS.includes(cfg.backend as BackendType)) {
+        throw new Error(
+          `backend must be one of ${VALID_BACKENDS.join(", ")} (got: ${String(cfg.backend)})`,
+        );
+      }
+      backend = cfg.backend as BackendType;
+    } else if (apiKey) {
+      // 2. implicit inference from apiKey — deprecated
+      backend = "zep-cloud";
+      deprecationWarning =
+        "memory-graphiti: implicit cloud detection from apiKey is deprecated; " +
+        "set backend: zep-cloud explicitly (defaults to self-hosted otherwise)";
+    } else {
+      // 3. default to the locked PHI posture
+      backend = "self-hosted";
     }
 
-    // Auto-detect mode
-    const mode: BackendMode = apiKey ? "cloud" : "self-hosted";
+    // ------------------------------------------------------------------
+    // Validate the resolved backend has the credential it needs
+    // ------------------------------------------------------------------
+    if (backend === "zep-cloud" && !apiKey) {
+      throw new Error("backend 'zep-cloud' requires apiKey (Zep Cloud API key)");
+    }
+    if (backend === "self-hosted" && !serverUrl) {
+      // Preserve the legacy message when nothing at all was configured, so a
+      // bare {} / empty-serverUrl config still reads as "pick a backend".
+      if (!apiKey && cfg.backend === undefined) {
+        throw new Error(
+          "Either apiKey (for Zep Cloud) or serverUrl (for self-hosted Graphiti) is required",
+        );
+      }
+      throw new Error("backend 'self-hosted' requires serverUrl (Graphiti REST API URL)");
+    }
+
+    // Legacy derived mode, kept for backward-compat readers of cfg.mode.
+    const mode: BackendMode = backend === "zep-cloud" ? "cloud" : "self-hosted";
 
     // userId (optional, cloud mode)
     const userId = typeof cfg.userId === "string" ? cfg.userId.trim() || undefined : undefined;
@@ -184,6 +245,8 @@ export const graphitiConfigSchema = {
     }
 
     return {
+      backend,
+      deprecationWarning,
       mode,
       apiKey,
       serverUrl,
@@ -198,6 +261,10 @@ export const graphitiConfigSchema = {
   },
 
   uiHints: {
+    backend: {
+      label: "Backend",
+      help: "Explicit memory backend. 'self-hosted' (default) uses the Graphiti REST API at serverUrl (locked PHI posture); 'zep-cloud' uses Zep Cloud with apiKey.",
+    },
     apiKey: {
       label: "Zep Cloud API Key",
       sensitive: true,
