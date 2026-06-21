@@ -191,25 +191,6 @@ export async function linkExternalId(
 }
 
 /**
- * Find users by first and last name (case-insensitive exact match).
- * Used as a local DB fallback when the Syntropy Journals API is unavailable.
- */
-export async function findUsersByName(
-  sql: postgres.Sql,
-  firstName: string,
-  lastName: string,
-): Promise<UserRow[]> {
-  const rows = await sql`
-    SELECT * FROM lp_users
-    WHERE LOWER(first_name) = LOWER(${firstName})
-      AND LOWER(last_name) = LOWER(${lastName})
-    ORDER BY updated_at DESC
-    LIMIT 5
-  `;
-  return rows as unknown as UserRow[];
-}
-
-/**
  * List all channel identities linked to a user.
  */
 export async function listUserChannels(
