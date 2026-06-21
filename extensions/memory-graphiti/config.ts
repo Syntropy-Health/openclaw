@@ -1,3 +1,6 @@
+import { normalizeE164 } from "openclaw/plugin-sdk";
+import { isCanonicalE164 } from "./tripwire.js";
+
 export type GroupIdStrategy = "channel-sender" | "session" | "static" | "identity";
 
 /**
@@ -50,6 +53,12 @@ export type GraphitiConfig = {
   autoCapture: boolean;
   autoRecall: boolean;
   maxFacts: number;
+  /**
+   * Known-synthetic / QA WhatsApp numbers (E.164). The PHI tripwire treats the
+   * deployment as QA-only — and therefore lets the zep-cloud backend send data —
+   * ONLY IF EVERY live WhatsApp allow-list entry is in this set. Defaults to [].
+   */
+  qaNumbers?: string[];
 };
 
 export type GroupIdContext = {
@@ -68,6 +77,7 @@ const ALLOWED_KEYS = [
   "autoCapture",
   "autoRecall",
   "maxFacts",
+  "qaNumbers",
 ];
 
 const VALID_STRATEGIES: GroupIdStrategy[] = ["channel-sender", "session", "static", "identity"];
@@ -102,7 +112,7 @@ function normalizeUrl(url: string): string {
  * Session key format: `agent:<agentId>:<channel>:<type>:<peerId>`
  * We take the last segment as the sender identifier.
  */
-function extractSenderFromSessionKey(sessionKey: string): string | null {
+export function extractSenderFromSessionKey(sessionKey: string): string | null {
   const parts = sessionKey.split(":").filter(Boolean);
   if (parts.length < 3 || parts[0] !== "agent") {
     return null;
@@ -244,6 +254,41 @@ export const graphitiConfigSchema = {
       throw new Error("maxFacts must be between 1 and 100");
     }
 
+    // qaNumbers (optional, default: []). Known-synthetic/QA WhatsApp numbers the
+    // PHI tripwire checks senders against. They are STORED CANONICAL E.164 — each
+    // raw entry is run through normalizeE164 and REJECTED if it does not
+    // canonicalize to a valid E.164. This refuses raw JID / bare-non-numeric /
+    // "@lid" / empty forms at parse time so the operator cannot silently weaken
+    // the gate (a non-canonical stored entry would never match the canonical
+    // inbound senderE164 — over-blocking — or, worse, an attacker-shaped entry
+    // could under-block). normalizeE164 NEVER throws and NEVER signals
+    // invalidity, so we validate the canonical form explicitly here.
+    let qaNumbers: string[] = [];
+    if (cfg.qaNumbers !== undefined) {
+      const rawEntries: string[] = Array.isArray(cfg.qaNumbers)
+        ? cfg.qaNumbers.filter((n): n is string => typeof n === "string")
+        : typeof cfg.qaNumbers === "string"
+          ? [cfg.qaNumbers]
+          : [];
+      const canonical: string[] = [];
+      for (const raw of rawEntries) {
+        const trimmed = raw.trim();
+        if (trimmed.length === 0) {
+          continue; // ignore empty/whitespace-only entries
+        }
+        const e164 = normalizeE164(trimmed);
+        if (!isCanonicalE164(e164)) {
+          throw new Error(
+            `qaNumbers entry ${JSON.stringify(raw)} is not a valid E.164 phone number ` +
+              `(canonicalized to ${JSON.stringify(e164)}). Use canonical E.164 ` +
+              `(e.g. +15555550001) — raw JID, "@lid", or non-numeric forms are rejected.`,
+          );
+        }
+        canonical.push(e164);
+      }
+      qaNumbers = canonical;
+    }
+
     return {
       backend,
       deprecationWarning,
@@ -257,6 +302,7 @@ export const graphitiConfigSchema = {
       autoCapture: cfg.autoCapture !== false,
       autoRecall: cfg.autoRecall !== false,
       maxFacts,
+      qaNumbers,
     };
   },
 
@@ -309,6 +355,11 @@ export const graphitiConfigSchema = {
     maxFacts: {
       label: "Max Facts",
       placeholder: "10",
+      advanced: true,
+    },
+    qaNumbers: {
+      label: "QA Numbers (PHI tripwire)",
+      help: "Known-synthetic/QA WhatsApp numbers (E.164). The tripwire treats the deployment as QA-only — and only then lets the zep-cloud backend send data — if EVERY live WhatsApp allow-list entry is in this set. Self-hosted is never gated.",
       advanced: true,
     },
   },
