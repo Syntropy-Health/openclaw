@@ -322,6 +322,16 @@ export type PluginHookAgentContext = {
   sessionId?: string;
   workspaceDir?: string;
   messageProvider?: string;
+  /**
+   * Canonical normalized E.164 of the inbound sender (the host computes it via
+   * jidToE164/normalizeE164 BEFORE the session key is built — and the session
+   * key collapses DMs to `main` under the default dmScope, so it is NOT a
+   * reliable sender source). null when the sender has no phone identity (most
+   * non-phone channels) or cannot be resolved. Plugins that must key on the
+   * actual sender identity (e.g. the memory PHI tripwire) gate on this, not on
+   * the session key.
+   */
+  senderE164?: string | null;
 };
 
 // before_agent_start hook

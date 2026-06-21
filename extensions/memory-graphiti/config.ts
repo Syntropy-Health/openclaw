@@ -1,3 +1,6 @@
+import { normalizeE164 } from "openclaw/plugin-sdk";
+import { isCanonicalE164 } from "./tripwire.js";
+
 export type GroupIdStrategy = "channel-sender" | "session" | "static" | "identity";
 
 /**
@@ -252,15 +255,38 @@ export const graphitiConfigSchema = {
     }
 
     // qaNumbers (optional, default: []). Known-synthetic/QA WhatsApp numbers the
-    // PHI tripwire checks the live allow-list against. Normalized to string[].
+    // PHI tripwire checks senders against. They are STORED CANONICAL E.164 — each
+    // raw entry is run through normalizeE164 and REJECTED if it does not
+    // canonicalize to a valid E.164. This refuses raw JID / bare-non-numeric /
+    // "@lid" / empty forms at parse time so the operator cannot silently weaken
+    // the gate (a non-canonical stored entry would never match the canonical
+    // inbound senderE164 — over-blocking — or, worse, an attacker-shaped entry
+    // could under-block). normalizeE164 NEVER throws and NEVER signals
+    // invalidity, so we validate the canonical form explicitly here.
     let qaNumbers: string[] = [];
-    if (Array.isArray(cfg.qaNumbers)) {
-      qaNumbers = cfg.qaNumbers
-        .filter((n): n is string => typeof n === "string")
-        .map((n) => n.trim())
-        .filter((n) => n.length > 0);
-    } else if (typeof cfg.qaNumbers === "string" && cfg.qaNumbers.trim()) {
-      qaNumbers = [cfg.qaNumbers.trim()];
+    if (cfg.qaNumbers !== undefined) {
+      const rawEntries: string[] = Array.isArray(cfg.qaNumbers)
+        ? cfg.qaNumbers.filter((n): n is string => typeof n === "string")
+        : typeof cfg.qaNumbers === "string"
+          ? [cfg.qaNumbers]
+          : [];
+      const canonical: string[] = [];
+      for (const raw of rawEntries) {
+        const trimmed = raw.trim();
+        if (trimmed.length === 0) {
+          continue; // ignore empty/whitespace-only entries
+        }
+        const e164 = normalizeE164(trimmed);
+        if (!isCanonicalE164(e164)) {
+          throw new Error(
+            `qaNumbers entry ${JSON.stringify(raw)} is not a valid E.164 phone number ` +
+              `(canonicalized to ${JSON.stringify(e164)}). Use canonical E.164 ` +
+              `(e.g. +15555550001) — raw JID, "@lid", or non-numeric forms are rejected.`,
+          );
+        }
+        canonical.push(e164);
+      }
+      qaNumbers = canonical;
     }
 
     return {

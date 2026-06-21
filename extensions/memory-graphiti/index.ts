@@ -185,11 +185,23 @@ const memoryPlugin = {
       );
     };
 
-    // REGISTRATION GATE (hard-fail, defense-in-depth). Refuse to register the
-    // cloud backend while the live allow-list is not provably QA-only. The loader
-    // wraps register() in try/catch → this marks the plugin status=error loudly
-    // and the gateway survives.
-    if (cfg.backend === "zep-cloud" && !isQaOnly()) {
+    // self-hosted is NEVER wrapped/gated; cloud is gated per-call at each site.
+    const client = createClient(cfg);
+
+    // Derive the cloud decision from the ACTUAL constructed client — NOT from
+    // cfg.backend. createClient can build a ZepCloudClient via the legacy
+    // mode/apiKey fallback path (a cfg with mode="cloud" + apiKey but no
+    // `backend` field), which would leave a cfg.backend-keyed gate INACTIVE — a
+    // CLOUD client with the tripwire bypassed. Keying on `client instanceof
+    // ZepCloudClient` ties the gate's cloud-decision to client selection, so the
+    // gate can NEVER be looser than the client that was actually built.
+    const isCloud = client instanceof ZepCloudClient;
+
+    // REGISTRATION GATE (hard-fail, defense-in-depth). Refuse to register a CLOUD
+    // client (by actual type, not by cfg.backend) while the live allow-list is
+    // not provably QA-only. The loader wraps register() in try/catch → this marks
+    // the plugin status=error loudly and the gateway survives.
+    if (isCloud && !isQaOnly()) {
       throw new Error(
         "phi_tripwire: refusing to register memory-graphiti on zep-cloud while the " +
           "WhatsApp allow-list is not provably QA-only (PHI exposure risk). Set " +
@@ -198,14 +210,15 @@ const memoryPlugin = {
     }
 
     // PER-SENDER GATE (load-bearing). True ⇒ this conversation may touch Zep.
-    //   - self-hosted is NEVER gated (PHI in-house is sanctioned) ⇒ always true.
-    //   - cloud requires THIS conversation's resolved sender ∈ qaNumbers.
-    // A sessionKey-less / unresolvable-sender call on cloud ⇒ false (fail-closed).
-    const zepAllowed = (sessionKey: string | undefined): boolean =>
-      cfg.backend !== "zep-cloud" || senderZepAllowed(sessionKey, qaNumbers);
-
-    // self-hosted is NEVER wrapped/gated; cloud is gated per-call at each site.
-    const client = createClient(cfg);
+    //   - a non-cloud client is NEVER gated (PHI in-house is sanctioned) ⇒ true.
+    //   - a cloud client requires THIS conversation's resolved sender ∈ qaNumbers.
+    // The sender is the host-resolved ctx.senderE164 (canonical E.164 computed
+    // BEFORE the session key — the session key collapses DMs to `main` under the
+    // default dmScope, so it is NOT a reliable sender source). A null/undefined
+    // senderE164 (graphiti_* tools have no ctx; non-phone channels carry null)
+    // on cloud ⇒ false (fail-closed).
+    const zepAllowed = (senderE164: string | null | undefined): boolean =>
+      !isCloud || senderZepAllowed(senderE164, qaNumbers);
 
     // Identity DB connection — only created when using "identity" strategy
     const identitySql =
@@ -428,8 +441,10 @@ const memoryPlugin = {
 
         // PHI tripwire (recall): on cloud, only recall for a QA sender. A non-QA
         // sender must NEVER trigger a Zep read or inject recalled facts — skip
-        // entirely (no network, no prependContext). Self-hosted is never gated.
-        if (!zepAllowed(ctx.sessionKey)) {
+        // entirely (no network, no prependContext). Gate on the host-resolved
+        // ctx.senderE164, NOT the session key (which collapses DMs to `main`).
+        // Self-hosted is never gated.
+        if (!zepAllowed(ctx.senderE164)) {
           onBreach({ op: "searchFacts", backendLabel: client.label, reason: "non-qa-sender" });
           return;
         }
@@ -484,8 +499,9 @@ const memoryPlugin = {
           // PHI tripwire (capture): on cloud, only capture a QA sender's
           // conversation. A non-QA sender's PHI must NEVER be written to Zep —
           // drop it (no addMessages, no network). Never throws (capture is
-          // already fire-and-forget). Self-hosted is never gated.
-          if (!zepAllowed(ctx.sessionKey)) {
+          // already fire-and-forget). Gate on the host-resolved ctx.senderE164,
+          // NOT the session key. Self-hosted is never gated.
+          if (!zepAllowed(ctx.senderE164)) {
             onBreach({ op: "addMessages", backendLabel: client.label, reason: "non-qa-sender" });
             return;
           }

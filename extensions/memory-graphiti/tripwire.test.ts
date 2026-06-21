@@ -15,79 +15,136 @@
 
 import { describe, expect, it, vi } from "vitest";
 import { GraphitiRestClient } from "./client.js";
-import { computeIsQaOnly, extractSender, senderZepAllowed } from "./tripwire.js";
+import { graphitiConfigSchema } from "./config.js";
+import { computeIsQaOnly, isCanonicalE164, senderZepAllowed } from "./tripwire.js";
 import { ZepCloudClient } from "./zep-cloud-client.js";
 
 // ============================================================================
-// extractSender — pure sender resolution
-// ============================================================================
-
-describe("extractSender", () => {
-  it("resolves the WhatsApp DM peer (last segment) from a full session key", () => {
-    expect(extractSender("agent:main:whatsapp:direct:+1000000001")).toBe("+1000000001");
-  });
-
-  it("resolves the peer for other channels too (last segment)", () => {
-    expect(extractSender("agent:main:telegram:direct:7550356539")).toBe("7550356539");
-  });
-
-  it("returns null for an undefined/empty session key", () => {
-    expect(extractSender(undefined)).toBeNull();
-    expect(extractSender("")).toBeNull();
-  });
-
-  it("returns null for a non-agent / too-short shape", () => {
-    expect(extractSender("not:agent")).toBeNull();
-    expect(extractSender("agent:main")).toBeNull();
-  });
-});
-
-// ============================================================================
-// senderZepAllowed — the PRIMARY per-sender gate (exact truth conditions)
+// senderZepAllowed — the PRIMARY per-sender gate (exact truth conditions).
+//
+// NEW-1: the gate keys on the host-resolved E.164 sender (ctx.senderE164),
+// passed DIRECTLY — NOT on the session key (the session key collapses DMs to
+// `main` under the default dmScope, so it is not a reliable sender source).
 // ============================================================================
 
 describe("senderZepAllowed", () => {
   const QA = ["+1000000001", "+1000000002"];
 
-  it("true: a QA sender (resolved sender ∈ qaNumbers)", () => {
-    expect(senderZepAllowed("agent:main:whatsapp:direct:+1000000001", QA)).toBe(true);
+  it("true: a QA sender (senderE164 ∈ qaNumbers)", () => {
+    expect(senderZepAllowed("+1000000001", QA)).toBe(true);
   });
 
   it("false: a non-QA sender (real user number not in qaNumbers)", () => {
-    expect(senderZepAllowed("agent:main:whatsapp:direct:+15551234567", QA)).toBe(false);
+    expect(senderZepAllowed("+15551234567", QA)).toBe(false);
   });
 
   it("false: empty qaNumbers even for a would-be-QA sender (drop ALL)", () => {
-    expect(senderZepAllowed("agent:main:whatsapp:direct:+1000000001", [])).toBe(false);
+    expect(senderZepAllowed("+1000000001", [])).toBe(false);
   });
 
-  it("false: unresolvable / empty session key (fail-closed)", () => {
+  it("false: null/undefined/empty/whitespace senderE164 (fail-closed)", () => {
+    expect(senderZepAllowed(null, QA)).toBe(false);
     expect(senderZepAllowed(undefined, QA)).toBe(false);
     expect(senderZepAllowed("", QA)).toBe(false);
-    expect(senderZepAllowed("agent:main", QA)).toBe(false);
+    expect(senderZepAllowed("   ", QA)).toBe(false);
   });
 
-  it("false: an other-channel sender id not in qaNumbers", () => {
-    // A paired/other-channel real user whose peer id is not a QA number.
-    expect(senderZepAllowed("agent:main:telegram:direct:7550356539", QA)).toBe(false);
+  it("false: an other-channel sender number not in qaNumbers", () => {
+    // A paired/other-channel real user whose number is not a QA number.
+    expect(senderZepAllowed("+447550356539", QA)).toBe(false);
   });
 
-  it("false: a group / odd session-key shape whose resolved sender ∉ qaNumbers", () => {
-    expect(senderZepAllowed("agent:main:whatsapp:group:120363@g.us", QA)).toBe(false);
+  // NEW-2: two-sided canonicalization — both senderE164 and qaNumbers are run
+  // through normalizeE164 before the membership check, so there is zero format
+  // asymmetry. These three inputs all canonicalize to +15555550001.
+  describe("two-sided E.164 canonicalization (NEW-2)", () => {
+    const QA_CANON = ["+15555550001"];
+
+    it("true: senderE164 already canonical (+15555550001)", () => {
+      expect(senderZepAllowed("+15555550001", QA_CANON)).toBe(true);
+    });
+
+    it("true: senderE164 missing the leading + (15555550001) still matches", () => {
+      expect(senderZepAllowed("15555550001", QA_CANON)).toBe(true);
+    });
+
+    it("true: senderE164 as a whatsapp JID-ish form (15555550001@s.whatsapp.net)", () => {
+      expect(senderZepAllowed("15555550001@s.whatsapp.net", QA_CANON)).toBe(true);
+    });
+
+    it("true: a non-canonical qaNumbers entry canonicalizes to match a canonical sender", () => {
+      expect(senderZepAllowed("+15555550001", ["15555550001"])).toBe(true);
+    });
+
+    it("true: whitespace around senderE164 is trimmed/normalized before compare", () => {
+      expect(senderZepAllowed("  +15555550001  ", QA_CANON)).toBe(true);
+    });
+
+    it("false: a senderE164 that canonicalizes to a non-E.164 shape never matches", () => {
+      // "garbage" → normalizeE164 → "+" → not in any canonical qaSet.
+      expect(senderZepAllowed("garbage", QA_CANON)).toBe(false);
+    });
+  });
+});
+
+// ============================================================================
+// isCanonicalE164 — the validity predicate normalizeE164 itself omits.
+// ============================================================================
+
+describe("isCanonicalE164", () => {
+  it("true for canonical E.164 (+ then 8..15 digits, leading non-zero)", () => {
+    expect(isCanonicalE164("+15555550001")).toBe(true);
+    expect(isCanonicalE164("+1000000001")).toBe(true);
   });
 
-  it("true: whitespace around qaNumbers / sender is trimmed before compare", () => {
-    expect(senderZepAllowed("agent:main:whatsapp:direct:+1000000001", ["  +1000000001  "])).toBe(
-      true,
-    );
+  it("false for the empty-ish normalize output '+' (garbage collapses here)", () => {
+    expect(isCanonicalE164("+")).toBe(false);
   });
 
-  it("false: '*' is NOT a wildcard — a '*' qaNumbers entry never sanctions a real sender", () => {
-    expect(senderZepAllowed("agent:main:whatsapp:direct:+15551234567", ["*"])).toBe(false);
+  it("false for too-short, leading-zero, or non-+ forms", () => {
+    expect(isCanonicalE164("+123")).toBe(false); // too short
+    expect(isCanonicalE164("+01234567")).toBe(false); // leading zero
+    expect(isCanonicalE164("15555550001")).toBe(false); // no +
+  });
+});
+
+// ============================================================================
+// qaNumbers parse validation (NEW-2) — non-E.164 entries are REJECTED at parse.
+// ============================================================================
+
+describe("qaNumbers parse validation (NEW-2)", () => {
+  function parseWith(qaNumbers: unknown) {
+    return graphitiConfigSchema.parse({
+      backend: "self-hosted",
+      serverUrl: "http://localhost:8000",
+      qaNumbers,
+    });
+  }
+
+  it("stores entries CANONICALIZED to E.164 (leading + added)", () => {
+    const cfg = parseWith(["15555550001", "+1000000002"]);
+    expect(cfg.qaNumbers).toEqual(["+15555550001", "+1000000002"]);
   });
 
-  it("false: defensively, a '*'-shaped sender never matches a '*' qaNumbers entry", () => {
-    expect(senderZepAllowed("agent:main:whatsapp:direct:*", ["*"])).toBe(false);
+  it("accepts a single string and a whatsapp JID-ish form, canonicalizing both", () => {
+    expect(parseWith("15555550001").qaNumbers).toEqual(["+15555550001"]);
+    expect(parseWith(["15555550001@s.whatsapp.net"]).qaNumbers).toEqual(["+15555550001"]);
+  });
+
+  it("THROWS when an entry cannot canonicalize to a valid E.164 (non-numeric)", () => {
+    expect(() => parseWith(["+1000000001", "not-a-number"])).toThrow(/not a valid E\.164/i);
+  });
+
+  it("THROWS for a bare '@lid' / JID with no usable number", () => {
+    expect(() => parseWith(["abc@lid"])).toThrow(/not a valid E\.164/i);
+  });
+
+  it("THROWS for the universal-admit '*' wildcard (collapses to '+')", () => {
+    expect(() => parseWith(["*"])).toThrow(/not a valid E\.164/i);
+  });
+
+  it("ignores empty/whitespace-only entries (does not throw, drops them)", () => {
+    expect(parseWith(["+1000000001", "  "]).qaNumbers).toEqual(["+1000000001"]);
   });
 });
 
@@ -259,14 +316,19 @@ const REAL_WHATSAPP = {
 };
 const QA_NUMBERS = ["+1000000001", "+1000000002"];
 
-// A QA sender / a real sender as full session keys driving the per-sender gate.
+// A QA sender / a real sender driving the per-sender gate. The gate keys on
+// ctx.senderE164 (the host-resolved canonical sender), NOT the session key —
+// note the sessionKey here intentionally collapses to `main` (the default
+// dmScope DOES this), which is exactly why senderE164 must be the gate input.
 const QA_SENDER_CTX = {
   messageProvider: "whatsapp",
-  sessionKey: "agent:main:whatsapp:direct:+1000000001",
+  sessionKey: "agent:main:main",
+  senderE164: "+1000000001",
 };
 const REAL_SENDER_CTX = {
   messageProvider: "whatsapp",
-  sessionKey: "agent:main:whatsapp:direct:+15551234567",
+  sessionKey: "agent:main:main",
+  senderE164: "+15551234567",
 };
 
 type CapturedHooks = {
@@ -369,6 +431,78 @@ describe("registration gate (hard-fail) — zep-cloud demands provable QA-only",
         whatsapp: REAL_WHATSAPP,
       }),
     ).resolves.toBeDefined();
+  });
+});
+
+// ============================================================================
+// NEW-5: the cloud decision is derived from the ACTUAL constructed client
+// (client instanceof ZepCloudClient), NOT cfg.backend. A cfg that builds a
+// ZepCloudClient via the legacy apiKey-inference path (apiKey present, NO
+// explicit `backend` field) must STILL be gated — the registration gate fires
+// and the per-call gate is active.
+// ============================================================================
+
+describe("NEW-5: cloud gate tracks the constructed client, not cfg.backend", () => {
+  it("legacy apiKey-inference path builds a CLOUD client → registration gate STILL fires on a non-QA allow-list", async () => {
+    await expect(
+      registerWith({
+        // No explicit `backend` — apiKey presence infers zep-cloud (deprecated)
+        // and createClient builds a ZepCloudClient. The gate must follow.
+        pluginConfig: { apiKey: "z_key", qaNumbers: QA_NUMBERS },
+        whatsapp: REAL_WHATSAPP,
+      }),
+    ).rejects.toThrow(/phi_tripwire/i);
+  });
+
+  it("legacy apiKey-inference cloud client: per-call capture gate ACTIVE — NON-QA sender's addMessages NOT called", async () => {
+    const addSpy = vi.spyOn(ZepCloudClient.prototype, "addMessages").mockResolvedValue(undefined);
+    try {
+      const { hooks, logger } = await registerWith({
+        pluginConfig: {
+          // No explicit backend → inferred zep-cloud, ZepCloudClient built.
+          apiKey: "z_key",
+          qaNumbers: QA_NUMBERS,
+          groupIdStrategy: "channel-sender",
+        },
+        whatsapp: QA_ONLY_WHATSAPP, // registration passes; runtime sender is real
+      });
+
+      await hooks.agent_end?.(
+        { success: true, messages: [{ role: "user", content: "Hello, my BP is 140/90" }] },
+        REAL_SENDER_CTX,
+      );
+
+      expect(addSpy).not.toHaveBeenCalled();
+      const breachLogged = logger.error.mock.calls.some((c) =>
+        String(c[0]).includes("phi_tripwire_breach"),
+      );
+      expect(breachLogged).toBe(true);
+    } finally {
+      addSpy.mockRestore();
+    }
+  });
+
+  it("legacy apiKey-inference cloud client: per-call capture gate ALLOWS a QA sender", async () => {
+    const addSpy = vi.spyOn(ZepCloudClient.prototype, "addMessages").mockResolvedValue(undefined);
+    try {
+      const { hooks } = await registerWith({
+        pluginConfig: {
+          apiKey: "z_key",
+          qaNumbers: QA_NUMBERS,
+          groupIdStrategy: "channel-sender",
+        },
+        whatsapp: QA_ONLY_WHATSAPP,
+      });
+
+      await hooks.agent_end?.(
+        { success: true, messages: [{ role: "user", content: "Hello" }] },
+        QA_SENDER_CTX,
+      );
+
+      expect(addSpy).toHaveBeenCalledOnce();
+    } finally {
+      addSpy.mockRestore();
+    }
   });
 });
 

@@ -15,6 +15,12 @@
  *      allow-list, runtime pairing store, groups, other channels) because it
  *      gates at the point of PHI flow, not at a config-reading predicate.
  *
+ *      The gate keys on the host-resolved `ctx.senderE164` — the canonical
+ *      normalized E.164 the host computes BEFORE the session key is built. The
+ *      session key is NOT a reliable sender source: under the default dmScope it
+ *      collapses DMs to `main`, so it would gate against `main` instead of the
+ *      real peer (fail-OPEN). senderE164 is the true sender identity.
+ *
  *   2. DEFENSE-IN-DEPTH — a startup REGISTRATION GATE (computeIsQaOnly, used in
  *      index.ts) that hard-fails plugin load if the cloud backend is selected
  *      while the live WhatsApp DM allow-list is not provably QA-only. This is a
@@ -25,8 +31,7 @@
  * Everything fails closed: anything we cannot prove QA-only refuses.
  */
 
-import type { OpenClawConfig } from "openclaw/plugin-sdk";
-import { extractSenderFromSessionKey } from "./config.js";
+import { normalizeE164, type OpenClawConfig } from "openclaw/plugin-sdk";
 
 /**
  * A recorded refusal. Emitted via onBreach so a per-sender drop/skip is
@@ -42,20 +47,27 @@ export type TripwireBreach = {
 };
 
 /**
- * Extract the conversation's resolved SENDER (peer id) from a session key.
+ * Whether a string is a canonical E.164 phone number AS PRODUCED by
+ * `normalizeE164` — `+` followed by a leading non-zero country-code digit and
+ * 7–14 further digits (8–15 digits total, the E.164 maximum is 15).
  *
- * Session key format: `agent:<agentId>:<channel>:<type>:<peerId>` — the sender
- * is the last non-empty `:`-segment. Mirrors config.ts's group_id derivation so
- * the gate keys off the SAME notion of "who is this conversation with".
- *
- * Returns null if the sender is unresolvable (no/empty session key, or a shape
- * that does not yield a peer id) — callers treat null as fail-closed.
+ * `normalizeE164` NEVER throws and NEVER signals invalidity: it strips a
+ * `whatsapp:` prefix, trims, drops every non-`[\d+]` char, and re-prefixes `+`.
+ * So garbage collapses to a SHORT or empty-ish form — e.g.
+ *   normalizeE164("")                       === "+"
+ *   normalizeE164("not-a-number")           === "+"
+ *   normalizeE164("@lid")                   === "+"
+ *   normalizeE164("123")                    === "+123"   (too short)
+ *   normalizeE164("+15555550001")           === "+15555550001"
+ *   normalizeE164("15555550001")            === "+15555550001"
+ *   normalizeE164("15555550001@s.whatsapp.net") === "+15555550001"
+ * — and a real E.164 lands as `+<8..15 digits>`. This predicate is therefore the
+ * validity signal `normalizeE164` itself omits: we use it to (a) REJECT non-E.164
+ * qaNumbers at config-parse time, and (b) implicitly fail-closed when an inbound
+ * senderE164 canonicalizes to a non-E.164 shape.
  */
-export function extractSender(sessionKey: string | undefined): string | null {
-  if (!sessionKey) {
-    return null;
-  }
-  return extractSenderFromSessionKey(sessionKey);
+export function isCanonicalE164(value: string): boolean {
+  return /^\+[1-9]\d{7,14}$/.test(value);
 }
 
 /**
@@ -63,38 +75,40 @@ export function extractSender(sessionKey: string | undefined): string | null {
  * sender is sanctioned to touch Zep Cloud" — ONLY IF ALL of:
  *
  *   - `qaNumbers` is non-empty (no synthetic set ⇒ NO sender is QA ⇒ drop ALL),
- *   - the sender resolves to a non-null value, AND
- *   - the resolved sender is a member of the qaNumbers set.
+ *   - `senderE164` is a non-empty string (the host resolved a sender identity),
+ *     AND
+ *   - the canonicalized senderE164 is a member of the canonicalized qaNumbers
+ *     set.
  *
  * FAIL-CLOSED in every other case:
- *   - empty/absent qaNumbers      ⇒ false (drop ALL — even a would-be-QA sender),
- *   - unresolvable/empty sender   ⇒ false,
- *   - sender ∉ qaNumbers          ⇒ false (real user / other-channel / group).
+ *   - empty/absent qaNumbers              ⇒ false (drop ALL — even a would-be-QA
+ *                                            sender),
+ *   - null/undefined/empty/whitespace     ⇒ false (no resolvable sender — e.g.
+ *     senderE164                            the graphiti_* tools have no ctx, and
+ *                                            non-phone channels carry null),
+ *   - sender ∉ qaNumbers                  ⇒ false (real user / other-channel /
+ *                                            group).
  *
- * `"*"` is NOT a wildcard here. qaNumbers entries are compared by exact (trim-
- * normalized) equality against the resolved sender. A real sender is never the
- * literal "*", so a "*" entry simply never matches; and we additionally refuse
- * to let a "*" sender match a "*" qaNumbers entry (defensive — senders aren't
- * "*", so this can only arise from a malformed session key, which must drop).
- *
- * Normalization is trim-only, matching how qaNumbers are parsed in config.ts.
+ * Canonicalization is `normalizeE164` on BOTH sides — defensive and idempotent.
+ * senderE164 should already be canonical E.164 (the host computed it via the
+ * SAME normalizeE164), and qaNumbers are stored canonical (rejected-at-parse
+ * otherwise), but we normalize both identically so there is ZERO format
+ * asymmetry at the membership check. A senderE164 that canonicalizes to a
+ * non-E.164 shape (e.g. "+") never matches a canonical qaNumbers entry.
  */
-export function senderZepAllowed(sessionKey: string | undefined, qaNumbers: string[]): boolean {
+export function senderZepAllowed(
+  senderE164: string | null | undefined,
+  qaNumbers: string[],
+): boolean {
   if (qaNumbers.length === 0) {
     return false; // no synthetic set ⇒ no sender can be proven QA
   }
-  const sender = extractSender(sessionKey);
-  if (sender === null) {
-    return false; // unresolvable sender ⇒ fail-closed
+  if (typeof senderE164 !== "string" || senderE164.trim().length === 0) {
+    return false; // no resolvable sender identity ⇒ fail-closed
   }
-  const normalized = sender.trim();
-  if (normalized.length === 0 || normalized === "*") {
-    // Empty or wildcard-shaped sender: never sanctioned. "*" is not a real peer
-    // id; refuse it even if "*" somehow appears in qaNumbers.
-    return false;
-  }
-  const qaSet = new Set(qaNumbers.map((n) => n.trim()));
-  return qaSet.has(normalized);
+  const sender = normalizeE164(senderE164);
+  const qaSet = new Set(qaNumbers.map((n) => normalizeE164(n)));
+  return qaSet.has(sender);
 }
 
 /**
@@ -117,6 +131,9 @@ export function senderZepAllowed(sessionKey: string | undefined, qaNumbers: stri
  * load-bearing control is senderZepAllowed at each Zep-touch site. This stays as
  * a fail-fast belt-and-braces check on the one surface it CAN read.
  *
+ * Allow-list entries are compared canonically (normalizeE164 on both sides), so
+ * a QA number written `15555550001` matches a qaNumbers entry `+15555550001`.
+ *
  * The deployment is QA-only iff:
  *   - qaNumbers is non-empty, AND
  *   - a `channels.whatsapp` config exists, AND
@@ -134,7 +151,7 @@ export function computeIsQaOnly(config: OpenClawConfig, qaNumbers: string[]): bo
   if (!wa) {
     return false; // no whatsapp channel — cannot prove QA-only
   }
-  const qaSet = new Set(qaNumbers);
+  const qaSet = new Set(qaNumbers.map((n) => normalizeE164(n)));
 
   // Every DM access surface that can admit a sender: top-level + enabled accounts.
   const surfaces: Array<{ dmPolicy?: string; allowFrom?: string | string[] }> = [
@@ -160,7 +177,7 @@ export function computeIsQaOnly(config: OpenClawConfig, qaNumbers: string[]): bo
     if (allow.length === 0 || allow.includes("*")) {
       return false;
     }
-    if (!allow.every((entry) => qaSet.has(entry))) {
+    if (!allow.every((entry) => qaSet.has(normalizeE164(entry)))) {
       return false; // a non-QA number is allow-listed on this surface
     }
   }
