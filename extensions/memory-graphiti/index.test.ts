@@ -16,6 +16,9 @@ describe("graphitiConfigSchema.parse", () => {
   it("parses cloud config with apiKey", () => {
     const cfg = graphitiConfigSchema.parse({ apiKey: "z_test_key" });
     expect(cfg).toEqual({
+      backend: "zep-cloud",
+      // apiKey-only config infers cloud and carries a deprecation notice.
+      deprecationWarning: expect.stringMatching(/deprecated/i),
       mode: "cloud",
       apiKey: "z_test_key",
       serverUrl: undefined,
@@ -31,6 +34,7 @@ describe("graphitiConfigSchema.parse", () => {
   it("parses self-hosted config with serverUrl", () => {
     const cfg = graphitiConfigSchema.parse({ serverUrl: "http://localhost:8000" });
     expect(cfg).toEqual({
+      backend: "self-hosted",
       mode: "self-hosted",
       apiKey: undefined,
       serverUrl: "http://localhost:8000",

@@ -22,6 +22,22 @@ import { ZepCloudClient } from "./zep-cloud-client.js";
 // ============================================================================
 
 function createClient(cfg: GraphitiConfig): MemoryClient {
+  // A fully-parsed config always carries a resolved `backend`; drive off it.
+  if (cfg.backend === "zep-cloud") {
+    if (!cfg.apiKey) {
+      throw new Error("memory-graphiti: backend 'zep-cloud' requires apiKey");
+    }
+    return new ZepCloudClient(cfg.apiKey);
+  }
+  if (cfg.backend === "self-hosted") {
+    if (!cfg.serverUrl) {
+      throw new Error("memory-graphiti: backend 'self-hosted' requires serverUrl");
+    }
+    return new GraphitiRestClient(cfg.serverUrl);
+  }
+
+  // Backward-compat fallback: callers passing un-parsed cfg objects (no
+  // `backend` field) get the prior mode/apiKey → serverUrl precedence.
   if (cfg.mode === "cloud" && cfg.apiKey) {
     return new ZepCloudClient(cfg.apiKey);
   }
@@ -129,6 +145,9 @@ const memoryPlugin = {
 
   register(api: OpenClawPluginApi) {
     const cfg = graphitiConfigSchema.parse(api.pluginConfig);
+    if (cfg.deprecationWarning) {
+      api.logger.warn(cfg.deprecationWarning);
+    }
     const client = createClient(cfg);
 
     // Identity DB connection — only created when using "identity" strategy
