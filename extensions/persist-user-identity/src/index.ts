@@ -1,5 +1,8 @@
 import type { OpenClawPluginApi } from "openclaw/plugin-sdk";
 import postgres from "postgres";
+// Session-key parsing is shared with auth-memory-gate + syntropy so the
+// convention can't drift across the three identity hooks (oc-hygiene #7).
+import { deriveChannel, derivePeerId } from "../../shared/session-key.js";
 import {
   createPgClient,
   ensureUserSchema,
@@ -19,43 +22,6 @@ import {
   type AuthConfig,
   type UserLookupResult,
 } from "./jwt.js";
-
-// ---------------------------------------------------------------------------
-// Session key parsing — reuses persist-postgres convention
-// ---------------------------------------------------------------------------
-
-function deriveChannel(sessionKey: string): string {
-  const parts = sessionKey.split(":");
-  if (parts.length >= 3 && parts[0] === "agent") {
-    return parts[2];
-  }
-  return "unknown";
-}
-
-/**
- * Extract the peer-specific portion of a session key.
- *
- * Session key formats:
- *   agent:{agentId}:direct:{peerId}
- *   agent:{agentId}:{channel}:direct:{peerId}
- *   agent:{agentId}:{channel}:{peerId...}
- *   agent:{agentId}:main  (shared — no peer)
- */
-function derivePeerId(sessionKey: string): string {
-  const parts = sessionKey.split(":");
-  if (parts.length < 3 || parts[0] !== "agent") {
-    return sessionKey;
-  }
-  const rest = parts.slice(2);
-  const directIdx = rest.indexOf("direct");
-  if (directIdx >= 0 && directIdx < rest.length - 1) {
-    return rest.slice(directIdx + 1).join(":");
-  }
-  if (rest.length >= 2) {
-    return rest.slice(1).join(":");
-  }
-  return rest[0] ?? sessionKey;
-}
 
 // ---------------------------------------------------------------------------
 // Identity context formatting — the contract downstream plugins read

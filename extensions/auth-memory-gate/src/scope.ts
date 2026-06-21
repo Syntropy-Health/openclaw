@@ -30,41 +30,14 @@ type IdentityRow = {
 };
 
 // ---------------------------------------------------------------------------
-// Session key parsing — mirrors persist-user-identity convention
+// Session key parsing — shared canonical module (oc-hygiene #7)
 // ---------------------------------------------------------------------------
 
-export function deriveChannel(sessionKey: string): string {
-  const parts = sessionKey.split(":");
-  if (parts.length >= 3 && parts[0] === "agent") {
-    return parts[2];
-  }
-  return "unknown";
-}
-
-/**
- * Extract the peer-specific portion of a session key.
- *
- * Session key formats:
- *   agent:{agentId}:direct:{peerId}
- *   agent:{agentId}:{channel}:direct:{peerId}
- *   agent:{agentId}:{channel}:{peerId...}
- *   agent:{agentId}:main  (shared — no peer)
- */
-export function derivePeerId(sessionKey: string): string {
-  const parts = sessionKey.split(":");
-  if (parts.length < 3 || parts[0] !== "agent") {
-    return sessionKey;
-  }
-  const rest = parts.slice(2);
-  const directIdx = rest.indexOf("direct");
-  if (directIdx >= 0 && directIdx < rest.length - 1) {
-    return rest.slice(directIdx + 1).join(":");
-  }
-  if (rest.length >= 2) {
-    return rest.slice(1).join(":");
-  }
-  return rest[0] ?? sessionKey;
-}
+// Re-exported (not redefined) so the parsing convention stays identical across
+// persist-user-identity, syntropy, and this extension — and so existing
+// importers of `deriveChannel`/`derivePeerId` from "./scope.js" (index.ts,
+// scope.test.ts) keep working unchanged.
+export { deriveChannel, derivePeerId } from "../../shared/session-key.js";
 
 // ---------------------------------------------------------------------------
 // Identity query — reads from persist-user-identity's lp_users table
