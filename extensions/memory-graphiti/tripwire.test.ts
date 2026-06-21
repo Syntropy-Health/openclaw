@@ -1,243 +1,102 @@
 /**
- * P3 — PHI TRIPWIRE refusal-matrix tests.
+ * P3 — PHI TRIPWIRE refusal-matrix tests (per-sender gate).
  *
  * The safety invariant under test: memory-graphiti must NEVER send real-user PHI
- * to Zep Cloud. Zep Cloud is usable ONLY when the deployment is provably QA-only
- * (the LIVE WhatsApp allow-list contains exclusively known-synthetic/QA numbers).
- * Self-hosted Graphiti (PHI in-house) is the sanctioned path and is NEVER guarded.
+ * to Zep Cloud. Zep Cloud is usable ONLY for a conversation whose RESOLVED
+ * SENDER is a known-synthetic/QA number. Self-hosted Graphiti (PHI in-house) is
+ * the sanctioned path and is NEVER gated.
  *
- * Everything fails closed: anything we cannot prove QA-only refuses.
+ * Everything fails closed: anything we cannot prove QA-sender refuses.
  *
- * Written test-first (red) before tripwire.ts existed; the implementation is
- * driven to green by this matrix.
+ * Two layers under test:
+ *   1. PRIMARY  — senderZepAllowed + the wired hooks/tools (per-sender gate).
+ *   2. DEFENSE  — computeIsQaOnly + the registration gate (startup fail-fast).
  */
 
 import { describe, expect, it, vi } from "vitest";
-import type { EpisodeResult, FactResult, GraphitiMessage, MemoryClient } from "./client.js";
-import { computeIsQaOnly, PhiTripwireGuard, type TripwireBreach } from "./tripwire.js";
+import { GraphitiRestClient } from "./client.js";
+import { computeIsQaOnly, extractSender, senderZepAllowed } from "./tripwire.js";
+import { ZepCloudClient } from "./zep-cloud-client.js";
 
 // ============================================================================
-// Fakes
+// extractSender — pure sender resolution
 // ============================================================================
 
-/**
- * A fake inner MemoryClient that records every call so tests can assert
- * delegation (or the absence of it) precisely.
- */
-function makeFakeInner(label = "fake-inner") {
-  const calls = {
-    addMessages: [] as Array<[string, GraphitiMessage[]]>,
-    searchFacts: [] as Array<[string, (string[] | null) | undefined, number | undefined]>,
-    getEpisodes: [] as Array<[string, number | undefined]>,
-    healthcheck: 0,
-  };
-
-  const factsToReturn: FactResult[] = [
-    {
-      uuid: "f1",
-      name: "pref",
-      fact: "inner fact",
-      valid_at: null,
-      invalid_at: null,
-      created_at: "2026-01-01",
-      expired_at: null,
-    },
-  ];
-  const episodesToReturn: EpisodeResult[] = [
-    {
-      uuid: "e1",
-      name: "ep1",
-      group_id: "g1",
-      content: "inner episode",
-      created_at: "2026-01-01",
-      source: "message",
-      source_description: "",
-    },
-  ];
-
-  const inner: MemoryClient = {
-    label,
-    async addMessages(groupId, messages) {
-      calls.addMessages.push([groupId, messages]);
-    },
-    async searchFacts(query, groupIds, maxFacts) {
-      calls.searchFacts.push([query, groupIds, maxFacts]);
-      return factsToReturn;
-    },
-    async getEpisodes(groupId, lastN) {
-      calls.getEpisodes.push([groupId, lastN]);
-      return episodesToReturn;
-    },
-    async healthcheck() {
-      calls.healthcheck += 1;
-      return true;
-    },
-  };
-
-  return { inner, calls, factsToReturn, episodesToReturn };
-}
-
-// ============================================================================
-// PhiTripwireGuard — refusal matrix
-// ============================================================================
-
-describe("PhiTripwireGuard", () => {
-  it("label wraps the inner label", () => {
-    const { inner } = makeFakeInner("zep-cloud");
-    const guard = new PhiTripwireGuard(
-      inner,
-      () => true,
-      () => {},
-    );
-    expect(guard.label).toBe("tripwire(zep-cloud)");
+describe("extractSender", () => {
+  it("resolves the WhatsApp DM peer (last segment) from a full session key", () => {
+    expect(extractSender("agent:main:whatsapp:direct:+1000000001")).toBe("+1000000001");
   });
 
-  describe("when NOT QA-only (isQaOnly => false) — REFUSE everything PHI-bearing", () => {
-    it("addMessages: inner NOT called, onBreach fired once, returns undefined, never throws", async () => {
-      const { inner, calls } = makeFakeInner("zep-cloud");
-      const onBreach = vi.fn();
-      const guard = new PhiTripwireGuard(inner, () => false, onBreach);
-
-      const result = await guard.addMessages("g1", [{ content: "PHI", role_type: "user" }]);
-
-      expect(result).toBeUndefined();
-      expect(calls.addMessages).toHaveLength(0); // NO network
-      expect(onBreach).toHaveBeenCalledOnce();
-      const breach = onBreach.mock.calls[0][0] as TripwireBreach;
-      expect(breach.op).toBe("addMessages");
-      expect(breach.reason).toBe("not-qa-only");
-      expect(breach.backendLabel).toBe("zep-cloud");
-    });
-
-    it("searchFacts: inner NOT called, onBreach fired once, returns []", async () => {
-      const { inner, calls } = makeFakeInner("zep-cloud");
-      const onBreach = vi.fn();
-      const guard = new PhiTripwireGuard(inner, () => false, onBreach);
-
-      const result = await guard.searchFacts("query", ["g1"], 5);
-
-      expect(result).toEqual([]);
-      expect(calls.searchFacts).toHaveLength(0);
-      expect(onBreach).toHaveBeenCalledOnce();
-      expect((onBreach.mock.calls[0][0] as TripwireBreach).op).toBe("searchFacts");
-    });
-
-    it("getEpisodes: inner NOT called, onBreach fired once, returns []", async () => {
-      const { inner, calls } = makeFakeInner("zep-cloud");
-      const onBreach = vi.fn();
-      const guard = new PhiTripwireGuard(inner, () => false, onBreach);
-
-      const result = await guard.getEpisodes("g1", 5);
-
-      expect(result).toEqual([]);
-      expect(calls.getEpisodes).toHaveLength(0);
-      expect(onBreach).toHaveBeenCalledOnce();
-      expect((onBreach.mock.calls[0][0] as TripwireBreach).op).toBe("getEpisodes");
-    });
+  it("resolves the peer for other channels too (last segment)", () => {
+    expect(extractSender("agent:main:telegram:direct:7550356539")).toBe("7550356539");
   });
 
-  describe("when QA-only (isQaOnly => true) — DELEGATE everything to inner", () => {
-    it("addMessages: delegates and passes args through", async () => {
-      const { inner, calls } = makeFakeInner();
-      const onBreach = vi.fn();
-      const guard = new PhiTripwireGuard(inner, () => true, onBreach);
-
-      const msgs: GraphitiMessage[] = [{ content: "hi", role_type: "user" }];
-      await guard.addMessages("g1", msgs);
-
-      expect(onBreach).not.toHaveBeenCalled();
-      expect(calls.addMessages).toEqual([["g1", msgs]]);
-    });
-
-    it("searchFacts: delegates, passes args, returns inner's value", async () => {
-      const { inner, calls, factsToReturn } = makeFakeInner();
-      const onBreach = vi.fn();
-      const guard = new PhiTripwireGuard(inner, () => true, onBreach);
-
-      const result = await guard.searchFacts("q", ["g1"], 5);
-
-      expect(onBreach).not.toHaveBeenCalled();
-      expect(calls.searchFacts).toEqual([["q", ["g1"], 5]]);
-      expect(result).toBe(factsToReturn);
-    });
-
-    it("getEpisodes: delegates, passes args, returns inner's value", async () => {
-      const { inner, calls, episodesToReturn } = makeFakeInner();
-      const onBreach = vi.fn();
-      const guard = new PhiTripwireGuard(inner, () => true, onBreach);
-
-      const result = await guard.getEpisodes("g1", 3);
-
-      expect(onBreach).not.toHaveBeenCalled();
-      expect(calls.getEpisodes).toEqual([["g1", 3]]);
-      expect(result).toBe(episodesToReturn);
-    });
+  it("returns null for an undefined/empty session key", () => {
+    expect(extractSender(undefined)).toBeNull();
+    expect(extractSender("")).toBeNull();
   });
 
-  describe("healthcheck — always delegates (carries no PHI)", () => {
-    it("delegates when NOT QA-only", async () => {
-      const { inner, calls } = makeFakeInner();
-      const guard = new PhiTripwireGuard(
-        inner,
-        () => false,
-        () => {},
-      );
-      const result = await guard.healthcheck();
-      expect(result).toBe(true);
-      expect(calls.healthcheck).toBe(1);
-    });
-
-    it("delegates when QA-only", async () => {
-      const { inner, calls } = makeFakeInner();
-      const guard = new PhiTripwireGuard(
-        inner,
-        () => true,
-        () => {},
-      );
-      await guard.healthcheck();
-      expect(calls.healthcheck).toBe(1);
-    });
-  });
-
-  describe("a refusal NEVER throws — even if onBreach throws, the drop is safe", () => {
-    const throwingBreach = () => {
-      throw new Error("onBreach blew up");
-    };
-
-    it("addMessages still drops safely (no throw out, inner not called)", async () => {
-      const { inner, calls } = makeFakeInner("zep-cloud");
-      const guard = new PhiTripwireGuard(inner, () => false, throwingBreach);
-
-      await expect(
-        guard.addMessages("g1", [{ content: "PHI", role_type: "user" }]),
-      ).resolves.toBeUndefined();
-      expect(calls.addMessages).toHaveLength(0);
-    });
-
-    it("searchFacts still returns [] (no throw out, inner not called)", async () => {
-      const { inner, calls } = makeFakeInner("zep-cloud");
-      const guard = new PhiTripwireGuard(inner, () => false, throwingBreach);
-
-      await expect(guard.searchFacts("q")).resolves.toEqual([]);
-      expect(calls.searchFacts).toHaveLength(0);
-    });
-
-    it("getEpisodes still returns [] (no throw out, inner not called)", async () => {
-      const { inner, calls } = makeFakeInner("zep-cloud");
-      const guard = new PhiTripwireGuard(inner, () => false, throwingBreach);
-
-      await expect(guard.getEpisodes("g1")).resolves.toEqual([]);
-      expect(calls.getEpisodes).toHaveLength(0);
-    });
+  it("returns null for a non-agent / too-short shape", () => {
+    expect(extractSender("not:agent")).toBeNull();
+    expect(extractSender("agent:main")).toBeNull();
   });
 });
 
 // ============================================================================
-// computeIsQaOnly — the host authority over the LIVE allow-list
+// senderZepAllowed — the PRIMARY per-sender gate (exact truth conditions)
+// ============================================================================
+
+describe("senderZepAllowed", () => {
+  const QA = ["+1000000001", "+1000000002"];
+
+  it("true: a QA sender (resolved sender ∈ qaNumbers)", () => {
+    expect(senderZepAllowed("agent:main:whatsapp:direct:+1000000001", QA)).toBe(true);
+  });
+
+  it("false: a non-QA sender (real user number not in qaNumbers)", () => {
+    expect(senderZepAllowed("agent:main:whatsapp:direct:+15551234567", QA)).toBe(false);
+  });
+
+  it("false: empty qaNumbers even for a would-be-QA sender (drop ALL)", () => {
+    expect(senderZepAllowed("agent:main:whatsapp:direct:+1000000001", [])).toBe(false);
+  });
+
+  it("false: unresolvable / empty session key (fail-closed)", () => {
+    expect(senderZepAllowed(undefined, QA)).toBe(false);
+    expect(senderZepAllowed("", QA)).toBe(false);
+    expect(senderZepAllowed("agent:main", QA)).toBe(false);
+  });
+
+  it("false: an other-channel sender id not in qaNumbers", () => {
+    // A paired/other-channel real user whose peer id is not a QA number.
+    expect(senderZepAllowed("agent:main:telegram:direct:7550356539", QA)).toBe(false);
+  });
+
+  it("false: a group / odd session-key shape whose resolved sender ∉ qaNumbers", () => {
+    expect(senderZepAllowed("agent:main:whatsapp:group:120363@g.us", QA)).toBe(false);
+  });
+
+  it("true: whitespace around qaNumbers / sender is trimmed before compare", () => {
+    expect(senderZepAllowed("agent:main:whatsapp:direct:+1000000001", ["  +1000000001  "])).toBe(
+      true,
+    );
+  });
+
+  it("false: '*' is NOT a wildcard — a '*' qaNumbers entry never sanctions a real sender", () => {
+    expect(senderZepAllowed("agent:main:whatsapp:direct:+15551234567", ["*"])).toBe(false);
+  });
+
+  it("false: defensively, a '*'-shaped sender never matches a '*' qaNumbers entry", () => {
+    expect(senderZepAllowed("agent:main:whatsapp:direct:*", ["*"])).toBe(false);
+  });
+});
+
+// ============================================================================
+// computeIsQaOnly — the DEFENSE-IN-DEPTH registration predicate
 // ============================================================================
 
 // Minimal OpenClawConfig-ish builder. computeIsQaOnly only reads
-// config.channels?.whatsapp?.{dmPolicy,allowFrom}.
+// config.channels?.whatsapp?.{dmPolicy,allowFrom,accounts}.
 function cfgWith(whatsapp: Record<string, unknown> | undefined): never {
   return (whatsapp === undefined ? { channels: {} } : { channels: { whatsapp } }) as never;
 }
@@ -387,11 +246,8 @@ describe("computeIsQaOnly", () => {
 });
 
 // ============================================================================
-// Registration gate + cloud-only wrapping — drive the real register()
+// Registration gate (hard-fail) — drive the real register()
 // ============================================================================
-
-import { GraphitiRestClient } from "./client.js";
-import { ZepCloudClient } from "./zep-cloud-client.js";
 
 const QA_ONLY_WHATSAPP = {
   dmPolicy: "allowlist",
@@ -403,6 +259,16 @@ const REAL_WHATSAPP = {
 };
 const QA_NUMBERS = ["+1000000001", "+1000000002"];
 
+// A QA sender / a real sender as full session keys driving the per-sender gate.
+const QA_SENDER_CTX = {
+  messageProvider: "whatsapp",
+  sessionKey: "agent:main:whatsapp:direct:+1000000001",
+};
+const REAL_SENDER_CTX = {
+  messageProvider: "whatsapp",
+  sessionKey: "agent:main:whatsapp:direct:+15551234567",
+};
+
 type CapturedHooks = {
   before_agent_start?: (event: unknown, ctx: unknown) => Promise<unknown> | unknown;
   agent_end?: (event: unknown, ctx: unknown) => Promise<unknown> | unknown;
@@ -410,22 +276,21 @@ type CapturedHooks = {
 
 /**
  * Fake OpenClawPluginApi mirroring the shape characterization.test.ts uses, plus
- * a `config` carrying the live channels.whatsapp the tripwire predicate reads,
- * and an optional runtime.system.enqueueSystemEvent spy.
+ * a `config` carrying the live channels.whatsapp the registration predicate reads.
  */
 function makeFakeApi(opts: {
   pluginConfig: Record<string, unknown>;
   whatsapp?: Record<string, unknown>;
-  enqueueSystemEvent?: ReturnType<typeof vi.fn>;
 }) {
   const hooks: CapturedHooks = {};
+  const tools: Record<string, (toolCallId: string, params: unknown) => Promise<unknown> | unknown> =
+    {};
   const logger = {
     info: vi.fn(),
     warn: vi.fn(),
     error: vi.fn(),
     debug: vi.fn(),
   };
-  const registeredTools: Array<{ name: string }> = [];
   const api = {
     id: "memory-graphiti",
     name: "Memory (Graphiti)",
@@ -434,13 +299,12 @@ function makeFakeApi(opts: {
       channels: opts.whatsapp ? { whatsapp: opts.whatsapp } : {},
     } as Record<string, unknown>,
     pluginConfig: opts.pluginConfig,
-    runtime: {
-      system: opts.enqueueSystemEvent ? { enqueueSystemEvent: opts.enqueueSystemEvent } : undefined,
-    } as Record<string, unknown>,
+    runtime: {} as Record<string, unknown>,
     logger,
-    registerTool: vi.fn((tool: { name?: string }) => {
-      if (tool?.name) {
-        registeredTools.push({ name: tool.name });
+    registerTool: vi.fn((tool: unknown) => {
+      const t = tool as { name?: string; execute?: (id: string, p: unknown) => unknown };
+      if (t?.name && typeof t.execute === "function") {
+        tools[t.name] = t.execute;
       }
     }),
     registerHook: vi.fn(),
@@ -457,13 +321,12 @@ function makeFakeApi(opts: {
       (hooks as Record<string, unknown>)[name] = handler;
     },
   };
-  return { api, hooks, logger, registeredTools };
+  return { api, hooks, tools, logger };
 }
 
 async function registerWith(opts: {
   pluginConfig: Record<string, unknown>;
   whatsapp?: Record<string, unknown>;
-  enqueueSystemEvent?: ReturnType<typeof vi.fn>;
 }) {
   const fake = makeFakeApi(opts);
   const mod = await import("./index.js");
@@ -510,43 +373,46 @@ describe("registration gate (hard-fail) — zep-cloud demands provable QA-only",
 });
 
 // ============================================================================
-// Cloud-only wrapping — assert which client variant the hooks/tools use
-//
-// We can't read the closured `client` directly, so we observe wrapping through
-// behavior: a self-hosted deployment ingests via the bare GraphitiRestClient
-// (network spy fires); a QA-only zep-cloud deployment ingests via the guard,
-// which (QA-only => true) delegates to the ZepCloudClient (its network spy
-// fires). The capture hook is the observation point.
+// PRIMARY per-sender gate — wired at every Zep-touch site (recall, capture,
+// tools). Observe through the client network edge (spy on prototypes) + the
+// onBreach marker (logger.error with `phi_tripwire_breach`).
 // ============================================================================
 
-describe("cloud-only wrapping", () => {
-  it("self-hosted: capture goes through the BARE GraphitiRestClient (not the guard)", async () => {
-    const addSpy = vi
-      .spyOn(GraphitiRestClient.prototype, "addMessages")
-      .mockResolvedValue(undefined);
+describe("per-sender gate: capture (agent_end)", () => {
+  it("cloud + NON-QA sender: addMessages NOT called, breach logged (no PHI write)", async () => {
+    const addSpy = vi.spyOn(ZepCloudClient.prototype, "addMessages").mockResolvedValue(undefined);
     try {
-      const { hooks } = await registerWith({
+      const { hooks, logger } = await registerWith({
         pluginConfig: {
-          backend: "self-hosted",
-          serverUrl: "http://localhost:8000",
+          backend: "zep-cloud",
+          apiKey: "z_key",
+          qaNumbers: QA_NUMBERS,
           groupIdStrategy: "channel-sender",
         },
-        whatsapp: REAL_WHATSAPP, // would refuse if it were wrapped; self-hosted is NOT
+        whatsapp: QA_ONLY_WHATSAPP, // registration passes; runtime sender is real
       });
 
       await hooks.agent_end?.(
-        { success: true, messages: [{ role: "user", content: "Hello" }] },
-        { messageProvider: "telegram", sessionKey: "agent:main:telegram:direct:7550356539" },
+        { success: true, messages: [{ role: "user", content: "Hello, my BP is 140/90" }] },
+        REAL_SENDER_CTX,
       );
 
-      // bare client's network call fired — proves NOT guarded / not dropped
-      expect(addSpy).toHaveBeenCalledOnce();
+      expect(addSpy).not.toHaveBeenCalled();
+      const breachLogged = logger.error.mock.calls.some((c) =>
+        String(c[0]).includes("phi_tripwire_breach"),
+      );
+      expect(breachLogged).toBe(true);
+      // breach must NOT carry the sender's raw number (PII)
+      const anyLogHasNumber = [...logger.error.mock.calls, ...logger.warn.mock.calls].some((c) =>
+        String(c[0]).includes("+15551234567"),
+      );
+      expect(anyLogHasNumber).toBe(false);
     } finally {
       addSpy.mockRestore();
     }
   });
 
-  it("zep-cloud (QA-only): capture is WRAPPED but delegates to ZepCloudClient (QA-only => true)", async () => {
+  it("cloud + QA sender: addMessages IS called (PHI write allowed for QA)", async () => {
     const addSpy = vi.spyOn(ZepCloudClient.prototype, "addMessages").mockResolvedValue(undefined);
     try {
       const { hooks } = await registerWith({
@@ -561,13 +427,193 @@ describe("cloud-only wrapping", () => {
 
       await hooks.agent_end?.(
         { success: true, messages: [{ role: "user", content: "Hello" }] },
-        { messageProvider: "telegram", sessionKey: "agent:main:telegram:direct:7550356539" },
+        QA_SENDER_CTX,
       );
 
-      // guard delegated to inner ZepCloudClient because the live list is QA-only
       expect(addSpy).toHaveBeenCalledOnce();
     } finally {
       addSpy.mockRestore();
+    }
+  });
+
+  it("SELF-HOSTED + non-QA sender: NOT gated — addMessages still called (PHI in-house sanctioned)", async () => {
+    const addSpy = vi
+      .spyOn(GraphitiRestClient.prototype, "addMessages")
+      .mockResolvedValue(undefined);
+    try {
+      const { hooks } = await registerWith({
+        pluginConfig: {
+          backend: "self-hosted",
+          serverUrl: "http://localhost:8000",
+          groupIdStrategy: "channel-sender",
+        },
+        whatsapp: REAL_WHATSAPP,
+      });
+
+      await hooks.agent_end?.(
+        { success: true, messages: [{ role: "user", content: "Hello" }] },
+        REAL_SENDER_CTX,
+      );
+
+      expect(addSpy).toHaveBeenCalledOnce();
+    } finally {
+      addSpy.mockRestore();
+    }
+  });
+});
+
+describe("per-sender gate: recall (before_agent_start)", () => {
+  it("cloud + NON-QA sender: searchFacts NOT called, no prependContext, breach logged", async () => {
+    const searchSpy = vi.spyOn(ZepCloudClient.prototype, "searchFacts").mockResolvedValue([
+      {
+        uuid: "f1",
+        name: "pref",
+        fact: "leaked",
+        valid_at: null,
+        invalid_at: null,
+        created_at: "2026-01-01",
+        expired_at: null,
+      },
+    ]);
+    try {
+      const { hooks, logger } = await registerWith({
+        pluginConfig: {
+          backend: "zep-cloud",
+          apiKey: "z_key",
+          qaNumbers: QA_NUMBERS,
+          groupIdStrategy: "channel-sender",
+        },
+        whatsapp: QA_ONLY_WHATSAPP,
+      });
+
+      const result = (await hooks.before_agent_start?.(
+        { prompt: "what do you know about me?" },
+        REAL_SENDER_CTX,
+      )) as { prependContext?: string } | undefined;
+
+      expect(searchSpy).not.toHaveBeenCalled();
+      expect(result?.prependContext).toBeUndefined();
+      const breachLogged = logger.error.mock.calls.some((c) =>
+        String(c[0]).includes("phi_tripwire_breach"),
+      );
+      expect(breachLogged).toBe(true);
+    } finally {
+      searchSpy.mockRestore();
+    }
+  });
+
+  it("cloud + QA sender: searchFacts IS called", async () => {
+    const searchSpy = vi.spyOn(ZepCloudClient.prototype, "searchFacts").mockResolvedValue([]);
+    try {
+      const { hooks } = await registerWith({
+        pluginConfig: {
+          backend: "zep-cloud",
+          apiKey: "z_key",
+          qaNumbers: QA_NUMBERS,
+          groupIdStrategy: "channel-sender",
+        },
+        whatsapp: QA_ONLY_WHATSAPP,
+      });
+
+      await hooks.before_agent_start?.({ prompt: "what do you know about me?" }, QA_SENDER_CTX);
+
+      expect(searchSpy).toHaveBeenCalledOnce();
+    } finally {
+      searchSpy.mockRestore();
+    }
+  });
+
+  it("SELF-HOSTED + non-QA sender: NOT gated — searchFacts still called", async () => {
+    const searchSpy = vi.spyOn(GraphitiRestClient.prototype, "searchFacts").mockResolvedValue([]);
+    try {
+      const { hooks } = await registerWith({
+        pluginConfig: {
+          backend: "self-hosted",
+          serverUrl: "http://localhost:8000",
+          groupIdStrategy: "channel-sender",
+        },
+        whatsapp: REAL_WHATSAPP,
+      });
+
+      await hooks.before_agent_start?.({ prompt: "what do you know about me?" }, REAL_SENDER_CTX);
+
+      expect(searchSpy).toHaveBeenCalledOnce();
+    } finally {
+      searchSpy.mockRestore();
+    }
+  });
+});
+
+describe("per-sender gate: graphiti_* tools (no sender ctx ⇒ fail-closed on cloud)", () => {
+  it("cloud: graphiti_search refuses without touching the client (no resolvable sender)", async () => {
+    const searchSpy = vi.spyOn(ZepCloudClient.prototype, "searchFacts").mockResolvedValue([]);
+    try {
+      const { tools, logger } = await registerWith({
+        pluginConfig: {
+          backend: "zep-cloud",
+          apiKey: "z_key",
+          qaNumbers: QA_NUMBERS,
+          groupIdStrategy: "channel-sender",
+        },
+        whatsapp: QA_ONLY_WHATSAPP,
+      });
+
+      const res = (await tools.graphiti_search?.("call-1", { query: "anything" })) as {
+        details?: { refused?: string };
+      };
+
+      expect(searchSpy).not.toHaveBeenCalled();
+      expect(res?.details?.refused).toBe("phi_tripwire");
+      const breachLogged = logger.error.mock.calls.some((c) =>
+        String(c[0]).includes("phi_tripwire_breach"),
+      );
+      expect(breachLogged).toBe(true);
+    } finally {
+      searchSpy.mockRestore();
+    }
+  });
+
+  it("cloud: graphiti_episodes refuses without touching the client", async () => {
+    const epSpy = vi.spyOn(ZepCloudClient.prototype, "getEpisodes").mockResolvedValue([]);
+    try {
+      const { tools } = await registerWith({
+        pluginConfig: {
+          backend: "zep-cloud",
+          apiKey: "z_key",
+          qaNumbers: QA_NUMBERS,
+          groupIdStrategy: "channel-sender",
+        },
+        whatsapp: QA_ONLY_WHATSAPP,
+      });
+
+      const res = (await tools.graphiti_episodes?.("call-1", { lastN: 5 })) as {
+        details?: { refused?: string };
+      };
+
+      expect(epSpy).not.toHaveBeenCalled();
+      expect(res?.details?.refused).toBe("phi_tripwire");
+    } finally {
+      epSpy.mockRestore();
+    }
+  });
+
+  it("SELF-HOSTED: graphiti_search is NOT gated — client is called", async () => {
+    const searchSpy = vi.spyOn(GraphitiRestClient.prototype, "searchFacts").mockResolvedValue([]);
+    try {
+      const { tools } = await registerWith({
+        pluginConfig: {
+          backend: "self-hosted",
+          serverUrl: "http://localhost:8000",
+          groupIdStrategy: "channel-sender",
+        },
+        whatsapp: REAL_WHATSAPP,
+      });
+
+      await tools.graphiti_search?.("call-1", { query: "anything" });
+
+      expect(searchSpy).toHaveBeenCalledOnce();
+    } finally {
+      searchSpy.mockRestore();
     }
   });
 });

@@ -109,7 +109,7 @@ function normalizeUrl(url: string): string {
  * Session key format: `agent:<agentId>:<channel>:<type>:<peerId>`
  * We take the last segment as the sender identifier.
  */
-function extractSenderFromSessionKey(sessionKey: string): string | null {
+export function extractSenderFromSessionKey(sessionKey: string): string | null {
   const parts = sessionKey.split(":").filter(Boolean);
   if (parts.length < 3 || parts[0] !== "agent") {
     return null;

@@ -15,7 +15,7 @@ import postgres from "postgres";
 import { GraphitiRestClient, type FactResult, type MemoryClient } from "./client.js";
 import { deriveGroupId, graphitiConfigSchema, type GraphitiConfig } from "./config.js";
 import { resolveIdentityScopeKey } from "./identity.js";
-import { computeIsQaOnly, PhiTripwireGuard, type TripwireBreach } from "./tripwire.js";
+import { computeIsQaOnly, senderZepAllowed, type TripwireBreach } from "./tripwire.js";
 import { ZepCloudClient } from "./zep-cloud-client.js";
 
 // ============================================================================
@@ -151,16 +151,23 @@ const memoryPlugin = {
     }
 
     // ========================================================================
-    // PHI TRIPWIRE (P3)
+    // PHI TRIPWIRE (P3) — per-SENDER runtime gate
     //
     // The safety invariant: real-user PHI must NEVER reach Zep Cloud. Cloud is
-    // usable ONLY when the deployment is provably QA-only — the LIVE WhatsApp
-    // allow-list contains exclusively known-synthetic/QA numbers. Self-hosted
-    // (PHI in-house) is the sanctioned path and is NEVER guarded.
+    // usable ONLY for a conversation whose RESOLVED SENDER is a known-synthetic/
+    // QA number. Self-hosted (PHI in-house) is the sanctioned path and is NEVER
+    // gated.
     //
-    // The predicate re-reads api.config on EVERY call (intentional): it is bound
-    // to the LIVE allow-list, so it can't read true while a real user has access.
-    // Absent / unevaluable => false (fail-closed).
+    // PRIMARY control (load-bearing): the per-sender gate `zepAllowed` below,
+    // wired at EVERY Zep-touch site (recall, capture, graphiti_* tools). It gates
+    // at the point of PHI flow, so it is robust against ALL admission paths
+    // (static-config DM allow-list, runtime pairing store, groups, other
+    // channels) — unlike a config-reading predicate, which is fail-OPEN.
+    //
+    // DEFENSE-IN-DEPTH: the startup REGISTRATION GATE (computeIsQaOnly) hard-
+    // fails plugin load if cloud is selected while the live WhatsApp DM allow-
+    // list is not provably QA-only. Fail-fast belt-and-braces; NOT the load-
+    // bearing control.
     // ========================================================================
     const qaNumbers = cfg.qaNumbers ?? [];
     const isQaOnly = () => computeIsQaOnly(api.config, qaNumbers);
@@ -168,22 +175,20 @@ const memoryPlugin = {
     const onBreach = (b: TripwireBreach) => {
       // Emit a STABLE, structured, greppable marker at error level. This is the
       // load-bearing observability signal: a tripwire firing in prod is a
-      // serious event (an attempt to write/read PHI on cloud while NOT QA-only).
-      // The `phi_tripwire_breach` token is the alerting hook — devex wires
-      // log-based alerting / a metric on it (Sentry/OTEL). A richer in-process
-      // metric/system-event sink is a follow-up: enqueueSystemEvent requires a
-      // per-call sessionKey the MemoryClient interface does not thread, so we do
-      // NOT fake one here (a swallowed always-throw would be dishonest).
+      // serious event (an attempt to write/read PHI on cloud for a non-QA
+      // sender). The `phi_tripwire_breach` token is the alerting hook — devex
+      // wires log-based alerting / a metric on it (Sentry/OTEL). The breach
+      // carries op + reason ONLY — NEVER the sender's raw value (it is PII).
       api.logger.error(
         `phi_tripwire_breach op=${b.op} backend=${b.backendLabel} reason=${b.reason} — ` +
-          `Zep PHI ${b.op === "addMessages" ? "write" : "read"} REFUSED (deployment not QA-only)`,
+          `Zep PHI ${b.op === "addMessages" ? "write" : "read"} REFUSED (sender not QA)`,
       );
     };
 
-    // REGISTRATION GATE (hard-fail). Before wiring anything, refuse to register
-    // the cloud backend while the live allow-list is not provably QA-only. The
-    // loader wraps register() in try/catch → this marks the plugin status=error
-    // loudly and the gateway survives.
+    // REGISTRATION GATE (hard-fail, defense-in-depth). Refuse to register the
+    // cloud backend while the live allow-list is not provably QA-only. The loader
+    // wraps register() in try/catch → this marks the plugin status=error loudly
+    // and the gateway survives.
     if (cfg.backend === "zep-cloud" && !isQaOnly()) {
       throw new Error(
         "phi_tripwire: refusing to register memory-graphiti on zep-cloud while the " +
@@ -192,11 +197,15 @@ const memoryPlugin = {
       );
     }
 
-    // WRAP cloud only. self-hosted is NEVER wrapped (PHI in-house is sanctioned).
-    let client = createClient(cfg);
-    if (cfg.backend === "zep-cloud") {
-      client = new PhiTripwireGuard(client, isQaOnly, onBreach);
-    }
+    // PER-SENDER GATE (load-bearing). True ⇒ this conversation may touch Zep.
+    //   - self-hosted is NEVER gated (PHI in-house is sanctioned) ⇒ always true.
+    //   - cloud requires THIS conversation's resolved sender ∈ qaNumbers.
+    // A sessionKey-less / unresolvable-sender call on cloud ⇒ false (fail-closed).
+    const zepAllowed = (sessionKey: string | undefined): boolean =>
+      cfg.backend !== "zep-cloud" || senderZepAllowed(sessionKey, qaNumbers);
+
+    // self-hosted is NEVER wrapped/gated; cloud is gated per-call at each site.
+    const client = createClient(cfg);
 
     // Identity DB connection — only created when using "identity" strategy
     const identitySql =
@@ -230,6 +239,23 @@ const memoryPlugin = {
             query: string;
             maxFacts?: number;
           };
+
+          // PHI tripwire (tool read): the tool execute signature carries NO
+          // per-call ctx/sessionKey, so we cannot resolve THIS conversation's
+          // sender here. On cloud that is an ungated Zep read path — FAIL-CLOSED:
+          // refuse without touching the client. Self-hosted is never gated.
+          if (!zepAllowed(undefined)) {
+            onBreach({ op: "searchFacts", backendLabel: client.label, reason: "non-qa-sender" });
+            return {
+              content: [
+                {
+                  type: "text" as const,
+                  text: "Knowledge graph search is unavailable in this deployment (PHI tripwire).",
+                },
+              ],
+              details: { count: 0, refused: "phi_tripwire" },
+            };
+          }
 
           try {
             // Tools use lastGroupId which is set by hooks (identity-resolved when applicable)
@@ -286,6 +312,23 @@ const memoryPlugin = {
         }),
         async execute(_toolCallId, params) {
           const { lastN = 10 } = params as { lastN?: number };
+
+          // PHI tripwire (tool read): no per-call ctx/sessionKey is available
+          // here, so the sender cannot be resolved. On cloud this is an ungated
+          // Zep read path — FAIL-CLOSED: refuse without touching the client.
+          // Self-hosted is never gated.
+          if (!zepAllowed(undefined)) {
+            onBreach({ op: "getEpisodes", backendLabel: client.label, reason: "non-qa-sender" });
+            return {
+              content: [
+                {
+                  type: "text" as const,
+                  text: "Knowledge graph episodes are unavailable in this deployment (PHI tripwire).",
+                },
+              ],
+              details: { count: 0, refused: "phi_tripwire" },
+            };
+          }
 
           try {
             const episodes = await client.getEpisodes(cfg.userId ?? lastGroupId, lastN);
@@ -383,6 +426,14 @@ const memoryPlugin = {
           groupId = cfg.userId ?? (ctx.sessionKey ? deriveGroupId(ctx, cfg) : lastGroupId);
         }
 
+        // PHI tripwire (recall): on cloud, only recall for a QA sender. A non-QA
+        // sender must NEVER trigger a Zep read or inject recalled facts — skip
+        // entirely (no network, no prependContext). Self-hosted is never gated.
+        if (!zepAllowed(ctx.sessionKey)) {
+          onBreach({ op: "searchFacts", backendLabel: client.label, reason: "non-qa-sender" });
+          return;
+        }
+
         try {
           const facts = await client.searchFacts(event.prompt, [groupId], cfg.maxFacts);
 
@@ -429,6 +480,15 @@ const memoryPlugin = {
           }
           // Store for use in before_agent_start
           lastGroupId = groupId;
+
+          // PHI tripwire (capture): on cloud, only capture a QA sender's
+          // conversation. A non-QA sender's PHI must NEVER be written to Zep —
+          // drop it (no addMessages, no network). Never throws (capture is
+          // already fire-and-forget). Self-hosted is never gated.
+          if (!zepAllowed(ctx.sessionKey)) {
+            onBreach({ op: "addMessages", backendLabel: client.label, reason: "non-qa-sender" });
+            return;
+          }
 
           const timestamp = new Date().toISOString();
           const graphitiMessages = extracted.map((m) => ({
