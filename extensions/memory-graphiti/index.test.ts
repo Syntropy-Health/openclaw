@@ -28,6 +28,8 @@ describe("graphitiConfigSchema.parse", () => {
       autoCapture: true,
       autoRecall: true,
       maxFacts: 10,
+      // P3: tripwire QA-number set, defaulted to [] by the parser.
+      qaNumbers: [],
     });
   });
 
@@ -44,6 +46,8 @@ describe("graphitiConfigSchema.parse", () => {
       autoCapture: true,
       autoRecall: true,
       maxFacts: 10,
+      // P3: tripwire QA-number set, defaulted to [] by the parser.
+      qaNumbers: [],
     });
   });
 

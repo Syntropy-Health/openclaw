@@ -50,6 +50,12 @@ export type GraphitiConfig = {
   autoCapture: boolean;
   autoRecall: boolean;
   maxFacts: number;
+  /**
+   * Known-synthetic / QA WhatsApp numbers (E.164). The PHI tripwire treats the
+   * deployment as QA-only — and therefore lets the zep-cloud backend send data —
+   * ONLY IF EVERY live WhatsApp allow-list entry is in this set. Defaults to [].
+   */
+  qaNumbers?: string[];
 };
 
 export type GroupIdContext = {
@@ -68,6 +74,7 @@ const ALLOWED_KEYS = [
   "autoCapture",
   "autoRecall",
   "maxFacts",
+  "qaNumbers",
 ];
 
 const VALID_STRATEGIES: GroupIdStrategy[] = ["channel-sender", "session", "static", "identity"];
@@ -244,6 +251,18 @@ export const graphitiConfigSchema = {
       throw new Error("maxFacts must be between 1 and 100");
     }
 
+    // qaNumbers (optional, default: []). Known-synthetic/QA WhatsApp numbers the
+    // PHI tripwire checks the live allow-list against. Normalized to string[].
+    let qaNumbers: string[] = [];
+    if (Array.isArray(cfg.qaNumbers)) {
+      qaNumbers = cfg.qaNumbers
+        .filter((n): n is string => typeof n === "string")
+        .map((n) => n.trim())
+        .filter((n) => n.length > 0);
+    } else if (typeof cfg.qaNumbers === "string" && cfg.qaNumbers.trim()) {
+      qaNumbers = [cfg.qaNumbers.trim()];
+    }
+
     return {
       backend,
       deprecationWarning,
@@ -257,6 +276,7 @@ export const graphitiConfigSchema = {
       autoCapture: cfg.autoCapture !== false,
       autoRecall: cfg.autoRecall !== false,
       maxFacts,
+      qaNumbers,
     };
   },
 
@@ -309,6 +329,11 @@ export const graphitiConfigSchema = {
     maxFacts: {
       label: "Max Facts",
       placeholder: "10",
+      advanced: true,
+    },
+    qaNumbers: {
+      label: "QA Numbers (PHI tripwire)",
+      help: "Known-synthetic/QA WhatsApp numbers (E.164). The tripwire treats the deployment as QA-only — and only then lets the zep-cloud backend send data — if EVERY live WhatsApp allow-list entry is in this set. Self-hosted is never gated.",
       advanced: true,
     },
   },

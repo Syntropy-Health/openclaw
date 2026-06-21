@@ -15,6 +15,7 @@ import postgres from "postgres";
 import { GraphitiRestClient, type FactResult, type MemoryClient } from "./client.js";
 import { deriveGroupId, graphitiConfigSchema, type GraphitiConfig } from "./config.js";
 import { resolveIdentityScopeKey } from "./identity.js";
+import { computeIsQaOnly, PhiTripwireGuard, type TripwireBreach } from "./tripwire.js";
 import { ZepCloudClient } from "./zep-cloud-client.js";
 
 // ============================================================================
@@ -148,7 +149,54 @@ const memoryPlugin = {
     if (cfg.deprecationWarning) {
       api.logger.warn(cfg.deprecationWarning);
     }
-    const client = createClient(cfg);
+
+    // ========================================================================
+    // PHI TRIPWIRE (P3)
+    //
+    // The safety invariant: real-user PHI must NEVER reach Zep Cloud. Cloud is
+    // usable ONLY when the deployment is provably QA-only — the LIVE WhatsApp
+    // allow-list contains exclusively known-synthetic/QA numbers. Self-hosted
+    // (PHI in-house) is the sanctioned path and is NEVER guarded.
+    //
+    // The predicate re-reads api.config on EVERY call (intentional): it is bound
+    // to the LIVE allow-list, so it can't read true while a real user has access.
+    // Absent / unevaluable => false (fail-closed).
+    // ========================================================================
+    const qaNumbers = cfg.qaNumbers ?? [];
+    const isQaOnly = () => computeIsQaOnly(api.config, qaNumbers);
+
+    const onBreach = (b: TripwireBreach) => {
+      // Emit a STABLE, structured, greppable marker at error level. This is the
+      // load-bearing observability signal: a tripwire firing in prod is a
+      // serious event (an attempt to write/read PHI on cloud while NOT QA-only).
+      // The `phi_tripwire_breach` token is the alerting hook — devex wires
+      // log-based alerting / a metric on it (Sentry/OTEL). A richer in-process
+      // metric/system-event sink is a follow-up: enqueueSystemEvent requires a
+      // per-call sessionKey the MemoryClient interface does not thread, so we do
+      // NOT fake one here (a swallowed always-throw would be dishonest).
+      api.logger.error(
+        `phi_tripwire_breach op=${b.op} backend=${b.backendLabel} reason=${b.reason} — ` +
+          `Zep PHI ${b.op === "addMessages" ? "write" : "read"} REFUSED (deployment not QA-only)`,
+      );
+    };
+
+    // REGISTRATION GATE (hard-fail). Before wiring anything, refuse to register
+    // the cloud backend while the live allow-list is not provably QA-only. The
+    // loader wraps register() in try/catch → this marks the plugin status=error
+    // loudly and the gateway survives.
+    if (cfg.backend === "zep-cloud" && !isQaOnly()) {
+      throw new Error(
+        "phi_tripwire: refusing to register memory-graphiti on zep-cloud while the " +
+          "WhatsApp allow-list is not provably QA-only (PHI exposure risk). Set " +
+          "backend: self-hosted, or restrict the allow-list to qaNumbers.",
+      );
+    }
+
+    // WRAP cloud only. self-hosted is NEVER wrapped (PHI in-house is sanctioned).
+    let client = createClient(cfg);
+    if (cfg.backend === "zep-cloud") {
+      client = new PhiTripwireGuard(client, isQaOnly, onBreach);
+    }
 
     // Identity DB connection — only created when using "identity" strategy
     const identitySql =
