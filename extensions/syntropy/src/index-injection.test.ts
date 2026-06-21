@@ -33,6 +33,16 @@ const okProfile = (allergy: string): SyntropyToolResult => ({
   },
 });
 
+describe("SYNTROPY_GATE strings (oc-hygiene #4)", () => {
+  it("points to the real 'Pair Device' affordance, not the nonexistent 'Link Device'", () => {
+    expect(SYNTROPY_GATE).toContain("Pair Device");
+    expect(SYNTROPY_GATE).not.toContain("Link Device");
+  });
+  it("names the Syntropy Journals app", () => {
+    expect(SYNTROPY_GATE).toContain("Syntropy Journals");
+  });
+});
+
 describe("wiring/paired", () => {
   it("injects the profile as prependContext without the agent calling the tool", async () => {
     const { resolvedUsers, profileBlocks } = caches();

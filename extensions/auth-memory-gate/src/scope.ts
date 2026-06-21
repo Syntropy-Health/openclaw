@@ -191,7 +191,7 @@ export function formatHardGateSystemPrompt(channel: string, peerId: string): str
     "IMPORTANT: This user has NOT been identified. You MUST NOT proceed with any request",
     "until they verify their identity. Guide them through these steps:",
     "",
-    "1. Greet the user warmly and welcome them to Syntropy Health",
+    "1. Greet the user warmly and welcome them to Syntropy Journals",
     "2. Ask for their FIRST and LAST NAME as registered in the Syntropy Journals app",
     "3. Once they provide a name, tell them to type: !identify <first_name> <last_name>",
     "4. After identification, ask them to open Syntropy Journals → Settings → Pair Device",
