@@ -187,6 +187,12 @@ describe("formatHardGateSystemPrompt", () => {
     const result = formatHardGateSystemPrompt("slack", "U12345");
     expect(result).toContain("Do NOT answer any other questions");
   });
+
+  test("uses the canonical 'Syntropy Journals' brand consistently (no 'Syntropy Health' leak)", () => {
+    const result = formatHardGateSystemPrompt("telegram", "tg-user-123");
+    expect(result).toContain("welcome them to Syntropy Journals");
+    expect(result).not.toContain("Syntropy Health");
+  });
 });
 
 describe("formatHardGateReplyAppend", () => {

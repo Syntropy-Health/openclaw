@@ -98,8 +98,8 @@ reason: No Syntropy auth token found for this user.
 
 Health tools (food logging, diet scoring, check-ins) are NOT available.
 The user needs to complete pairing first:
-1. Log in to the Syntropy web app
-2. Click "Link Device" to get a 6-digit code
+1. Log in to the Syntropy Journals app
+2. Open Settings → "Pair Device" to get a 6-digit code
 3. Type: !verify <code>
 [/SYNTROPY_GATE]`;
 
