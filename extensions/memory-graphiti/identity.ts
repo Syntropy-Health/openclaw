@@ -7,6 +7,7 @@
  */
 
 import type postgres from "postgres";
+import { deriveScopeKey } from "../shared/scope-key.js";
 import type { GroupIdContext } from "./config.js";
 
 // ---------------------------------------------------------------------------
@@ -87,5 +88,9 @@ export async function resolveIdentityScopeKey(
     return null;
   }
 
-  return (user.external_id as string | null) ?? (user.id as string);
+  // Shared canonical derivation (single source of truth with auth-memory-gate).
+  return deriveScopeKey({
+    external_id: user.external_id as string | null,
+    id: user.id as string,
+  });
 }

@@ -1,4 +1,5 @@
 import type postgres from "postgres";
+import { deriveScopeKey } from "../../shared/scope-key.js";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -75,9 +76,9 @@ export async function findUserByChannelPeer(
  * Returns null when the peer cannot be identified (shared sessions, unknown).
  */
 export function resolveScope(identity: IdentityRow, channel: string, peerId: string): ScopeResult {
-  // Prefer external_id (cross-channel, from JWT sub) for the scope key.
-  // Falls back to internal user UUID for channel-only users.
-  const scopeKey = identity.external_id ?? identity.id;
+  // Shared canonical derivation (single source of truth with memory-graphiti):
+  // prefer external_id (cross-channel, from JWT sub), fall back to user UUID.
+  const scopeKey = deriveScopeKey(identity);
 
   return {
     userId: identity.id,
