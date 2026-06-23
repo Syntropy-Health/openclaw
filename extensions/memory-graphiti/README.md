@@ -2,35 +2,14 @@
 
 Graph-based knowledge memory plugin for OpenClaw using [Graphiti](https://github.com/getzep/graphiti) — a temporally-aware knowledge graph framework.
 
-Supports two backends:
+Two backends, selected **explicitly** via `backend`:
 
-- **Zep Cloud** (managed) — uses `@getzep/zep-cloud` SDK with API key
-- **Self-hosted Graphiti** — raw REST API calls to a user-managed Graphiti server
+- **Self-hosted Graphiti** (`backend: "self-hosted"`, the **default**) — raw REST API to a server you run. **This is the production posture for real-user PHI** (data stays in-house).
+- **Zep Cloud** (`backend: "zep-cloud"`) — managed (`@getzep/zep-cloud`). **QA / synthetic ONLY**, behind the PHI tripwire (see below).
 
-## Quick Start: Zep Cloud (Recommended)
+> ⚠️ **PHI posture (locked).** Real-user health conversations are PHI. Self-hosted is the production target; Zep Cloud is permitted for QA/synthetic data only and is guarded by a fail-closed per-sender tripwire. **No real user gets memory until the self-hosted backend ships** and the tripwire verifies the QA→prod swap (the RELEASE RULE). See [`workstreams/openclaw/design/memory-model-contract.md`](../../../../workstreams/openclaw/design/memory-model-contract.md) for the cross-service contract (openclaw ⇄ syntropy-journals share ONE user graph).
 
-1. Get an API key at [app.getzep.com](https://app.getzep.com)
-2. Set the environment variable:
-   ```bash
-   export GETZEP_API_KEY=z_your_key_here
-   ```
-3. Configure the plugin:
-   ```json
-   {
-     "plugins": {
-       "slots": { "memory": "memory-graphiti" },
-       "config": {
-         "memory-graphiti": {
-           "apiKey": "${GETZEP_API_KEY}"
-         }
-       }
-     }
-   }
-   ```
-
-That's it. Zep Cloud handles Neo4j, entity extraction, and LLM processing.
-
-## Quick Start: Self-Hosted Graphiti
+## Quick Start: Self-Hosted (production posture)
 
 ### Prerequisites
 
@@ -38,8 +17,7 @@ A running Graphiti REST API server backed by Neo4j:
 
 ```bash
 git clone https://github.com/getzep/graphiti.git
-cd graphiti
-cp .env.example .env
+cd graphiti && cp .env.example .env
 # Set OPENAI_API_KEY (required for entity extraction)
 docker compose up -d
 ```
@@ -54,105 +32,110 @@ Verify: `curl http://localhost:8000/healthcheck`
     "slots": { "memory": "memory-graphiti" },
     "config": {
       "memory-graphiti": {
-        "serverUrl": "${GRAPHITI_SERVER_URL}"
+        "backend": "self-hosted",
+        "serverUrl": "${GRAPHITI_SERVER_URL}",
+        "groupIdStrategy": "identity"
       }
     }
   }
 }
 ```
 
-## Configuration Reference
+## Quick Start: Zep Cloud (QA / synthetic ONLY)
 
-| Option            | Type                                                            | Default            | Description                                                                 |
-| ----------------- | --------------------------------------------------------------- | ------------------ | --------------------------------------------------------------------------- |
-| `apiKey`          | string                                                          | —                  | Zep Cloud API key. When set, uses Zep Cloud backend.                        |
-| `serverUrl`       | string                                                          | —                  | Self-hosted Graphiti REST API URL. Used when apiKey is not set.             |
-| `userId`          | string                                                          | —                  | Fixed Zep Cloud user ID. If not set, derived from group ID strategy.        |
-| `groupIdStrategy` | `"channel-sender"` \| `"session"` \| `"static"` \| `"identity"` | `"channel-sender"` | How to partition the knowledge graph.                                       |
-| `staticGroupId`   | string                                                          | —                  | Required when strategy is `"static"`.                                       |
-| `databaseUrl`     | string                                                          | —                  | PostgreSQL URL for `"identity"` strategy. Falls back to `DATABASE_URL` env. |
-| `autoCapture`     | boolean                                                         | `true`             | Capture conversations after each agent turn.                                |
-| `autoRecall`      | boolean                                                         | `true`             | Inject relevant facts before each agent turn.                               |
-| `maxFacts`        | number (1–100)                                                  | `10`               | Max facts to inject during auto-recall.                                     |
-
-**Backend auto-detection**: If `apiKey` is set → Zep Cloud. Otherwise → self-hosted Graphiti REST API.
-
-All string config values support `${ENV_VAR}` syntax for environment variable resolution.
-
-### Group ID Strategies
-
-- **`channel-sender`** (default): Partitions by `{provider}:{senderId}`. Each user gets their own knowledge graph per messaging channel. No cross-channel continuity.
-- **`session`**: Uses the full session key. Each conversation thread gets its own graph.
-- **`static`**: All conversations share a single graph identified by `staticGroupId`.
-- **`identity`** (recommended with auth stack): Uses the canonical user ID from `persist-user-identity`'s database. Verified users share one graph across all channels; channel-only users get per-user isolation. Requires `DATABASE_URL` or `databaseUrl` config.
-
-In Zep Cloud mode, the group ID maps to a Zep Cloud `userId`. Users are auto-created on first interaction.
-
-### Identity Strategy — Cross-Channel Memory
-
-The `identity` strategy integrates with the identity plugin stack to provide **per-user memory that follows users across channels**:
-
-```
-WhatsApp user +1234567890  ─┐
-Slack user U_ABC123        ─┼─ same person (linked via /verify) → one knowledge graph
-Web chat session xyz       ─┘
-```
-
-**How it works:**
-
-1. `persist-user-identity` resolves the channel peer ID to a canonical `user_id`
-2. `auth-memory-gate` derives a `scope_key` (preferring `external_id` for verified users)
-3. `memory-graphiti` reads the `scope_key` from the identity DB and uses it as the Graphiti `group_id`
-
-**Required plugins** (in priority order):
-| Plugin | Priority | Role |
-| ----------------------- | -------- | --------------------------------- |
-| `persist-user-identity` | 60 | Resolves user from channel + peer |
-| `persist-postgres` | 50 | Persists messages |
-| `auth-memory-gate` | 40 | Derives scope key, gates access |
-| `memory-graphiti` | 0 | Recalls/captures scoped memories |
-
-**Configuration example:**
+Permitted only for QA with a **synthetic allow-list**. You MUST set `qaNumbers` (the known-synthetic E.164 numbers) — the tripwire refuses every Zep touch whose resolved sender is not in this set, and **fails closed** if it is empty/absent.
 
 ```json
 {
   "plugins": {
-    "entries": {
-      "persist-user-identity": { "enabled": true },
-      "persist-postgres": { "enabled": true },
-      "auth-memory-gate": {
-        "enabled": true,
-        "config": { "hardGate": true }
-      },
+    "slots": { "memory": "memory-graphiti" },
+    "config": {
       "memory-graphiti": {
-        "enabled": true,
-        "config": {
-          "groupIdStrategy": "identity",
-          "autoCapture": true,
-          "autoRecall": true
-        }
+        "backend": "zep-cloud",
+        "apiKey": "${GETZEP_API_KEY}",
+        "qaNumbers": ["+14155550123", "+14155550124"],
+        "groupIdStrategy": "identity"
       }
     }
   }
 }
 ```
 
-All plugins share `DATABASE_URL` for PostgreSQL access. Set it as an environment variable or in each plugin's `databaseUrl` config.
+QA→prod is a **config swap**, not a redesign: flip `backend` to `self-hosted` + point `serverUrl` at the in-house instance.
+
+## PHI Tripwire (the safety control)
+
+Enforced at the point of PHI flow (capture, recall, and every `memory_*`/`graphiti_*` tool):
+
+- **Per-sender gate (load-bearing):** Zep is touched ONLY when the conversation's host-resolved E.164 sender (`ctx.senderE164`) is in `qaNumbers`. Any other sender — real user, group, other channel, paired peer — is dropped. **Fail-closed:** null/non-QA sender or empty `qaNumbers` ⇒ drop. Capture silent-drops, recall returns empty, tools refuse; never throws into the reply.
+- **Registration gate (defense-in-depth):** selecting `zep-cloud` while the live WhatsApp DM allow-list is not provably QA-only **hard-fails plugin load**.
+- **Self-hosted is NEVER gated** — PHI in-house is the sanctioned path.
+- **Observability:** a refusal emits a stable `phi_tripwire_breach` error marker (op + reason only — never the sender PII). Wire log-based alerting / a metric on that token.
+
+> The `memory_*`/`graphiti_*` **tools** carry no per-call sender context (the SDK `execute` signature), so they **fail closed on cloud** (refused) and work only on self-hosted. The auto-capture/recall **hooks** do have `ctx.senderE164` and are gated precisely.
+
+## Configuration Reference
+
+| Option            | Type                                                            | Default            | Description                                                                                                               |
+| ----------------- | --------------------------------------------------------------- | ------------------ | ------------------------------------------------------------------------------------------------------------------------- |
+| `backend`         | `"self-hosted"` \| `"zep-cloud"`                                | `"self-hosted"`    | **Explicit** backend selection. Self-hosted = prod posture.                                                               |
+| `qaNumbers`       | string[] (E.164)                                                | `[]`               | Known-synthetic QA senders. **Required for `zep-cloud`**; validated E.164 at parse; the tripwire fails closed when empty. |
+| `serverUrl`       | string                                                          | —                  | Self-hosted Graphiti REST URL. Required for `self-hosted`.                                                                |
+| `apiKey`          | string                                                          | —                  | Zep Cloud API key. Required for `zep-cloud`.                                                                              |
+| `userId`          | string                                                          | —                  | Fixed Zep user ID. If unset, derived from the group-id strategy.                                                          |
+| `groupIdStrategy` | `"channel-sender"` \| `"session"` \| `"static"` \| `"identity"` | `"channel-sender"` | How to partition the graph. `"identity"` recommended (see below).                                                         |
+| `staticGroupId`   | string                                                          | —                  | Required when strategy is `"static"`.                                                                                     |
+| `databaseUrl`     | string                                                          | —                  | PostgreSQL URL for `"identity"` strategy. Falls back to `DATABASE_URL`.                                                   |
+| `autoCapture`     | boolean                                                         | `true`             | Capture conversations after each agent turn.                                                                              |
+| `autoRecall`      | boolean                                                         | `true`             | Inject relevant facts before each agent turn.                                                                             |
+| `maxFacts`        | number (1–100)                                                  | `10`               | Max facts to inject during auto-recall.                                                                                   |
+
+> **Deprecated:** omitting `backend` and relying on `apiKey`-presence auto-detection still works but logs a deprecation warning — always set `backend` explicitly.
+
+All string config values support `${ENV_VAR}` syntax.
+
+## Memory scope model (per-user ⊇ per-device ⊇ per-session)
+
+The graph is **partitioned by `user_scope`** (the Graphiti `group_id`), with device + session as episode metadata:
+
+| Level       | Key                           | Role                                                                                    |
+| ----------- | ----------------------------- | --------------------------------------------------------------------------------------- |
+| **User**    | `external_id ?? user_id`      | the partition / `group_id` — one persistent graph per person, across devices + sessions |
+| **Device**  | `{channel}:{channel_peer_id}` | episode metadata (e.g. `whatsapp:+1415…`)                                               |
+| **Session** | `session_id`                  | episode metadata — a session lives on one device                                        |
+
+`user_scope` is the single source of truth — `deriveScopeKey()` in [`extensions/shared/scope-key.ts`](../shared/scope-key.ts), shared with `auth-memory-gate` (the `[MEMORY_SCOPE].scope_key`). The `external_id`-vs-`user_id` precedence is the one line that reconciles with Syntropy-Journals #9–#11. The full cross-service contract (so SJ's Python backend writes to the **same** graph) is [`memory-model-contract.md`](../../../../workstreams/openclaw/design/memory-model-contract.md).
+
+### Group ID Strategies
+
+- **`identity`** (recommended): canonical `user_scope` from the `persist-user-identity` DB — verified users share one graph across channels.
+- **`channel-sender`** (default): `{provider}:{senderId}` — per-channel, no cross-channel continuity.
+- **`session`**: per-conversation graph. **`static`**: one shared graph (`staticGroupId`).
+
+### Required plugins for `identity` (priority order)
+
+| Plugin                  | Priority | Role                              |
+| ----------------------- | -------- | --------------------------------- |
+| `persist-user-identity` | 60       | Resolves user from channel + peer |
+| `persist-postgres`      | 50       | Persists messages                 |
+| `auth-memory-gate`      | 40       | Derives `scope_key`, gates access |
+| `memory-graphiti`       | 0        | Recalls/captures scoped memories  |
+
+All share `DATABASE_URL`.
 
 ## How It Works
 
-### Auto-Capture (`agent_end` hook)
+- **Auto-capture (`agent_end`):** extracts user+assistant turns → backend (PHI-gated per sender).
+- **Auto-recall (`before_agent_start`):** searches the graph for prompt-relevant facts → injects via `prependContext` (PHI-gated per sender).
 
-After each agent turn, the plugin extracts user and assistant messages and sends them to the knowledge graph. The backend asynchronously processes them — extracting entities, relationships, and temporal facts.
+### Agent Tools (backend-stable)
 
-### Auto-Recall (`before_agent_start` hook)
+- **`memory_search`** — search the graph for facts by natural-language query.
+- **`memory_recall`** — retrieve recent conversation episodes.
+- **`memory_store`** — persist a memory (text).
+- `graphiti_search` / `graphiti_episodes` — **deprecated aliases** of `memory_search` / `memory_recall` (kept one release).
 
-Before each agent turn, the plugin searches the knowledge graph for facts relevant to the user's prompt and injects them as context via `prependContext`.
-
-### Agent Tools
-
-- **`graphiti_search`** — Search the knowledge graph for facts by natural language query.
-- **`graphiti_episodes`** — Retrieve recent conversation episodes stored in the graph.
+All tools are PHI-gated (fail closed on cloud — see the tripwire note above).
 
 ### CLI
 
@@ -160,12 +143,13 @@ Before each agent turn, the plugin searches the knowledge graph for facts releva
 openclaw graphiti status   # Check server/API connectivity
 ```
 
+## Operational prerequisite (prod cutover)
+
+Real-user memory is **gated on the self-hosted Graphiti backend shipping** (the RELEASE RULE). Self-hosted **deploy ownership** (provision, backups, availability) + the **redaction** follow-up are prod-cutover prerequisites, deferred and to be assigned by the principal/devex when cutover nears — they are NOT a code dependency of this plugin.
+
 ## Development
 
 ```bash
-# Unit tests
-pnpm vitest run extensions/memory-graphiti/index.test.ts
-
-# Integration tests (requires GETZEP_API_KEY)
-GETZEP_API_KEY=<key> pnpm vitest run extensions/memory-graphiti/integration.test.ts
+pnpm vitest run -c vitest.extensions.config.ts extensions/memory-graphiti        # unit
+GETZEP_API_KEY=<key> pnpm vitest run extensions/memory-graphiti/integration.test.ts   # integration (needs a key)
 ```
