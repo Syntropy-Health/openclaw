@@ -12,7 +12,12 @@
 import { Type } from "@sinclair/typebox";
 import type { OpenClawPluginApi } from "openclaw/plugin-sdk";
 import postgres from "postgres";
-import { GraphitiRestClient, type FactResult, type MemoryClient } from "./client.js";
+import {
+  GraphitiRestClient,
+  type FactResult,
+  type GraphitiMessage,
+  type MemoryClient,
+} from "./client.js";
 import { deriveGroupId, graphitiConfigSchema, type GraphitiConfig } from "./config.js";
 import { resolveIdentityScopeKey } from "./identity.js";
 import { computeIsQaOnly, senderZepAllowed, type TripwireBreach } from "./tripwire.js";
@@ -235,80 +240,278 @@ const memoryPlugin = {
 
     // ========================================================================
     // Tools
+    //
+    // CANONICAL surface = `memory_*` (memory_search / memory_recall /
+    // memory_store), matching memory-core / memory-lancedb naming so the
+    // agent-facing tool names stay STABLE when the memory backend swaps.
+    // `graphiti_search` / `graphiti_episodes` remain as DEPRECATED ALIASES for
+    // one release — same handlers, deprecation-prefixed descriptions.
+    //
+    // To avoid duplicating the handler bodies between a canonical tool and its
+    // alias, each behavior lives in ONE factored closure (runMemorySearch /
+    // runMemoryRecall / runMemoryStore). The canonical tool and its alias both
+    // call the same closure, so they can NEVER diverge (P3 gate included).
+    //
+    // The closures return the same { content, details } tool-result shape the
+    // tools have always returned. They are typed as `unknown` to stay decoupled
+    // from the SDK's tool-result type (not exported here); the registered
+    // `execute` functions just return what the closure produces.
     // ========================================================================
+
+    type ToolResult = {
+      content: { type: "text"; text: string }[];
+      details: Record<string, unknown>;
+    };
+
+    // memory_search / graphiti_search — natural-language fact search.
+    const runMemorySearch = async (params: {
+      query: string;
+      maxFacts?: number;
+    }): Promise<ToolResult> => {
+      const { query, maxFacts = cfg.maxFacts } = params;
+
+      // PHI tripwire (tool read): the tool execute signature carries NO
+      // per-call ctx/sessionKey, so we cannot resolve THIS conversation's
+      // sender here. On cloud that is an ungated Zep read path — FAIL-CLOSED:
+      // refuse without touching the client. Self-hosted is never gated.
+      if (!zepAllowed(undefined)) {
+        onBreach({ op: "searchFacts", backendLabel: client.label, reason: "non-qa-sender" });
+        return {
+          content: [
+            {
+              type: "text" as const,
+              text: "Knowledge graph search is unavailable in this deployment (PHI tripwire).",
+            },
+          ],
+          details: { count: 0, refused: "phi_tripwire" },
+        };
+      }
+
+      try {
+        // Tools use lastGroupId which is set by hooks (identity-resolved when applicable)
+        const facts = await client.searchFacts(query, [cfg.userId ?? lastGroupId], maxFacts);
+
+        if (facts.length === 0) {
+          return {
+            content: [
+              { type: "text" as const, text: "No relevant facts found in knowledge graph." },
+            ],
+            details: { count: 0 },
+          };
+        }
+
+        const text = facts
+          .map((f, i) => {
+            const validity = f.valid_at ? ` (since: ${f.valid_at.slice(0, 10)})` : "";
+            return `${i + 1}. [${f.name}] ${f.fact}${validity}`;
+          })
+          .join("\n");
+
+        return {
+          content: [{ type: "text" as const, text: `Found ${facts.length} facts:\n\n${text}` }],
+          details: {
+            count: facts.length,
+            facts: facts.map((f) => ({
+              uuid: f.uuid,
+              name: f.name,
+              fact: f.fact,
+              valid_at: f.valid_at,
+            })),
+          },
+        };
+      } catch (err) {
+        return {
+          content: [{ type: "text" as const, text: `Graphiti search failed: ${String(err)}` }],
+          details: { error: String(err) },
+        };
+      }
+    };
+
+    // memory_recall / graphiti_episodes — recent episodes / conversation turns.
+    const runMemoryRecall = async (params: { lastN?: number }): Promise<ToolResult> => {
+      const { lastN = 10 } = params;
+
+      // PHI tripwire (tool read): no per-call ctx/sessionKey is available
+      // here, so the sender cannot be resolved. On cloud this is an ungated
+      // Zep read path — FAIL-CLOSED: refuse without touching the client.
+      // Self-hosted is never gated.
+      if (!zepAllowed(undefined)) {
+        onBreach({ op: "getEpisodes", backendLabel: client.label, reason: "non-qa-sender" });
+        return {
+          content: [
+            {
+              type: "text" as const,
+              text: "Knowledge graph episodes are unavailable in this deployment (PHI tripwire).",
+            },
+          ],
+          details: { count: 0, refused: "phi_tripwire" },
+        };
+      }
+
+      try {
+        const episodes = await client.getEpisodes(cfg.userId ?? lastGroupId, lastN);
+
+        if (episodes.length === 0) {
+          return {
+            content: [{ type: "text" as const, text: "No episodes found in knowledge graph." }],
+            details: { count: 0 },
+          };
+        }
+
+        const text = episodes
+          .map((e, i) => {
+            const date = e.created_at ? e.created_at.slice(0, 10) : "unknown";
+            const preview = e.content.slice(0, 120).replace(/\n/g, " ");
+            return `${i + 1}. [${date}] ${preview}${e.content.length > 120 ? "..." : ""}`;
+          })
+          .join("\n");
+
+        return {
+          content: [
+            { type: "text" as const, text: `Found ${episodes.length} episodes:\n\n${text}` },
+          ],
+          details: {
+            count: episodes.length,
+            episodes: episodes.map((e) => ({
+              uuid: e.uuid,
+              name: e.name,
+              content: e.content.slice(0, 500),
+              created_at: e.created_at,
+            })),
+          },
+        };
+      } catch (err) {
+        return {
+          content: [
+            {
+              type: "text" as const,
+              text: `Graphiti episodes retrieval failed: ${String(err)}`,
+            },
+          ],
+          details: { error: String(err) },
+        };
+      }
+    };
+
+    // memory_store — store a memory. NEW canonical-only tool (no graphiti_*
+    // alias). Same P3 PHI gate as the others: on cloud the tool has no per-call
+    // sender ctx ⇒ FAIL-CLOSED (refuse the WRITE, emit a breach, no addMessages);
+    // self-hosted (PHI in-house) is never gated.
+    const runMemoryStore = async (params: { text: string }): Promise<ToolResult> => {
+      const { text } = params;
+
+      if (typeof text !== "string" || !text.trim()) {
+        return {
+          content: [{ type: "text" as const, text: "memory_store: `text` is required." }],
+          details: { stored: false, error: "empty_text" },
+        };
+      }
+
+      // PHI tripwire (tool WRITE): identical fail-closed posture to the reads —
+      // a tool has no resolvable sender, so on cloud we refuse rather than write
+      // un-attributable content to Zep. Self-hosted is never gated.
+      if (!zepAllowed(undefined)) {
+        onBreach({ op: "addMessages", backendLabel: client.label, reason: "non-qa-sender" });
+        return {
+          content: [
+            {
+              type: "text" as const,
+              text: "Storing to the knowledge graph is unavailable in this deployment (PHI tripwire).",
+            },
+          ],
+          details: { stored: false, refused: "phi_tripwire" },
+        };
+      }
+
+      const groupId = cfg.userId ?? lastGroupId;
+      // GraphitiMessage shape — mirrors the auto-capture hook's message shape
+      // (content / role_type / role / timestamp / source_description). The tool
+      // attributes the content to the user turn under the `openclaw` role, and
+      // tags the source so stored memories are distinguishable from captures.
+      const message: GraphitiMessage = {
+        content: text,
+        role_type: "user",
+        role: "openclaw",
+        timestamp: new Date().toISOString(),
+        source_description: "memory_store",
+      };
+
+      try {
+        await client.addMessages(groupId, [message]);
+        return {
+          content: [{ type: "text" as const, text: "Stored to the knowledge graph." }],
+          details: { stored: true, groupId },
+        };
+      } catch (err) {
+        return {
+          content: [{ type: "text" as const, text: `Memory store failed: ${String(err)}` }],
+          details: { stored: false, error: String(err) },
+        };
+      }
+    };
+
+    // ---- CANONICAL tools (memory_*) ----
 
     api.registerTool(
       {
-        name: "graphiti_search",
-        label: "Graphiti Search",
+        name: "memory_search",
+        label: "Memory Search",
         description:
           "Search the knowledge graph for facts and relationships. Use to find entity info, preferences, decisions, or temporal facts from past conversations.",
         parameters: Type.Object({
           query: Type.String({ description: "Natural language search query" }),
           maxFacts: Type.Optional(Type.Number({ description: "Max results (default: 10)" })),
         }),
-        async execute(_toolCallId, params) {
-          const { query, maxFacts = cfg.maxFacts } = params as {
-            query: string;
-            maxFacts?: number;
-          };
+        execute: (_toolCallId, params) =>
+          runMemorySearch(params as { query: string; maxFacts?: number }),
+      },
+      { name: "memory_search" },
+    );
 
-          // PHI tripwire (tool read): the tool execute signature carries NO
-          // per-call ctx/sessionKey, so we cannot resolve THIS conversation's
-          // sender here. On cloud that is an ungated Zep read path — FAIL-CLOSED:
-          // refuse without touching the client. Self-hosted is never gated.
-          if (!zepAllowed(undefined)) {
-            onBreach({ op: "searchFacts", backendLabel: client.label, reason: "non-qa-sender" });
-            return {
-              content: [
-                {
-                  type: "text" as const,
-                  text: "Knowledge graph search is unavailable in this deployment (PHI tripwire).",
-                },
-              ],
-              details: { count: 0, refused: "phi_tripwire" },
-            };
-          }
+    api.registerTool(
+      {
+        name: "memory_recall",
+        label: "Memory Recall",
+        description: "Recall recent episodes (conversation turns) stored in the knowledge graph.",
+        parameters: Type.Object({
+          lastN: Type.Optional(
+            Type.Number({ description: "Number of recent episodes (default: 10)" }),
+          ),
+        }),
+        execute: (_toolCallId, params) => runMemoryRecall(params as { lastN?: number }),
+      },
+      { name: "memory_recall" },
+    );
 
-          try {
-            // Tools use lastGroupId which is set by hooks (identity-resolved when applicable)
-            const facts = await client.searchFacts(query, [cfg.userId ?? lastGroupId], maxFacts);
+    api.registerTool(
+      {
+        name: "memory_store",
+        label: "Memory Store",
+        description:
+          "Store a memory in the knowledge graph. Use to persist a fact, preference, or decision that should be remembered for future conversations.",
+        parameters: Type.Object({
+          text: Type.String({ description: "The content to remember" }),
+        }),
+        execute: (_toolCallId, params) => runMemoryStore(params as { text: string }),
+      },
+      { name: "memory_store" },
+    );
 
-            if (facts.length === 0) {
-              return {
-                content: [
-                  { type: "text" as const, text: "No relevant facts found in knowledge graph." },
-                ],
-                details: { count: 0 },
-              };
-            }
+    // ---- DEPRECATED ALIASES (graphiti_*) — kept for one release ----
+    // Same handlers (delegate to the factored closures above). Do NOT remove.
 
-            const text = facts
-              .map((f, i) => {
-                const validity = f.valid_at ? ` (since: ${f.valid_at.slice(0, 10)})` : "";
-                return `${i + 1}. [${f.name}] ${f.fact}${validity}`;
-              })
-              .join("\n");
-
-            return {
-              content: [{ type: "text" as const, text: `Found ${facts.length} facts:\n\n${text}` }],
-              details: {
-                count: facts.length,
-                facts: facts.map((f) => ({
-                  uuid: f.uuid,
-                  name: f.name,
-                  fact: f.fact,
-                  valid_at: f.valid_at,
-                })),
-              },
-            };
-          } catch (err) {
-            return {
-              content: [{ type: "text" as const, text: `Graphiti search failed: ${String(err)}` }],
-              details: { error: String(err) },
-            };
-          }
-        },
+    api.registerTool(
+      {
+        name: "graphiti_search",
+        label: "Graphiti Search",
+        description:
+          "(deprecated — use memory_search) Search the knowledge graph for facts and relationships. Use to find entity info, preferences, decisions, or temporal facts from past conversations.",
+        parameters: Type.Object({
+          query: Type.String({ description: "Natural language search query" }),
+          maxFacts: Type.Optional(Type.Number({ description: "Max results (default: 10)" })),
+        }),
+        execute: (_toolCallId, params) =>
+          runMemorySearch(params as { query: string; maxFacts?: number }),
       },
       { name: "graphiti_search" },
     );
@@ -317,76 +520,14 @@ const memoryPlugin = {
       {
         name: "graphiti_episodes",
         label: "Graphiti Episodes",
-        description: "Retrieve recent episodes (conversation turns) stored in the knowledge graph.",
+        description:
+          "(deprecated — use memory_recall) Retrieve recent episodes (conversation turns) stored in the knowledge graph.",
         parameters: Type.Object({
           lastN: Type.Optional(
             Type.Number({ description: "Number of recent episodes (default: 10)" }),
           ),
         }),
-        async execute(_toolCallId, params) {
-          const { lastN = 10 } = params as { lastN?: number };
-
-          // PHI tripwire (tool read): no per-call ctx/sessionKey is available
-          // here, so the sender cannot be resolved. On cloud this is an ungated
-          // Zep read path — FAIL-CLOSED: refuse without touching the client.
-          // Self-hosted is never gated.
-          if (!zepAllowed(undefined)) {
-            onBreach({ op: "getEpisodes", backendLabel: client.label, reason: "non-qa-sender" });
-            return {
-              content: [
-                {
-                  type: "text" as const,
-                  text: "Knowledge graph episodes are unavailable in this deployment (PHI tripwire).",
-                },
-              ],
-              details: { count: 0, refused: "phi_tripwire" },
-            };
-          }
-
-          try {
-            const episodes = await client.getEpisodes(cfg.userId ?? lastGroupId, lastN);
-
-            if (episodes.length === 0) {
-              return {
-                content: [{ type: "text" as const, text: "No episodes found in knowledge graph." }],
-                details: { count: 0 },
-              };
-            }
-
-            const text = episodes
-              .map((e, i) => {
-                const date = e.created_at ? e.created_at.slice(0, 10) : "unknown";
-                const preview = e.content.slice(0, 120).replace(/\n/g, " ");
-                return `${i + 1}. [${date}] ${preview}${e.content.length > 120 ? "..." : ""}`;
-              })
-              .join("\n");
-
-            return {
-              content: [
-                { type: "text" as const, text: `Found ${episodes.length} episodes:\n\n${text}` },
-              ],
-              details: {
-                count: episodes.length,
-                episodes: episodes.map((e) => ({
-                  uuid: e.uuid,
-                  name: e.name,
-                  content: e.content.slice(0, 500),
-                  created_at: e.created_at,
-                })),
-              },
-            };
-          } catch (err) {
-            return {
-              content: [
-                {
-                  type: "text" as const,
-                  text: `Graphiti episodes retrieval failed: ${String(err)}`,
-                },
-              ],
-              details: { error: String(err) },
-            };
-          }
-        },
+        execute: (_toolCallId, params) => runMemoryRecall(params as { lastN?: number }),
       },
       { name: "graphiti_episodes" },
     );
