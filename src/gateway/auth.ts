@@ -11,6 +11,7 @@ import {
   type AuthRateLimiter,
   type RateLimitCheckResult,
 } from "./auth-rate-limit.js";
+import { verifyClerkJwt, type VerifyClerkJwtOptions } from "./clerk-jwt.js";
 import {
   isLoopbackAddress,
   isTrustedProxyAddress,
@@ -21,18 +22,44 @@ import {
 
 export type ResolvedGatewayAuthMode = "none" | "token" | "password" | "trusted-proxy";
 
+/**
+ * Resolved Clerk-JWT verification config for the HTTP chat path. Present only
+ * when all three fields are configured; when present, a JWS-shaped bearer on the
+ * chat path is verified against the Clerk JWKS and fails closed.
+ */
+export type ResolvedClerkAuth = {
+  jwksUrl: string;
+  issuer: string;
+  audience: string;
+};
+
 export type ResolvedGatewayAuth = {
   mode: ResolvedGatewayAuthMode;
   token?: string;
   password?: string;
   allowTailscale: boolean;
   trustedProxy?: GatewayTrustedProxyConfig;
+  /** Clerk JWT verification config; present only when fully configured. */
+  clerk?: ResolvedClerkAuth;
 };
 
 export type GatewayAuthResult = {
   ok: boolean;
-  method?: "none" | "token" | "password" | "tailscale" | "device-token" | "trusted-proxy";
+  method?:
+    | "none"
+    | "token"
+    | "password"
+    | "tailscale"
+    | "device-token"
+    | "trusted-proxy"
+    | "clerk-jwt";
   user?: string;
+  /**
+   * Verified cross-channel external id (the Clerk JWT `sub`), present only for a
+   * `clerk-jwt`-authenticated request. The chat path derives the server-side
+   * `user_scope` from this and NEVER from a client-supplied identity hint.
+   */
+  externalId?: string;
   reason?: string;
   /** Present when the request was blocked by the rate limiter. */
   rateLimited?: boolean;
@@ -202,13 +229,67 @@ export function resolveGatewayAuth(params: {
     authConfig.allowTailscale ??
     (params.tailscaleMode === "serve" && mode !== "password" && mode !== "trusted-proxy");
 
+  const clerk = resolveClerkAuth(authConfig.clerk, env);
+
   return {
     mode,
     token,
     password,
     allowTailscale,
     trustedProxy,
+    clerk,
   };
+}
+
+/**
+ * Resolve Clerk-JWT config from explicit config falling back to env. Returns a
+ * fully-populated `ResolvedClerkAuth` only when ALL THREE values are present;
+ * otherwise undefined (Clerk verification disabled — legacy path unchanged).
+ * Partial config (e.g. JWKS URL but no issuer) is treated as unconfigured.
+ */
+function resolveClerkAuth(
+  clerkConfig: GatewayAuthConfig["clerk"],
+  env: NodeJS.ProcessEnv,
+): ResolvedClerkAuth | undefined {
+  const jwksUrl = (clerkConfig?.jwksUrl ?? env.OPENCLAW_CLERK_JWKS_URL ?? "").trim();
+  const issuer = (clerkConfig?.issuer ?? env.OPENCLAW_CLERK_ISSUER ?? "").trim();
+  const audience = (clerkConfig?.audience ?? env.OPENCLAW_CLERK_AUDIENCE ?? "").trim();
+  if (!jwksUrl || !issuer || !audience) {
+    return undefined;
+  }
+  return { jwksUrl, issuer, audience };
+}
+
+/**
+ * Whether a bearer token is JWS-shaped (exactly three non-empty dot segments).
+ * Used to decide if the chat path should attempt Clerk verification — a
+ * non-JWS bearer (e.g. the legacy shared secret) is NOT a failed Clerk attempt.
+ */
+export function looksLikeJws(token: string): boolean {
+  const parts = token.split(".");
+  return parts.length === 3 && parts.every((p) => p.length > 0);
+}
+
+/**
+ * Verify a Clerk JWS on the chat path. Fail-closed: any verification failure
+ * yields `{ ok: false }`. On success returns the verified `sub` as externalId.
+ */
+export async function authorizeClerkJwt(
+  token: string,
+  clerk: ResolvedClerkAuth,
+  options?: Pick<VerifyClerkJwtOptions, "now" | "fetchJwks">,
+): Promise<{ ok: true; externalId: string } | { ok: false }> {
+  const verified = await verifyClerkJwt(token, {
+    jwksUrl: clerk.jwksUrl,
+    issuer: clerk.issuer,
+    audience: clerk.audience,
+    now: options?.now,
+    fetchJwks: options?.fetchJwks,
+  });
+  if (!verified) {
+    return { ok: false };
+  }
+  return { ok: true, externalId: verified.sub };
 }
 
 export function assertGatewayAuthConfigured(auth: ResolvedGatewayAuth): void {
@@ -292,6 +373,8 @@ export async function authorizeGatewayConnect(params: {
   clientIp?: string;
   /** Optional limiter scope; defaults to shared-secret auth scope. */
   rateLimitScope?: string;
+  /** Injectable JWKS fetcher for Clerk verification (tests); real fetch by default. */
+  fetchClerkJwks?: VerifyClerkJwtOptions["fetchJwks"];
 }): Promise<GatewayAuthResult> {
   const { auth, connectAuth, req, trustedProxies } = params;
   const tailscaleWhois = params.tailscaleWhois ?? readTailscaleWhoisIdentity;
@@ -331,6 +414,24 @@ export async function authorizeGatewayConnect(params: {
         retryAfterMs: rlCheck.retryAfterMs,
       };
     }
+  }
+
+  // --- Clerk JWT (chat path). When Clerk is configured AND the presented
+  // bearer is JWS-shaped, this request is a Clerk-authenticated chat request and
+  // MUST be verified by Clerk — it never falls through to the legacy shared
+  // token/password comparison. A JWS-shaped bearer that fails verification is a
+  // failed auth attempt (rate-limited) and returns unauthorized (fail-closed).
+  // A non-JWS bearer is left to the legacy paths below (back-compat). ---
+  if (auth.clerk && connectAuth?.token && looksLikeJws(connectAuth.token)) {
+    const clerkResult = await authorizeClerkJwt(connectAuth.token, auth.clerk, {
+      fetchJwks: params.fetchClerkJwks,
+    });
+    if (clerkResult.ok) {
+      limiter?.reset(ip, rateLimitScope);
+      return { ok: true, method: "clerk-jwt", externalId: clerkResult.externalId };
+    }
+    limiter?.recordFailure(ip, rateLimitScope);
+    return { ok: false, reason: "clerk_jwt_invalid" };
   }
 
   if (auth.allowTailscale && !localDirect) {

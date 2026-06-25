@@ -119,6 +119,23 @@ export type GatewayAuthConfig = {
    * Required when mode is "trusted-proxy".
    */
   trustedProxy?: GatewayTrustedProxyConfig;
+  /**
+   * Clerk JWT (RS256/JWKS) verification on the HTTP chat path. When all three
+   * fields resolve (here or from OPENCLAW_CLERK_* env), a `Bearer <jws>` on the
+   * chat path is verified server-side against the Clerk JWKS and `jwt.sub`
+   * becomes the server-derived `user_scope` (#834/#836). When unset, the chat
+   * path keeps its legacy shared-token/password behavior unchanged.
+   */
+  clerk?: GatewayClerkAuthConfig;
+};
+
+export type GatewayClerkAuthConfig = {
+  /** Clerk JWKS endpoint URL (RS256 signing keys). */
+  jwksUrl?: string;
+  /** Expected `iss` claim (the Clerk issuer). */
+  issuer?: string;
+  /** Expected `aud` claim (the mobile JWT template audience). */
+  audience?: string;
 };
 
 export type GatewayAuthRateLimitConfig = {

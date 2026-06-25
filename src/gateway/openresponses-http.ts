@@ -36,9 +36,14 @@ import {
 } from "./agent-prompt.js";
 import type { AuthRateLimiter } from "./auth-rate-limit.js";
 import type { ResolvedGatewayAuth } from "./auth.js";
-import { sendJson, setSseHeaders, writeDone } from "./http-common.js";
+import { sendJson, sendRateLimited, setSseHeaders, writeDone } from "./http-common.js";
+import type { TauMeter } from "./tau-meter.js";
 import { handleGatewayPostJsonEndpoint } from "./http-endpoint-helpers.js";
-import { resolveAgentIdForRequest, resolveSessionKey } from "./http-utils.js";
+import {
+  deriveUserScopeFromSub,
+  resolveAgentIdForRequest,
+  resolveSessionKey,
+} from "./http-utils.js";
 import {
   CreateResponseBodySchema,
   type ContentPart,
@@ -56,6 +61,8 @@ type OpenResponsesHttpOptions = {
   config?: GatewayHttpResponsesConfig;
   trustedProxies?: string[];
   rateLimiter?: AuthRateLimiter;
+  /** Per-user_scope τ budget meter (§9). No-op for non-Clerk requests. */
+  tauMeter?: TauMeter;
 };
 
 const DEFAULT_BODY_BYTES = 20 * 1024 * 1024;
@@ -222,12 +229,24 @@ function resolveOpenResponsesSessionKey(params: {
   req: IncomingMessage;
   agentId: string;
   user?: string | undefined;
+  userScope?: string | undefined;
 }): string {
   return resolveSessionKey({ ...params, prefix: "openresponses" });
 }
 
 function createEmptyUsage(): Usage {
   return { input_tokens: 0, output_tokens: 0, total_tokens: 0 };
+}
+
+/**
+ * τ cost charged for one completed turn: the turn's `total_tokens` when the
+ * runtime reported a positive count, else `1` (count the turn). This lets the
+ * §9 budget throttle on real τ spend when usage is available and on request
+ * rate otherwise — either way a completed turn always consumes at least 1.
+ */
+function tauTurnCost(usage: Usage | undefined): number {
+  const total = usage?.total_tokens;
+  return typeof total === "number" && total > 0 ? total : 1;
 }
 
 function toUsage(
@@ -479,7 +498,19 @@ export async function handleOpenResponsesHttpRequest(
     return true;
   }
   const agentId = resolveAgentIdForRequest({ req, model });
-  const sessionKey = resolveOpenResponsesSessionKey({ req, agentId, user });
+  // L1 user_scope is server-derived from the verified Clerk `sub` (never the
+  // client-sent `user` field). When present it partitions the session/memory.
+  const userScope = deriveUserScopeFromSub(handled.externalId);
+  const sessionKey = resolveOpenResponsesSessionKey({ req, agentId, user, userScope });
+
+  // τ-metering (§9): per-user_scope budget. No-op for non-Clerk requests
+  // (userScope undefined). On exhaustion → 429 + Retry-After, before any agent
+  // run, so an exhausted user is never charged a turn.
+  const tauCheck = opts.tauMeter?.check(userScope);
+  if (tauCheck && !tauCheck.allowed) {
+    sendRateLimited(res, tauCheck.retryAfterMs);
+    return true;
+  }
 
   // Build prompt from input
   const prompt = buildAgentPrompt(payload.input);
@@ -530,6 +561,8 @@ export async function handleOpenResponsesHttpRequest(
 
       const payloads = (result as { payloads?: Array<{ text?: string }> } | null)?.payloads;
       const usage = extractUsageFromResult(result);
+      // Record τ spend for the budget (turn count when usage is absent).
+      opts.tauMeter?.record(userScope, tauTurnCost(usage));
       const meta = (result as { meta?: unknown } | null)?.meta;
       const stopReason =
         meta && typeof meta === "object" ? (meta as { stopReason?: string }).stopReason : undefined;
@@ -622,6 +655,9 @@ export async function handleOpenResponsesHttpRequest(
 
     closed = true;
     unsubscribe();
+
+    // Record τ spend for the budget once the streamed turn is finalized.
+    opts.tauMeter?.record(userScope, tauTurnCost(usage));
 
     writeSseEvent(res, {
       type: "response.output_text.done",

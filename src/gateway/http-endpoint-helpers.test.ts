@@ -50,7 +50,7 @@ describe("handleGatewayPostJsonEndpoint", () => {
   });
 
   it("returns undefined when auth fails", async () => {
-    vi.mocked(authorizeGatewayBearerRequestOrReply).mockResolvedValue(false);
+    vi.mocked(authorizeGatewayBearerRequestOrReply).mockResolvedValue({ ok: false });
     const result = await handleGatewayPostJsonEndpoint(
       {
         url: "/v1/ok",
@@ -64,7 +64,7 @@ describe("handleGatewayPostJsonEndpoint", () => {
   });
 
   it("returns body when auth succeeds and JSON parsing succeeds", async () => {
-    vi.mocked(authorizeGatewayBearerRequestOrReply).mockResolvedValue(true);
+    vi.mocked(authorizeGatewayBearerRequestOrReply).mockResolvedValue({ ok: true });
     vi.mocked(readJsonBodyOrError).mockResolvedValue({ hello: "world" });
     const result = await handleGatewayPostJsonEndpoint(
       {
@@ -75,6 +75,25 @@ describe("handleGatewayPostJsonEndpoint", () => {
       {} as unknown as ServerResponse,
       { pathname: "/v1/ok", auth: {} as unknown as ResolvedGatewayAuth, maxBodyBytes: 123 },
     );
-    expect(result).toEqual({ body: { hello: "world" } });
+    expect(result).toEqual({ body: { hello: "world" }, externalId: undefined });
+  });
+
+  it("carries the verified externalId out when clerk-jwt authenticated", async () => {
+    vi.mocked(authorizeGatewayBearerRequestOrReply).mockResolvedValue({
+      ok: true,
+      method: "clerk-jwt",
+      externalId: "user_2abc",
+    });
+    vi.mocked(readJsonBodyOrError).mockResolvedValue({ hello: "world" });
+    const result = await handleGatewayPostJsonEndpoint(
+      {
+        url: "/v1/ok",
+        method: "POST",
+        headers: { host: "localhost" },
+      } as unknown as IncomingMessage,
+      {} as unknown as ServerResponse,
+      { pathname: "/v1/ok", auth: {} as unknown as ResolvedGatewayAuth, maxBodyBytes: 123 },
+    );
+    expect(result).toEqual({ body: { hello: "world" }, externalId: "user_2abc" });
   });
 });
