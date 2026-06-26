@@ -37,7 +37,6 @@ import {
 import type { AuthRateLimiter } from "./auth-rate-limit.js";
 import type { ResolvedGatewayAuth } from "./auth.js";
 import { sendJson, sendRateLimited, setSseHeaders, writeDone } from "./http-common.js";
-import type { TauMeter } from "./tau-meter.js";
 import { handleGatewayPostJsonEndpoint } from "./http-endpoint-helpers.js";
 import {
   deriveUserScopeFromSub,
@@ -54,6 +53,7 @@ import {
   type StreamingEvent,
   type Usage,
 } from "./open-responses.schema.js";
+import type { TauMeter } from "./tau-meter.js";
 
 type OpenResponsesHttpOptions = {
   auth: ResolvedGatewayAuth;
@@ -326,6 +326,8 @@ async function runResponsesAgentCommand(params: {
   extraSystemPrompt: string;
   streamParams: { maxTokens: number } | undefined;
   sessionKey: string;
+  /** Verified external caller identity (Clerk JWT `sub`); threaded to memory-graphiti (#834/#836). */
+  externalId: string | null;
   runId: string;
   deps: ReturnType<typeof createDefaultDeps>;
 }) {
@@ -337,6 +339,7 @@ async function runResponsesAgentCommand(params: {
       extraSystemPrompt: params.extraSystemPrompt || undefined,
       streamParams: params.streamParams ?? undefined,
       sessionKey: params.sessionKey,
+      externalId: params.externalId,
       runId: params.runId,
       deliver: false,
       messageChannel: "webchat",
@@ -555,6 +558,7 @@ export async function handleOpenResponsesHttpRequest(
         extraSystemPrompt,
         streamParams,
         sessionKey,
+        externalId: handled.externalId ?? null,
         runId: responseId,
         deps,
       });
@@ -792,6 +796,7 @@ export async function handleOpenResponsesHttpRequest(
         extraSystemPrompt,
         streamParams,
         sessionKey,
+        externalId: handled.externalId ?? null,
         runId: responseId,
         deps,
       });

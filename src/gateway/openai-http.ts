@@ -14,12 +14,12 @@ import type { AuthRateLimiter } from "./auth-rate-limit.js";
 import type { ResolvedGatewayAuth } from "./auth.js";
 import { sendJson, sendRateLimited, setSseHeaders, writeDone } from "./http-common.js";
 import { handleGatewayPostJsonEndpoint } from "./http-endpoint-helpers.js";
-import type { TauMeter } from "./tau-meter.js";
 import {
   deriveUserScopeFromSub,
   resolveAgentIdForRequest,
   resolveSessionKey,
 } from "./http-utils.js";
+import type { TauMeter } from "./tau-meter.js";
 
 type OpenAiHttpOptions = {
   auth: ResolvedGatewayAuth;
@@ -206,6 +206,7 @@ export async function handleOpenAiHttpRequest(
           message: prompt.message,
           extraSystemPrompt: prompt.extraSystemPrompt,
           sessionKey,
+          externalId: handled.externalId ?? null,
           runId,
           deliver: false,
           messageChannel: "webchat",
@@ -318,6 +319,7 @@ export async function handleOpenAiHttpRequest(
           message: prompt.message,
           extraSystemPrompt: prompt.extraSystemPrompt,
           sessionKey,
+          externalId: handled.externalId ?? null,
           runId,
           deliver: false,
           messageChannel: "webchat",

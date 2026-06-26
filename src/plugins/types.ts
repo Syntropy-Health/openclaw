@@ -332,6 +332,13 @@ export type PluginHookAgentContext = {
    * the session key.
    */
   senderE164?: string | null;
+  /**
+   * The verified external caller identity (e.g. the Clerk JWT `sub` for HTTP
+   * chat callers); null for channel callers. memory-graphiti's identity
+   * strategy uses it as the canonical user_scope so an HTTP/Clerk user shares
+   * the same graph as the same person on other channels (#834/#836).
+   */
+  externalId?: string | null;
 };
 
 // before_agent_start hook
