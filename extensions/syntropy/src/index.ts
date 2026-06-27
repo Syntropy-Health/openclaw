@@ -31,6 +31,7 @@ import { createAllKgTools } from "./kg-tools.js";
 import { resolveProfileContext } from "./profile-context.js";
 import { deriveChannel, derivePeerId } from "./session-key.js";
 import { createAllTools } from "./tools.js";
+import { createBraintrustTracer, type TracedFn, type Tracer } from "./tracer.js";
 import { createSyntropyVault, vaultRpcsInstalled, type SyntropyVault } from "./vault.js";
 
 // Per-session ResolvedUser cache parameters — bounded to prevent unbounded
@@ -153,6 +154,86 @@ export async function decideProfileInjection(opts: {
   return block ? { prependContext: block } : {};
 }
 
+// ---------------------------------------------------------------------------
+// Braintrust observability init (PHI-safe, default-OFF)
+// ---------------------------------------------------------------------------
+
+/** Minimal logger surface used by the braintrust init (matches api.logger). */
+interface InitLogger {
+  info(msg: string): void;
+  warn(msg: string): void;
+  error(msg: string): void;
+}
+
+/** Resolved braintrust config slice consumed by {@link initBraintrustTracer}. */
+interface BraintrustInit {
+  enabled: boolean;
+  apiKey?: string;
+  projectName: string;
+  logContent: boolean;
+}
+
+/**
+ * Initialize Braintrust ONCE and return a PHI-safe {@link Tracer}, or
+ * `undefined` when tracing is off / cannot start. Fail-safe: never throws —
+ * a missing key or a failed dynamic import disables tracing without crashing
+ * register().
+ *
+ * The `braintrust` dep is loaded lazily INSIDE the enabled branch so the
+ * default-OFF path never pulls it in at runtime. `loadBraintrust` is injected
+ * so tests can mock the SDK without a real network/login.
+ *
+ * @returns a Tracer when initialized; `undefined` when disabled or unavailable.
+ */
+export async function initBraintrustTracer(
+  cfg: BraintrustInit,
+  logger: InitLogger,
+  loadBraintrust: () => Promise<{
+    initLogger: (opts: { projectName: string; apiKey?: string }) => unknown;
+    traced: TracedFn;
+  }> = () =>
+    import("braintrust") as unknown as Promise<{
+      initLogger: (opts: { projectName: string; apiKey?: string }) => unknown;
+      traced: TracedFn;
+    }>,
+): Promise<Tracer | undefined> {
+  if (!cfg.enabled) return undefined;
+
+  if (!cfg.apiKey) {
+    // Fail-safe: enabled but no key (e.g. BRAINTRUST_API_KEY unset in
+    // Infisical). Warn + run un-traced rather than throw/crash register.
+    logger.warn(
+      "syntropy: braintrust enabled but no apiKey (set BRAINTRUST_API_KEY) — tracing disabled",
+    );
+    return undefined;
+  }
+
+  try {
+    const { initLogger, traced } = await loadBraintrust();
+    // Initialize the project logger exactly once. setCurrent (default) makes
+    // module-level `traced` attach spans to this logger.
+    initLogger({ projectName: cfg.projectName, apiKey: cfg.apiKey });
+    logger.info(
+      `syntropy: braintrust enabled (project=${cfg.projectName}, logContent=${cfg.logContent})`,
+    );
+    if (cfg.logContent) {
+      logger.warn(
+        "syntropy: braintrust logContent=true — MCP inputs/outputs (PHI) will be sent to " +
+          "Braintrust cloud. QA / synthetic-data ONLY.",
+      );
+    }
+    return createBraintrustTracer(traced, cfg.logContent);
+  } catch (err) {
+    // Dynamic import or login failure must never break the plugin.
+    logger.error(
+      `syntropy: braintrust init failed — tracing disabled: ${
+        err instanceof Error ? err.message : String(err)
+      }`,
+    );
+    return undefined;
+  }
+}
+
 const syntropyPlugin = {
   id: "syntropy",
   name: "Syntropy Health Integration",
@@ -175,11 +256,22 @@ const syntropyPlugin = {
       );
       return;
     }
-    const { syntropyBaseUrl, databaseUrl, kgBaseUrl, enableKgDirect } = config;
+    const { syntropyBaseUrl, databaseUrl, kgBaseUrl, enableKgDirect, braintrust } = config;
     // SYN-33 — KG-direct tools register only when explicitly configured
     // (kgBaseUrl set) and not explicitly opted out (enableKgDirect !== false).
     // Absent enableKgDirect defaults to true; explicit false is a hard opt-out.
     const kgEnabled = kgBaseUrl !== undefined && enableKgDirect !== false;
+
+    // Braintrust observability (default-OFF). Kicked off async; the resolved
+    // tracer is consumed by the tool factory, which only ever fires at request
+    // time — well after this init settles. While settling (or when disabled /
+    // unavailable), `tracer` stays undefined → byte-identical un-traced path.
+    let tracer: Tracer | undefined;
+    void initBraintrustTracer(braintrust, api.logger)
+      .then((t) => {
+        tracer = t;
+      })
+      .catch((err) => api.logger.error(`syntropy: braintrust init error: ${err}`));
 
     const sql = postgres(databaseUrl, { max: 5 });
 
@@ -290,12 +382,14 @@ const syntropyPlugin = {
         const user = resolvedUsers.get(cacheKey);
         if (!user) return null;
 
-        const sjTools = createAllTools(syntropyBaseUrl, user.authToken);
+        // `tracer` is undefined unless braintrust is enabled + initialized —
+        // then each MCP call is wrapped in a PHI-safe span.
+        const sjTools = createAllTools(syntropyBaseUrl, user.authToken, tracer);
         if (!kgEnabled) return sjTools;
         // SYN-33 — KG-direct tools share the same sj_* Bearer (ADR-001 §2);
         // no second token exchange. kg-mcp does atomic quota_check_and_debit
         // server-side per ADR-001 §5 — the extension is metering-unaware.
-        const kgTools = createAllKgTools(kgBaseUrl, user.authToken);
+        const kgTools = createAllKgTools(kgBaseUrl, user.authToken, tracer);
         return [...sjTools, ...kgTools];
       } catch (err) {
         api.logger.error(`syntropy: tool factory error: ${err}`);

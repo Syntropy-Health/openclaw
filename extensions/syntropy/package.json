@@ -5,6 +5,7 @@
   "description": "Syntropy Health integration — identity gate, token storage, health tools",
   "type": "module",
   "dependencies": {
+    "braintrust": "^3.20.0",
     "postgres": "^3.4.5"
   },
   "devDependencies": {

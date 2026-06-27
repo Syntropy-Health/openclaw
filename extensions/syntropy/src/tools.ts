@@ -33,6 +33,7 @@ import type { AgentToolResult } from "@mariozechner/pi-agent-core";
 import { Type, type TObject } from "@sinclair/typebox";
 import { callSyntropyTool, type SyntropyToolResult } from "./client.js";
 import { MealTypeSchema } from "./generated/enums.generated.js";
+import type { Tracer } from "./tracer.js";
 
 // ---------------------------------------------------------------------------
 // Schema-aligned enums
@@ -180,6 +181,10 @@ const TOOL_DEFS: ToolDef[] = [
 export function createAllTools(
   baseUrl: string,
   authToken: string,
+  // Optional Braintrust tracer (PHI-safe). When omitted (the default-OFF
+  // path), tool execution calls the MCP transport directly — byte-identical
+  // behavior, no braintrust code loaded.
+  tracer?: Tracer,
 ): Array<{
   name: string;
   label: string;
@@ -194,7 +199,10 @@ export function createAllTools(
     parameters: def.parameters,
     async execute(_toolCallId: string, args: unknown): Promise<AgentToolResult<unknown>> {
       const params = (args ?? {}) as Record<string, unknown>;
-      const result = await callSyntropyTool(baseUrl, authToken, def.mcpToolName, params);
+      const call = () => callSyntropyTool(baseUrl, authToken, def.mcpToolName, params);
+      const result = tracer
+        ? await tracer.traceMcp("Syntropy", def.mcpToolName, params, call)
+        : await call();
       return toAgentResult(result);
     },
   }));

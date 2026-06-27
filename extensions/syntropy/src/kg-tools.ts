@@ -21,6 +21,7 @@
 import type { AgentToolResult } from "@mariozechner/pi-agent-core";
 import { Type, type TObject } from "@sinclair/typebox";
 import { callKgTool, type KgToolResult } from "./kg-client.js";
+import type { Tracer } from "./tracer.js";
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -113,6 +114,9 @@ const TOOL_DEFS: KgToolDef[] = [
 export function createAllKgTools(
   kgBaseUrl: string,
   authToken: string,
+  // Optional Braintrust tracer (PHI-safe). Omitted on the default-OFF path —
+  // tool execution then calls kg-mcp directly with no braintrust overhead.
+  tracer?: Tracer,
 ): Array<{
   name: string;
   label: string;
@@ -129,7 +133,10 @@ export function createAllKgTools(
     scope: def.scope,
     async execute(_toolCallId: string, args: unknown): Promise<AgentToolResult<unknown>> {
       const params = (args ?? {}) as Record<string, unknown>;
-      const result = await callKgTool(kgBaseUrl, authToken, def.mcpToolName, params);
+      const call = () => callKgTool(kgBaseUrl, authToken, def.mcpToolName, params);
+      const result = tracer
+        ? await tracer.traceMcp("kg-mcp", def.mcpToolName, params, call)
+        : await call();
       return toAgentResult(result);
     },
   }));
