@@ -127,6 +127,16 @@ export type GatewayAuthConfig = {
    * path keeps its legacy shared-token/password behavior unchanged.
    */
   clerk?: GatewayClerkAuthConfig;
+  /**
+   * Per-`user_scope` τ (token/turn) budget on the HTTP chat path (contract §9).
+   * When enabled, a Clerk-authed request whose server-derived `user_scope` has
+   * exhausted its window budget gets a 429 + `Retry-After` before any agent
+   * run. Disabled by default (no-op) so the happy path is unchanged; the budget
+   * value and on/off are a policy decision tunable here or via OPENCLAW_TAU_*
+   * env. Non-Clerk (unscoped) requests are never metered here — the auth layer,
+   * not the meter, fails closed.
+   */
+  tau?: GatewayTauConfig;
 };
 
 export type GatewayClerkAuthConfig = {
@@ -136,6 +146,27 @@ export type GatewayClerkAuthConfig = {
   issuer?: string;
   /** Expected `aud` claim (the mobile JWT template audience). */
   audience?: string;
+};
+
+export type GatewayTauConfig = {
+  /**
+   * Enable the per-`user_scope` τ meter. Defaults to false (behavior-preserving
+   * no-op). May also be enabled via OPENCLAW_TAU_ENABLED=1.
+   */
+  enabled?: boolean;
+  /**
+   * Max cost admitted per window before throttling. With the default per-turn
+   * cost of 1 this is "max turns per window"; with recorded token usage it is
+   * "max τ per window".  @default 10000 (generous)
+   */
+  maxCostPerWindow?: number;
+  /** Sliding window duration in milliseconds.  @default 60000 (1 min) */
+  windowMs?: number;
+  /**
+   * How long an exhausted scope stays blocked; surfaced as `Retry-After`.
+   * @default windowMs
+   */
+  retryAfterMs?: number;
 };
 
 export type GatewayAuthRateLimitConfig = {

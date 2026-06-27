@@ -225,6 +225,13 @@ export async function handleOpenAiHttpRequest(
               .join("\n\n")
           : "No response from OpenClaw.";
 
+      // Record τ spend for the §9 budget. This OpenAI-compat path does not
+      // surface real token usage (usage is reported as 0), so a completed turn
+      // costs 1 (turn-rate metering) — the same fallback tauTurnCost() applies
+      // on the /v1/responses path when usage is absent. Without this the budget
+      // would be checked but never debited, leaving this surface unmetered.
+      opts.tauMeter?.record(userScope, 1);
+
       sendJson(res, 200, {
         id: runId,
         object: "chat.completion",
@@ -301,6 +308,10 @@ export async function handleOpenAiHttpRequest(
       if (phase === "end" || phase === "error") {
         closed = true;
         unsubscribe();
+        // Record τ spend for the §9 budget once at terminal lifecycle (mirrors
+        // the non-stream path; cost 1 since this surface reports no real usage).
+        // Guarded by `closed` above so a turn is charged exactly once.
+        opts.tauMeter?.record(userScope, 1);
         writeDone(res);
         res.end();
       }

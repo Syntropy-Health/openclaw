@@ -33,6 +33,19 @@ export type ResolvedClerkAuth = {
   audience: string;
 };
 
+/**
+ * Resolved per-`user_scope` τ-meter config for the HTTP chat path (contract §9).
+ * Present only when explicitly enabled (config `tau.enabled` or
+ * OPENCLAW_TAU_ENABLED); when absent the chat path is unmetered (no-op,
+ * behavior-preserving). The numeric fields fall back to the meter's own
+ * generous defaults when unset.
+ */
+export type ResolvedTauConfig = {
+  maxCostPerWindow?: number;
+  windowMs?: number;
+  retryAfterMs?: number;
+};
+
 export type ResolvedGatewayAuth = {
   mode: ResolvedGatewayAuthMode;
   token?: string;
@@ -41,6 +54,8 @@ export type ResolvedGatewayAuth = {
   trustedProxy?: GatewayTrustedProxyConfig;
   /** Clerk JWT verification config; present only when fully configured. */
   clerk?: ResolvedClerkAuth;
+  /** τ-meter config; present only when explicitly enabled (else unmetered). */
+  tau?: ResolvedTauConfig;
 };
 
 export type GatewayAuthResult = {
@@ -230,6 +245,7 @@ export function resolveGatewayAuth(params: {
     (params.tailscaleMode === "serve" && mode !== "password" && mode !== "trusted-proxy");
 
   const clerk = resolveClerkAuth(authConfig.clerk, env);
+  const tau = resolveTauConfig(authConfig.tau, env);
 
   return {
     mode,
@@ -238,7 +254,47 @@ export function resolveGatewayAuth(params: {
     allowTailscale,
     trustedProxy,
     clerk,
+    tau,
   };
+}
+
+/**
+ * Resolve τ-meter config from explicit config falling back to env. Returns a
+ * config only when the meter is explicitly enabled (config `tau.enabled === true`
+ * or OPENCLAW_TAU_ENABLED is a truthy "1"/"true"); otherwise undefined (meter
+ * disabled — chat path unmetered, behavior-preserving). Numeric fields fall back
+ * to the meter's own defaults when unset/invalid.
+ */
+function resolveTauConfig(
+  tauConfig: GatewayAuthConfig["tau"],
+  env: NodeJS.ProcessEnv,
+): ResolvedTauConfig | undefined {
+  const envEnabled = /^(1|true)$/i.test((env.OPENCLAW_TAU_ENABLED ?? "").trim());
+  const enabled = tauConfig?.enabled ?? envEnabled;
+  if (!enabled) {
+    return undefined;
+  }
+  const maxCostPerWindow =
+    tauConfig?.maxCostPerWindow ?? parsePositiveIntEnv(env.OPENCLAW_TAU_MAX_COST_PER_WINDOW);
+  const windowMs = tauConfig?.windowMs ?? parsePositiveIntEnv(env.OPENCLAW_TAU_WINDOW_MS);
+  const retryAfterMs =
+    tauConfig?.retryAfterMs ?? parsePositiveIntEnv(env.OPENCLAW_TAU_RETRY_AFTER_MS);
+  return { maxCostPerWindow, windowMs, retryAfterMs };
+}
+
+/**
+ * Parse a positive decimal-integer env value; undefined when unset/blank/invalid.
+ * Only plain base-10 digit strings are accepted — scientific (`1e3`), hex
+ * (`0x10`), signed (`+5`), and fractional (`1.0`) forms are rejected so a typo'd
+ * budget never silently coerces to a surprising number.
+ */
+function parsePositiveIntEnv(raw: string | undefined): number | undefined {
+  const trimmed = raw?.trim();
+  if (!trimmed || !/^\d+$/.test(trimmed)) {
+    return undefined;
+  }
+  const n = Number(trimmed);
+  return Number.isInteger(n) && n > 0 ? n : undefined;
 }
 
 /**

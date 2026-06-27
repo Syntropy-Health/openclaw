@@ -54,6 +54,7 @@ import { isPrivateOrLoopbackAddress, resolveGatewayClientIp } from "./net.js";
 import { handleOpenAiHttpRequest } from "./openai-http.js";
 import { handleOpenResponsesHttpRequest } from "./openresponses-http.js";
 import type { GatewayWsClient } from "./server/ws-types.js";
+import type { TauMeter } from "./tau-meter.js";
 import { handleToolsInvokeHttpRequest } from "./tools-invoke-http.js";
 
 type SubsystemLogger = ReturnType<typeof createSubsystemLogger>;
@@ -449,6 +450,8 @@ export function createGatewayHttpServer(opts: {
   resolvedAuth: ResolvedGatewayAuth;
   /** Optional rate limiter for auth brute-force protection. */
   rateLimiter?: AuthRateLimiter;
+  /** Optional per-user_scope τ budget meter for the chat path (contract §9). */
+  tauMeter?: TauMeter;
   tlsOptions?: TlsOptions;
 }): HttpServer {
   const {
@@ -464,6 +467,7 @@ export function createGatewayHttpServer(opts: {
     handlePluginRequest,
     resolvedAuth,
     rateLimiter,
+    tauMeter,
   } = opts;
   const httpServer: HttpServer = opts.tlsOptions
     ? createHttpsServer(opts.tlsOptions, (req, res) => {
@@ -527,6 +531,7 @@ export function createGatewayHttpServer(opts: {
             config: openResponsesConfig,
             trustedProxies,
             rateLimiter,
+            tauMeter,
           })
         ) {
           return;
@@ -538,6 +543,7 @@ export function createGatewayHttpServer(opts: {
             auth: resolvedAuth,
             trustedProxies,
             rateLimiter,
+            tauMeter,
           })
         ) {
           return;
