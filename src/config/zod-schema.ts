@@ -501,6 +501,7 @@ export const OpenClawSchema = z
                     enabled: z.boolean().optional(),
                     maxBodyBytes: z.number().int().positive().optional(),
                     maxUrlParts: z.number().int().nonnegative().optional(),
+                    turnTimeoutMs: z.number().int().nonnegative().optional(),
                     files: z
                       .object({
                         allowUrl: z.boolean().optional(),

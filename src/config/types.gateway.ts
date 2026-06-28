@@ -191,6 +191,14 @@ export type GatewayHttpResponsesConfig = {
    * Default: 8.
    */
   maxUrlParts?: number;
+  /**
+   * Hard per-turn timeout in ms for the agent run behind `POST /v1/responses`.
+   * Bounds a hung/looping model call so the chat path NEVER hangs unbounded: on
+   * timeout the response surfaces the contract failure envelope
+   * (`response.failed{code:"timeout"}` / non-stream `status:"failed"`) instead of
+   * leaving the request open. Set to 0 to disable. Default: 120000 (2 min).
+   */
+  turnTimeoutMs?: number;
   /** File inputs (input_file). */
   files?: GatewayHttpResponsesFilesConfig;
   /** Image inputs (input_image). */
