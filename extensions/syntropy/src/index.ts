@@ -29,6 +29,8 @@ import { parseSyntropyConfig } from "./config.js";
 import { ensureSyntropySchema } from "./db.js";
 import { createAllKgTools } from "./kg-tools.js";
 import { resolveProfileContext } from "./profile-context.js";
+import { resolveServiceAuthConfig, ServiceAuthConfigError } from "./service-auth-config.js";
+import { ServiceAuthProvider } from "./service-auth.js";
 import { deriveChannel, derivePeerId } from "./session-key.js";
 import { createAllTools } from "./tools.js";
 import { createSyntropyVault, vaultRpcsInstalled, type SyntropyVault } from "./vault.js";
@@ -153,6 +155,66 @@ export async function decideProfileInjection(opts: {
   return block ? { prependContext: block } : {};
 }
 
+/**
+ * Build the openclaw → SJ `/mcp` **service-auth (M2M)** token provider at
+ * register time, if the `resource` URI is configured (P2 wire contract, T2.2).
+ *
+ * This is the documented seam: the provider is constructed here and exposed on
+ * the plugin closure so openclaw's eventual MCP-tool consumption of SJ `/mcp`
+ * (and the P1 matrix client) can attach `Authorization: Bearer <M2M JWT>` via
+ * `callMcpToolWithServiceAuth` / `provider.buildAuthHeaders`.
+ *
+ * Construction is best-effort and NON-fatal: a missing `resource` simply means
+ * no machine path is configured (the per-user `sj_*` path is unaffected), so we
+ * log and return `null` rather than disabling the whole plugin. The provider
+ * itself fails **closed** at call time when `CLERK_MACHINE_SECRET_KEY` is absent
+ * — i.e. it never emits an unauthenticated request; it throws so the caller
+ * surfaces it.
+ *
+ * Env consumed (provisioned by devex via Infisical):
+ *   - `CLERK_MACHINE_SECRET_KEY` — openclaw's Clerk machine secret (`ak_…`).
+ *   - `SYNTROPY_MCP_RESOURCE_URL` — canonical SJ `/mcp` URI for this env
+ *     (alternative to `pluginConfig.resource`).
+ *   - `CLERK_API_URL` (optional) — Clerk BAPI override.
+ */
+export function maybeCreateServiceAuthProvider(
+  pluginConfig: Record<string, unknown> | undefined,
+  env: NodeJS.ProcessEnv,
+  logger: { info: (m: string) => void; warn: (m: string) => void },
+): ServiceAuthProvider | null {
+  // Plugin-facing key is `serviceAuthResource`; the resolver's input field is
+  // `resource` (devex/UI-friendly name → internal claim name). Remap here.
+  const resourceInput =
+    typeof pluginConfig?.serviceAuthResource === "string"
+      ? { resource: pluginConfig.serviceAuthResource as string }
+      : {};
+  try {
+    const cfg = resolveServiceAuthConfig(resourceInput, env);
+    const provider = new ServiceAuthProvider(cfg);
+    // Length-only debug — NEVER log the secret value (CLAUDE.md secrets rule).
+    const secretLen = env.CLERK_MACHINE_SECRET_KEY?.length ?? 0;
+    logger.info(
+      `syntropy: service-auth enabled (resource=${cfg.resource}, machineSecret=${secretLen > 0 ? `len=${secretLen}` : "ABSENT→fail-closed"})`,
+    );
+    return provider;
+  } catch (err) {
+    const reason = err instanceof ServiceAuthConfigError ? err.reason : undefined;
+    const msg = err instanceof Error ? err.message : String(err);
+    if (reason === "missing-resource") {
+      // Benign: the machine path is simply not configured (the per-user sj_*
+      // path is orthogonal and unaffected). Info, not warn.
+      logger.info(
+        "syntropy: service-auth (openclaw→SJ /mcp M2M) not configured — machine path disabled.",
+      );
+    } else {
+      // A `resource`/CLERK_API_URL is PRESENT but malformed — a real misconfig
+      // that silently disabling the machine path would mask. Fail loudly (F11).
+      logger.warn(`syntropy: service-auth MISCONFIGURED — machine path disabled — ${msg}`);
+    }
+    return null;
+  }
+}
+
 const syntropyPlugin = {
   id: "syntropy",
   name: "Syntropy Health Integration",
@@ -182,6 +244,18 @@ const syntropyPlugin = {
     const kgEnabled = kgBaseUrl !== undefined && enableKgDirect !== false;
 
     const sql = postgres(databaseUrl, { max: 5 });
+
+    // Service-auth (M2M) provider for openclaw → SJ /mcp machine calls (P2
+    // T2.2). Constructed here as the documented seam; the future MCP client /
+    // P1 matrix client attaches its Bearer via callMcpToolWithServiceAuth.
+    // `serviceAuth` is intentionally unused by the per-user paths below — it is
+    // the drop-in point for machine-authenticated /mcp consumption.
+    const serviceAuth = maybeCreateServiceAuthProvider(
+      api.pluginConfig as Record<string, unknown> | undefined,
+      process.env,
+      api.logger,
+    );
+    void serviceAuth; // seam: consumed by the eventual MCP-tool machine path.
 
     // Supabase Vault is the production storage for `sj_*` tokens. Backed by
     // the same Postgres connection we already use for `lp_users` etc.

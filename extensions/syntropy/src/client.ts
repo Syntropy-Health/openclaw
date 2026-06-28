@@ -108,6 +108,54 @@ export async function callMcpTool(
 }
 
 /**
+ * Call an MCP tool authenticated with the **service-auth (M2M)** Bearer instead
+ * of a per-user `sj_*` token — the openclaw → SJ `/mcp` machine path (P2 wire
+ * contract). The Bearer is a Clerk M2M JWT carrying the `resource` claim, minted
+ * + cached + refreshed by `ServiceAuthProvider` (see `service-auth.ts`).
+ *
+ * This is the documented seam where openclaw's eventual MCP-tool consumption of
+ * SJ `/mcp` (and the P1 matrix client) attaches machine auth: it resolves the
+ * token from the provider (fail-closed if the machine secret is missing) and
+ * then reuses the exact same {@link callMcpTool} transport — `callMcpTool` treats
+ * the token as an opaque Bearer, so no transport change is needed.
+ *
+ * The provider is passed by its minimal `getToken` surface so this module does
+ * not depend on the provider class (and tests can inject a stub).
+ *
+ * Like {@link callMcpTool}, `label` is **required** — each caller (SJ `/mcp`,
+ * kg-mcp, …) names itself so error messages aren't mislabeled. There is no
+ * default label here; a thin per-target wrapper supplies it.
+ *
+ * @param baseUrl   SJ base URL whose `/mcp` is the target (e.g. "https://shrine-api-test…").
+ * @param provider  Anything exposing `getToken(): Promise<string>` — typically a
+ *                  `ServiceAuthProvider`. Throws (fail-closed) when no secret.
+ * @param toolName  MCP tool name.
+ * @param args      Tool arguments.
+ * @param opts.label          Error-message label (e.g. "Syntropy", "kg-mcp").
+ * @param opts.toolErrorLabel JSON-RPC error-envelope label. Defaults to `label`.
+ */
+export async function callMcpToolWithServiceAuth(
+  baseUrl: string,
+  provider: { getToken(): Promise<string> },
+  toolName: string,
+  args: Record<string, unknown>,
+  opts: { label: string; toolErrorLabel?: string },
+): Promise<McpToolResult> {
+  const { label } = opts;
+  const toolErrorLabel = opts.toolErrorLabel ?? label;
+  let token: string;
+  try {
+    // Fail-closed: surface the missing-secret / mint error as a tool result
+    // rather than emitting an unauthenticated request.
+    token = await provider.getToken();
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    return { data: null, ok: false, error: `${label} service-auth failed: ${msg}` };
+  }
+  return callMcpTool(baseUrl, token, toolName, args, { label, toolErrorLabel });
+}
+
+/**
  * Call a Syntropy MCP tool on behalf of a verified user.
  *
  * @param baseUrl    Syntropy base URL (e.g., "http://localhost:3000")

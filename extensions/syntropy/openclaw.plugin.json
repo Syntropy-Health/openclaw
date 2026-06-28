@@ -11,6 +11,10 @@
       "databaseUrl": {
         "type": "string",
         "description": "PostgreSQL URL for identity + token storage. Falls back to DATABASE_URL."
+      },
+      "serviceAuthResource": {
+        "type": "string",
+        "description": "Canonical SJ /mcp URI for openclaw→SJ M2M (P2). Becomes the Clerk M2M JWT `resource` claim; MUST equal SJ's validated /mcp URI. Falls back to SYNTROPY_MCP_RESOURCE_URL env."
       }
     },
     "required": []
@@ -24,6 +28,11 @@
       "label": "Database URL",
       "sensitive": true,
       "help": "Must point to the same database as persist-user-identity."
+    },
+    "serviceAuthResource": {
+      "label": "Service-Auth Resource (SJ /mcp URI)",
+      "placeholder": "https://shrine-api-test.up.railway.app/mcp",
+      "help": "M2M `resource` claim target. Devex sets this per env; must match SJ's canonical /mcp URI byte-for-byte. Machine secret comes from CLERK_MACHINE_SECRET_KEY (Infisical)."
     }
   }
 }
