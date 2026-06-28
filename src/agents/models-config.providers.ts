@@ -620,6 +620,44 @@ export function buildQianfanProvider(): ProviderConfig {
   };
 }
 
+const OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1";
+const OPENROUTER_FREE_COST = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 };
+
+/**
+ * OpenRouter as a first-class implicit provider (C-c ruling #2): with just
+ * OPENROUTER_API_KEY in env, openclaw yields a working OpenRouter provider
+ * (default base URL + curated free models) so staging/prod can select it via
+ * env/Infisical without a bespoke provider block. owl-alpha is listed first as
+ * the reliable default; llama-3.3-70b:free is the quality option (currently
+ * 429-prone as primary — see issue #112 — so it's a fallback, not the default).
+ */
+export function buildOpenrouterProvider(): ProviderConfig {
+  return {
+    baseUrl: OPENROUTER_BASE_URL,
+    api: "openai-completions",
+    models: [
+      {
+        id: "openrouter/owl-alpha",
+        name: "OpenRouter Owl Alpha (free)",
+        reasoning: false,
+        input: ["text"],
+        cost: OPENROUTER_FREE_COST,
+        contextWindow: 1_000_000,
+        maxTokens: 1024,
+      },
+      {
+        id: "meta-llama/llama-3.3-70b-instruct:free",
+        name: "Llama 3.3 70B Instruct (OpenRouter free)",
+        reasoning: false,
+        input: ["text"],
+        cost: OPENROUTER_FREE_COST,
+        contextWindow: 131072,
+        maxTokens: 1024,
+      },
+    ],
+  };
+}
+
 export function buildNvidiaProvider(): ProviderConfig {
   return {
     baseUrl: NVIDIA_BASE_URL,
@@ -780,6 +818,20 @@ export async function resolveImplicitProviders(params: {
       ...buildTogetherProvider(),
       apiKey: togetherKey,
     };
+  }
+
+  // OpenRouter (C-c ruling #2): implicit when OPENROUTER_API_KEY is set; an
+  // explicit openrouter provider in config wins (keep the user's models/baseUrl).
+  if (!params.explicitProviders?.openrouter) {
+    const openrouterKey =
+      resolveEnvApiKeyVarName("openrouter") ??
+      resolveApiKeyFromProfiles({ provider: "openrouter", store: authStore });
+    if (openrouterKey) {
+      providers.openrouter = {
+        ...buildOpenrouterProvider(),
+        apiKey: openrouterKey,
+      };
+    }
   }
 
   const huggingfaceKey =
