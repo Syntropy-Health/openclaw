@@ -824,4 +824,82 @@ describe("OpenResponses HTTP API (e2e)", () => {
       expect(types).not.toContain("response.completed");
     });
   });
+
+  // ───────────────────────────────────────────────────────────────────────────
+  // issue #112: hard per-turn timeout. A hung/looping model call (e.g. a 429'd
+  // primary that doesn't fail over) must NEVER hang the chat path — it surfaces
+  // the contract failure envelope within a bounded window. This closes the C-b
+  // hole (C-b surfaces RETURNED failures; a hang is the un-surfaced case).
+  // ───────────────────────────────────────────────────────────────────────────
+  describe("per-turn timeout (issue #112)", () => {
+    it("non-stream: a hung agent run → status:failed + error.code:timeout, bounded", async () => {
+      await writeGatewayConfig({
+        gateway: { http: { endpoints: { responses: { enabled: true, turnTimeoutMs: 100 } } } },
+      });
+      const port = await getFreePort();
+      const server = await startServer(port, { openResponsesEnabled: true });
+      try {
+        agentCommand.mockReset();
+        // never resolves → the per-turn deadline must fire
+        agentCommand.mockImplementationOnce(() => new Promise(() => {}) as never);
+
+        const started = Date.now();
+        const res = await postResponses(port, { model: "openclaw", input: "hi", stream: false });
+        expect(res.status).toBe(200);
+        expect(Date.now() - started).toBeLessThan(5000); // bounded, not hung
+        const body = (await res.json()) as { status?: string; error?: { code?: string } };
+        expect(body.status).toBe("failed");
+        expect(body.error?.code).toBe("timeout");
+      } finally {
+        await server.close({ reason: "timeout non-stream test done" });
+      }
+    });
+
+    it("stream: a hung agent run → response.failed{code:timeout} + [DONE], bounded", async () => {
+      await writeGatewayConfig({
+        gateway: { http: { endpoints: { responses: { enabled: true, turnTimeoutMs: 100 } } } },
+      });
+      const port = await getFreePort();
+      const server = await startServer(port, { openResponsesEnabled: true });
+      try {
+        agentCommand.mockReset();
+        agentCommand.mockImplementationOnce(() => new Promise(() => {}) as never);
+
+        const res = await postResponses(port, { model: "openclaw", input: "hi", stream: true });
+        expect(res.status).toBe(200);
+        const text = await res.text();
+        const events = parseSseEvents(text);
+        const types = events.map((e) => e.event).filter(Boolean);
+        expect(types).toContain("response.failed");
+        expect(types).not.toContain("response.completed");
+        expect(events.some((e) => e.data === "[DONE]")).toBe(true);
+        const failed = events.find((e) => e.event === "response.failed");
+        const parsed = JSON.parse(failed?.data ?? "{}") as {
+          response?: { status?: string; error?: { code?: string } };
+        };
+        expect(parsed.response?.status).toBe("failed");
+        expect(parsed.response?.error?.code).toBe("timeout");
+      } finally {
+        await server.close({ reason: "timeout stream test done" });
+      }
+    });
+
+    it("turnTimeoutMs:0 disables the timeout (a fast run still completes)", async () => {
+      await writeGatewayConfig({
+        gateway: { http: { endpoints: { responses: { enabled: true, turnTimeoutMs: 0 } } } },
+      });
+      const port = await getFreePort();
+      const server = await startServer(port, { openResponsesEnabled: true });
+      try {
+        agentCommand.mockReset();
+        agentCommand.mockResolvedValueOnce({ payloads: [{ text: "hello" }], meta: {} } as never);
+        const res = await postResponses(port, { model: "openclaw", input: "hi", stream: false });
+        expect(res.status).toBe(200);
+        const body = (await res.json()) as { status?: string };
+        expect(body.status).toBe("completed");
+      } finally {
+        await server.close({ reason: "timeout disabled test done" });
+      }
+    });
+  });
 });

@@ -69,4 +69,25 @@ describe("config schema regressions", () => {
 
     expect(res.ok).toBe(false);
   });
+
+  it("accepts gateway.http.endpoints.responses.turnTimeoutMs (issue #112)", () => {
+    const res = validateConfigObject({
+      gateway: { http: { endpoints: { responses: { enabled: true, turnTimeoutMs: 120000 } } } },
+    });
+    expect(res.ok).toBe(true);
+  });
+
+  it("accepts responses.turnTimeoutMs = 0 (disable sentinel)", () => {
+    const res = validateConfigObject({
+      gateway: { http: { endpoints: { responses: { turnTimeoutMs: 0 } } } },
+    });
+    expect(res.ok).toBe(true);
+  });
+
+  it("rejects negative responses.turnTimeoutMs", () => {
+    const res = validateConfigObject({
+      gateway: { http: { endpoints: { responses: { turnTimeoutMs: -1 } } } },
+    });
+    expect(res.ok).toBe(false);
+  });
 });

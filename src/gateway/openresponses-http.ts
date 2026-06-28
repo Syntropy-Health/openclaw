@@ -60,6 +60,34 @@ type OpenResponsesHttpOptions = {
 
 const DEFAULT_BODY_BYTES = 20 * 1024 * 1024;
 const DEFAULT_MAX_URL_PARTS = 8;
+const DEFAULT_TURN_TIMEOUT_MS = 120_000;
+
+/** Sentinel returned by withTurnTimeout when the per-turn deadline fires first. */
+const TURN_TIMEOUT = Symbol("openresponses-turn-timeout");
+
+/**
+ * Race an agent-run promise against a hard per-turn deadline. Resolves to
+ * TURN_TIMEOUT if the deadline fires first (the underlying run is abandoned — the
+ * caller surfaces a failure and stops waiting). ms <= 0 disables the timeout.
+ */
+function withTurnTimeout<T>(p: Promise<T>, ms: number): Promise<T | typeof TURN_TIMEOUT> {
+  if (!ms || ms <= 0) {
+    return p;
+  }
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const timeout = new Promise<typeof TURN_TIMEOUT>((resolve) => {
+    timer = setTimeout(() => resolve(TURN_TIMEOUT), ms);
+  });
+  return Promise.race([
+    p.then((v) => {
+      if (timer) {
+        clearTimeout(timer);
+      }
+      return v;
+    }),
+    timeout,
+  ]);
+}
 
 function writeSseEvent(res: ServerResponse, event: StreamingEvent) {
   res.write(`event: ${event.type}\n`);
@@ -87,6 +115,7 @@ function extractTextContent(content: string | ContentPart[]): string {
 type ResolvedResponsesLimits = {
   maxBodyBytes: number;
   maxUrlParts: number;
+  turnTimeoutMs: number;
   files: InputFileLimits;
   images: InputImageLimits;
 };
@@ -111,6 +140,10 @@ function resolveResponsesLimits(
       typeof config?.maxUrlParts === "number"
         ? Math.max(0, Math.floor(config.maxUrlParts))
         : DEFAULT_MAX_URL_PARTS,
+    turnTimeoutMs:
+      typeof config?.turnTimeoutMs === "number"
+        ? Math.max(0, Math.floor(config.turnTimeoutMs))
+        : DEFAULT_TURN_TIMEOUT_MS,
     files: {
       ...fileLimits,
       urlAllowlist: normalizeHostnameAllowlist(files?.urlAllowlist),
@@ -564,16 +597,38 @@ export async function handleOpenResponsesHttpRequest(
 
   if (!stream) {
     try {
-      const result = await runResponsesAgentCommand({
-        message: prompt.message,
-        images,
-        clientTools: resolvedClientTools,
-        extraSystemPrompt,
-        streamParams,
-        sessionKey,
-        runId: responseId,
-        deps,
-      });
+      const result = await withTurnTimeout(
+        runResponsesAgentCommand({
+          message: prompt.message,
+          images,
+          clientTools: resolvedClientTools,
+          extraSystemPrompt,
+          streamParams,
+          sessionKey,
+          runId: responseId,
+          deps,
+        }),
+        limits.turnTimeoutMs,
+      );
+
+      // Hard per-turn timeout (issue #112): a hung/looping model call must never
+      // hang the chat path — surface the contract failure envelope instead.
+      if (result === TURN_TIMEOUT) {
+        logWarn(`openresponses: turn timed out after ${limits.turnTimeoutMs}ms (non-stream)`);
+        const timeoutResponse = createResponseResource({
+          id: responseId,
+          model,
+          status: "failed",
+          output: [],
+          error: {
+            code: "timeout",
+            message: `agent run exceeded ${limits.turnTimeoutMs}ms`,
+          },
+          usage: createEmptyUsage(),
+        });
+        sendJson(res, 200, timeoutResponse);
+        return true;
+      }
 
       const payloads = (result as { payloads?: Array<{ text?: string }> } | null)?.payloads;
       const usage = extractUsageFromResult(result);
@@ -835,16 +890,33 @@ export async function handleOpenResponsesHttpRequest(
 
   void (async () => {
     try {
-      const result = await runResponsesAgentCommand({
-        message: prompt.message,
-        images,
-        clientTools: resolvedClientTools,
-        extraSystemPrompt,
-        streamParams,
-        sessionKey,
-        runId: responseId,
-        deps,
-      });
+      const result = await withTurnTimeout(
+        runResponsesAgentCommand({
+          message: prompt.message,
+          images,
+          clientTools: resolvedClientTools,
+          extraSystemPrompt,
+          streamParams,
+          sessionKey,
+          runId: responseId,
+          deps,
+        }),
+        limits.turnTimeoutMs,
+      );
+
+      // Hard per-turn timeout (issue #112): emit the contract `response.failed`
+      // terminal instead of leaving the SSE stream open on a hung/looping run.
+      if (result === TURN_TIMEOUT) {
+        if (closed) {
+          return;
+        }
+        logWarn(`openresponses: turn timed out after ${limits.turnTimeoutMs}ms (stream)`);
+        finalError = { code: "timeout", message: `agent run exceeded ${limits.turnTimeoutMs}ms` };
+        finalUsage = createEmptyUsage();
+        finalizeRequested = { status: "failed", text: finalError.message };
+        maybeFinalize();
+        return;
+      }
 
       finalUsage = extractUsageFromResult(result);
 
