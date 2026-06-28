@@ -285,6 +285,16 @@ export type GatewayConfig = {
    */
   mode?: "local" | "remote";
   /**
+   * Gateway run-shape (orthogonal to `mode` local/remote).
+   * - "full" (default): full gateway — channels (WhatsApp/etc.) + control UI.
+   * - "chat-service": channels-off, HTTP-chat-only. Sets channelsEnabled=false,
+   *   controlUiEnabled=false, openResponsesEnabled=true. Lets a chat-service
+   *   instance run as a separate process alongside the control bot with no
+   *   Baileys single-session (`status 440`) conflict.
+   * Overridable via the OPENCLAW_CHANNELS_ENABLED env (the primitive knob).
+   */
+  runMode?: "full" | "chat-service";
+  /**
    * Bind address policy for the Gateway WebSocket + Control UI HTTP server.
    * - auto: Loopback (127.0.0.1) if available, else 0.0.0.0 (fallback to all interfaces)
    * - lan: 0.0.0.0 (all interfaces, no fallback)

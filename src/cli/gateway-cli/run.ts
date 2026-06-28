@@ -10,6 +10,7 @@ import {
   resolveGatewayPort,
 } from "../../config/config.js";
 import { resolveGatewayAuth } from "../../gateway/auth.js";
+import { resolveChatServiceMode } from "../../gateway/chat-service-mode.js";
 import { startGatewayServer } from "../../gateway/server.js";
 import type { GatewayWsLogStyle } from "../../gateway/ws-logging.js";
 import { setGatewayWsLogStyle } from "../../gateway/ws-logging.js";
@@ -261,12 +262,37 @@ async function runGatewayCommand(opts: GatewayRunOpts) {
     return;
   }
 
+  // Resolve the chat-service run-mode (channels-off) from config + env.
+  // channelsEnabled is the real primitive; when off, the design note's
+  // companion defaults (controlUi off, openResponses on) ride along — but only
+  // when the user hasn't explicitly set those flags in config.
+  const chatServiceMode = resolveChatServiceMode({ cfg, env: process.env });
+  const controlUiEnabledOverride =
+    !chatServiceMode.channelsEnabled &&
+    chatServiceMode.controlUiEnabledDefault !== undefined &&
+    cfg.gateway?.controlUi?.enabled === undefined
+      ? chatServiceMode.controlUiEnabledDefault
+      : undefined;
+  const openResponsesEnabledOverride =
+    !chatServiceMode.channelsEnabled &&
+    chatServiceMode.openResponsesEnabledDefault !== undefined &&
+    cfg.gateway?.http?.endpoints?.responses?.enabled === undefined
+      ? chatServiceMode.openResponsesEnabledDefault
+      : undefined;
+
   try {
     await runGatewayLoop({
       runtime: defaultRuntime,
       start: async () =>
         await startGatewayServer(port, {
           bind,
+          channelsEnabled: chatServiceMode.channelsEnabled,
+          ...(controlUiEnabledOverride !== undefined
+            ? { controlUiEnabled: controlUiEnabledOverride }
+            : {}),
+          ...(openResponsesEnabledOverride !== undefined
+            ? { openResponsesEnabled: openResponsesEnabledOverride }
+            : {}),
           auth:
             authMode || passwordRaw || tokenRaw || authModeRaw
               ? {

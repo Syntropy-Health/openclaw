@@ -52,7 +52,7 @@ import type { ControlUiRootState } from "./control-ui.js";
 import { ExecApprovalManager } from "./exec-approval-manager.js";
 import { NodeRegistry } from "./node-registry.js";
 import type { startBrowserControlServerIfEnabled } from "./server-browser.js";
-import { createChannelManager } from "./server-channels.js";
+import { createChannelManager, createNoopChannelManager } from "./server-channels.js";
 import { createAgentEventHandler } from "./server-chat.js";
 import { createGatewayCloseHandler } from "./server-close.js";
 import { buildGatewayCronService } from "./server-cron.js";
@@ -138,6 +138,14 @@ export type GatewayServerOptions = {
    */
   openResponsesEnabled?: boolean;
   /**
+   * If false, boot the gateway HTTP/WS surfaces WITHOUT starting any channel
+   * (no WhatsApp/Baileys/etc.). This is the "chat-service" run-mode: a
+   * channels-off instance can run as a separate process alongside the launchd
+   * control bot with no Baileys `status 440` single-session conflict.
+   * Default: true ⇒ byte-identical to today's full-gateway behavior.
+   */
+  channelsEnabled?: boolean;
+  /**
    * Override gateway auth configuration (merges with config).
    */
   auth?: import("../config/config.js").GatewayAuthConfig;
@@ -165,6 +173,10 @@ export async function startGatewayServer(
 ): Promise<GatewayServer> {
   const minimalTestGateway =
     process.env.VITEST === "1" && process.env.OPENCLAW_TEST_MINIMAL_GATEWAY === "1";
+
+  // chat-service run-mode: when false, no channel client (WhatsApp/Baileys/etc.)
+  // starts. Default true ⇒ byte-identical to the full-gateway behavior.
+  const channelsEnabled = opts.channelsEnabled ?? true;
 
   // Ensure all default port derivations (browser/canvas) see the actual runtime port.
   process.env.OPENCLAW_GATEWAY_PORT = String(port);
@@ -256,7 +268,9 @@ export async function startGatewayServer(
   const channelRuntimeEnvs = Object.fromEntries(
     Object.entries(channelLogs).map(([id, logger]) => [id, runtimeForLogger(logger)]),
   ) as Record<ChannelId, RuntimeEnv>;
-  const channelMethods = listChannelPlugins().flatMap((plugin) => plugin.gatewayMethods ?? []);
+  const channelMethods = channelsEnabled
+    ? listChannelPlugins().flatMap((plugin) => plugin.gatewayMethods ?? [])
+    : [];
   const gatewayMethods = Array.from(new Set([...baseGatewayMethods, ...channelMethods]));
   let pluginServices: PluginServicesHandle | null = null;
   const runtimeConfig = await resolveGatewayRuntimeConfig({
@@ -402,11 +416,16 @@ export async function startGatewayServer(
   });
   let { cron, storePath: cronStorePath } = cronState;
 
-  const channelManager = createChannelManager({
-    loadConfig,
-    channelLogs,
-    channelRuntimeEnvs,
-  });
+  // When channels are disabled (chat-service mode), use a no-op stub so every
+  // downstream reference (ws context, close handler, config reloader, health
+  // monitor) stays safe — nothing NPEs, and no channel side-effect can start.
+  const channelManager = channelsEnabled
+    ? createChannelManager({
+        loadConfig,
+        channelLogs,
+        channelRuntimeEnvs,
+      })
+    : createNoopChannelManager();
   const { getRuntimeSnapshot, startChannels, startChannel, stopChannel, markChannelLoggedOut } =
     channelManager;
 
@@ -505,12 +524,13 @@ export async function startGatewayServer(
 
   const healthCheckMinutes = cfgAtStart.gateway?.channelHealthCheckMinutes;
   const healthCheckDisabled = healthCheckMinutes === 0;
-  const channelHealthMonitor = healthCheckDisabled
-    ? null
-    : startChannelHealthMonitor({
-        channelManager,
-        checkIntervalMs: (healthCheckMinutes ?? 5) * 60_000,
-      });
+  const channelHealthMonitor =
+    healthCheckDisabled || !channelsEnabled
+      ? null
+      : startChannelHealthMonitor({
+          channelManager,
+          checkIntervalMs: (healthCheckMinutes ?? 5) * 60_000,
+        });
 
   if (!minimalTestGateway) {
     void cron.start().catch((err) => logCron.error(`failed to start: ${String(err)}`));

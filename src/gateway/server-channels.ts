@@ -71,6 +71,22 @@ export type ChannelManager = {
   resetRestartAttempts: (channelId: ChannelId, accountId: string) => void;
 };
 
+// Chat-service run-mode: a no-op channel manager used when channels are
+// disabled (`channelsEnabled=false`). Every method is inert so downstream
+// references stay safe — no channel client ever starts, the runtime snapshot
+// is empty, and start/stop/markLoggedOut are no-ops.
+export function createNoopChannelManager(): ChannelManager {
+  return {
+    getRuntimeSnapshot: (): ChannelRuntimeSnapshot => ({ channels: {}, channelAccounts: {} }),
+    startChannels: async () => {},
+    startChannel: async () => {},
+    stopChannel: async () => {},
+    markChannelLoggedOut: () => {},
+    isManuallyStopped: () => false,
+    resetRestartAttempts: () => {},
+  };
+}
+
 // Channel docking: lifecycle hooks (`plugin.gateway`) flow through this manager.
 export function createChannelManager(opts: ChannelManagerOptions): ChannelManager {
   const { loadConfig, channelLogs, channelRuntimeEnvs } = opts;
