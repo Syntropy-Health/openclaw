@@ -386,6 +386,7 @@ export const OpenClawSchema = z
       .object({
         port: z.number().int().positive().optional(),
         mode: z.union([z.literal("local"), z.literal("remote")]).optional(),
+        runMode: z.union([z.literal("full"), z.literal("chat-service")]).optional(),
         bind: z
           .union([
             z.literal("auto"),
