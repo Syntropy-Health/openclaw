@@ -702,4 +702,126 @@ describe("OpenResponses HTTP API (e2e)", () => {
       await capServer.close({ reason: "responses url cap hardening test done" });
     }
   });
+
+  // ───────────────────────────────────────────────────────────────────────────
+  // C-b: agent-run failure surfacing (contract §85/§99).
+  // A model/provider error (e.g. LM Studio 401, context overflow) MUST surface as
+  // status:"failed" + error{code,message} / a `response.failed` SSE event — NOT a
+  // bland completed-200 "No response from OpenClaw" with usage:0. The latter is a
+  // silent failure that makes a standalone chat-service instance undebuggable.
+  // ───────────────────────────────────────────────────────────────────────────
+  describe("agent-run failure surfacing (C-b)", () => {
+    it("non-stream: meta.error (context_overflow) → status:failed + error envelope", async () => {
+      const port = enabledPort;
+      agentCommand.mockReset();
+      agentCommand.mockResolvedValueOnce({
+        payloads: [],
+        meta: { error: { kind: "context_overflow", message: "prompt exceeds 8192 tokens" } },
+      } as never);
+
+      const res = await postResponses(port, { model: "openclaw", input: "hi" });
+      expect(res.status).toBe(200);
+      const body = (await res.json()) as {
+        status?: string;
+        error?: { code?: string; message?: string };
+        output?: unknown[];
+      };
+      expect(body.status).toBe("failed");
+      expect(body.error?.code).toBe("context_overflow");
+      expect(body.error?.message ?? "").toMatch(/exceeds 8192/);
+    });
+
+    it("non-stream: all-error payloads (provider error) → status:failed, message carried", async () => {
+      const port = enabledPort;
+      agentCommand.mockReset();
+      agentCommand.mockResolvedValueOnce({
+        payloads: [{ text: "⚠️ The AI service returned an error.", isError: true }],
+        meta: { stopReason: "error" },
+      } as never);
+
+      const res = await postResponses(port, { model: "openclaw", input: "hi" });
+      expect(res.status).toBe(200);
+      const body = (await res.json()) as {
+        status?: string;
+        error?: { code?: string; message?: string };
+      };
+      expect(body.status).toBe("failed");
+      expect(body.error?.message ?? "").toMatch(/AI service returned an error/);
+    });
+
+    it("non-stream: genuinely empty turn (no error) stays completed (no false-positive)", async () => {
+      const port = enabledPort;
+      agentCommand.mockReset();
+      agentCommand.mockResolvedValueOnce({ payloads: [], meta: {} } as never);
+
+      const res = await postResponses(port, { model: "openclaw", input: "hi" });
+      expect(res.status).toBe(200);
+      const body = (await res.json()) as { status?: string };
+      expect(body.status).toBe("completed");
+    });
+
+    it("non-stream: real content alongside an isError warning stays completed", async () => {
+      const port = enabledPort;
+      agentCommand.mockReset();
+      agentCommand.mockResolvedValueOnce({
+        payloads: [
+          { text: "Here is your answer." },
+          { text: "⚠️ a tool warning", isError: true },
+        ],
+        meta: {},
+      } as never);
+
+      const res = await postResponses(port, { model: "openclaw", input: "hi" });
+      expect(res.status).toBe(200);
+      const body = (await res.json()) as {
+        status?: string;
+        output?: Array<{ content?: Array<{ text?: string }> }>;
+      };
+      expect(body.status).toBe("completed");
+      const text = body.output?.[0]?.content?.[0]?.text ?? "";
+      expect(text).toMatch(/Here is your answer/);
+    });
+
+    it("stream: meta.error → emits response.failed (not response.completed) with error envelope", async () => {
+      const port = enabledPort;
+      agentCommand.mockReset();
+      agentCommand.mockResolvedValueOnce({
+        payloads: [],
+        meta: { error: { kind: "context_overflow", message: "prompt exceeds 8192 tokens" } },
+      } as never);
+
+      const res = await postResponses(port, { stream: true, model: "openclaw", input: "hi" });
+      expect(res.status).toBe(200);
+      const text = await res.text();
+      const events = parseSseEvents(text);
+      const types = events.map((e) => e.event).filter(Boolean);
+      expect(types).toContain("response.failed");
+      expect(types).not.toContain("response.completed");
+      expect(events.some((e) => e.data === "[DONE]")).toBe(true);
+      const failed = events.find((e) => e.event === "response.failed");
+      const parsed = JSON.parse(failed?.data ?? "{}") as {
+        response?: { status?: string; error?: { code?: string; message?: string } };
+      };
+      expect(parsed.response?.status).toBe("failed");
+      expect(parsed.response?.error?.code).toBe("context_overflow");
+      expect(parsed.response?.error?.message ?? "").toMatch(/exceeds 8192/);
+    });
+
+    it("stream: all-error payloads (no deltas) → response.failed", async () => {
+      const port = enabledPort;
+      agentCommand.mockReset();
+      agentCommand.mockResolvedValueOnce({
+        payloads: [{ text: "⚠️ The AI service returned an error.", isError: true }],
+        meta: { stopReason: "error" },
+      } as never);
+
+      const res = await postResponses(port, { stream: true, model: "openclaw", input: "hi" });
+      expect(res.status).toBe(200);
+      const text = await res.text();
+      const events = parseSseEvents(text);
+      const types = events.map((e) => e.event).filter(Boolean);
+      expect(types).toContain("response.failed");
+      expect(types).not.toContain("response.completed");
+    });
+  });
 });
