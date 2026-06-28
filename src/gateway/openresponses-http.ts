@@ -266,6 +266,53 @@ function extractUsageFromResult(result: unknown): Usage {
   );
 }
 
+/**
+ * Detect an agent-run failure from the agent command result so the chat path can
+ * surface it as the contract's failure envelope (status:"failed" + error{code,message}
+ * / a `response.failed` SSE event) instead of a silent completed-200 placeholder.
+ *
+ * Signals (see EmbeddedPiRunMeta):
+ *  - `meta.error` — a structured non-recoverable run error (context_overflow,
+ *    compaction_failure, role_ordering, image_size).
+ *  - all `payloads` are error items (`isError`) with no successful content — i.e.
+ *    the agent surfaced a model/provider error (LM Studio 401, auth, rate-limit,
+ *    billing) as its only output.
+ *
+ * Returns null for a genuinely empty-but-successful turn (no payloads, no error)
+ * so legitimate empty completions are NOT turned into errors (conservative).
+ */
+function detectAgentRunFailure(result: unknown): { code: string; message: string } | null {
+  const r = result as {
+    payloads?: Array<{ text?: string; isError?: boolean }>;
+    meta?: { error?: { kind?: string; message?: string } };
+  } | null;
+
+  const runError = r?.meta?.error;
+  if (runError?.kind || runError?.message) {
+    return {
+      code: runError.kind ?? "agent_error",
+      message: runError.message || runError.kind || "agent run failed",
+    };
+  }
+
+  const payloads = Array.isArray(r?.payloads) ? r.payloads : [];
+  const hasRealContent = payloads.some(
+    (p) => typeof p.text === "string" && p.text.trim().length > 0 && !p.isError,
+  );
+  if (hasRealContent) {
+    return null;
+  }
+
+  const errorTexts = payloads
+    .filter((p) => p.isError && typeof p.text === "string" && p.text.trim().length > 0)
+    .map((p) => (p.text as string).trim());
+  if (errorTexts.length > 0) {
+    return { code: "agent_error", message: errorTexts.join("\n\n") };
+  }
+
+  return null;
+}
+
 function createResponseResource(params: {
   id: string;
   model: string;
@@ -562,6 +609,23 @@ export async function handleOpenResponsesHttpRequest(
         return true;
       }
 
+      // Surface an agent-run failure as the contract failure envelope (§85/§99)
+      // instead of a silent completed-200 placeholder.
+      const failure = detectAgentRunFailure(result);
+      if (failure) {
+        logWarn(`openresponses: agent run failed (${failure.code}): ${failure.message}`);
+        const failedResponse = createResponseResource({
+          id: responseId,
+          model,
+          status: "failed",
+          output: [],
+          error: { code: failure.code, message: failure.message },
+          usage,
+        });
+        sendJson(res, 200, failedResponse);
+        return true;
+      }
+
       const content =
         Array.isArray(payloads) && payloads.length > 0
           ? payloads
@@ -607,6 +671,7 @@ export async function handleOpenResponsesHttpRequest(
   let unsubscribe = () => {};
   let finalUsage: Usage | undefined;
   let finalizeRequested: { status: ResponseResource["status"]; text: string } | null = null;
+  let finalError: { code: string; message: string } | null = null;
 
   const maybeFinalize = () => {
     if (closed) {
@@ -622,6 +687,27 @@ export async function handleOpenResponsesHttpRequest(
 
     closed = true;
     unsubscribe();
+
+    // Failure terminal (contract §85/§99): emit `response.failed` with the error
+    // envelope, NOT `response.completed`, so clients can distinguish an agent-run
+    // failure from a real reply.
+    if (finalizeRequested.status === "failed") {
+      const failedResponse = createResponseResource({
+        id: responseId,
+        model,
+        status: "failed",
+        output: [],
+        error: finalError ?? {
+          code: "agent_error",
+          message: finalizeRequested.text || "agent run failed",
+        },
+        usage,
+      });
+      writeSseEvent(res, { type: "response.failed", response: failedResponse });
+      writeDone(res);
+      res.end();
+      return;
+    }
 
     writeSseEvent(res, {
       type: "response.output_text.done",
@@ -761,6 +847,20 @@ export async function handleOpenResponsesHttpRequest(
       });
 
       finalUsage = extractUsageFromResult(result);
+
+      // Surface an agent-run failure as the contract `response.failed` terminal
+      // (§85/§99) instead of dressing the error up as a completed reply. Force the
+      // finalize status to "failed" even if a lifecycle "end" already requested a
+      // completed finalize during the run.
+      const failure = detectAgentRunFailure(result);
+      if (failure) {
+        logWarn(`openresponses: streaming agent run failed (${failure.code}): ${failure.message}`);
+        finalError = failure;
+        finalizeRequested = { status: "failed", text: failure.message };
+        maybeFinalize();
+        return;
+      }
+
       maybeFinalize();
 
       if (closed) {
@@ -886,6 +986,13 @@ export async function handleOpenResponsesHttpRequest(
       });
 
       writeSseEvent(res, { type: "response.failed", response: errorResponse });
+      // Mark closed + unsubscribe BEFORE re-emitting lifecycle events so the
+      // error/end events below cannot re-enter maybeFinalize() and emit a second
+      // terminal event for this same response.
+      closed = true;
+      unsubscribe();
+      writeDone(res);
+      res.end();
       emitAgentEvent({
         runId: responseId,
         stream: "lifecycle",
