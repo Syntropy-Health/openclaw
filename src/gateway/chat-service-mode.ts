@@ -23,6 +23,20 @@ export type ChatServiceModeOverrides = {
 };
 
 /**
+ * Whether a non-chat sidecar (browser control, canvas host) should start, given
+ * the run-shape (issue #113 — lean chat-service startup footprint). Full gateway
+ * (channelsEnabled !== false) ⇒ true (the caller still applies the sidecar's own
+ * enabled flag). chat-service (channelsEnabled === false) ⇒ only when explicitly
+ * opted in (`<sidecar>.enabled === true`).
+ */
+export function chatServiceSidecarEnabled(
+  channelsEnabled: boolean | undefined,
+  explicitOptIn: boolean | undefined,
+): boolean {
+  return channelsEnabled !== false || explicitOptIn === true;
+}
+
+/**
  * Resolve the chat-service run-mode overrides from config + env.
  *
  * Precedence for `channelsEnabled`:

@@ -284,6 +284,7 @@ export async function startGatewayServer(
     openResponsesEnabled: opts.openResponsesEnabled,
     auth: opts.auth,
     tailscale: opts.tailscale,
+    channelsEnabled,
   });
   const {
     bindHost,
@@ -666,6 +667,7 @@ export async function startGatewayServer(
       defaultWorkspaceDir,
       deps,
       startChannels,
+      channelsEnabled,
       log,
       logHooks,
       logChannels,

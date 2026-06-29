@@ -21,6 +21,7 @@ import { isTruthyEnvValue } from "../infra/env.js";
 import type { loadOpenClawPlugins } from "../plugins/loader.js";
 import { type PluginServicesHandle, startPluginServices } from "../plugins/services.js";
 import { startBrowserControlServerIfEnabled } from "./server-browser.js";
+import { chatServiceSidecarEnabled } from "./chat-service-mode.js";
 import {
   scheduleRestartSentinelWake,
   shouldWakeFromRestartSentinel,
@@ -35,6 +36,8 @@ export async function startGatewaySidecars(params: {
   defaultWorkspaceDir: string;
   deps: CliDeps;
   startChannels: () => Promise<void>;
+  /** When false (chat-service mode), skip non-chat sidecars (browser control). */
+  channelsEnabled?: boolean;
   log: { warn: (msg: string) => void };
   logHooks: {
     info: (msg: string) => void;
@@ -59,12 +62,21 @@ export async function startGatewaySidecars(params: {
     params.log.warn(`session lock cleanup failed on startup: ${String(err)}`);
   }
 
-  // Start OpenClaw browser control server (unless disabled via config).
+  // Start OpenClaw browser control server (unless disabled via config). The
+  // channels-off chat-service doesn't need browser tools (issue #113 — lean
+  // startup), so in chat-service mode skip it unless explicitly enabled
+  // (browser.enabled === true). Full gateway behavior is unchanged.
   let browserControl: Awaited<ReturnType<typeof startBrowserControlServerIfEnabled>> = null;
-  try {
-    browserControl = await startBrowserControlServerIfEnabled();
-  } catch (err) {
-    params.logBrowser.error(`server failed to start: ${String(err)}`);
+  const browserChatServiceGate = chatServiceSidecarEnabled(
+    params.channelsEnabled,
+    params.cfg.browser?.enabled,
+  );
+  if (browserChatServiceGate) {
+    try {
+      browserControl = await startBrowserControlServerIfEnabled();
+    } catch (err) {
+      params.logBrowser.error(`server failed to start: ${String(err)}`);
+    }
   }
 
   // Start Gmail watcher if configured (hooks.gmail.account).
