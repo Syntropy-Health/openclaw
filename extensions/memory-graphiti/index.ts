@@ -19,7 +19,7 @@ import {
   type MemoryClient,
 } from "./client.js";
 import { deriveGroupId, graphitiConfigSchema, type GraphitiConfig } from "./config.js";
-import { resolveIdentityScopeKey } from "./identity.js";
+import { externalIdScopeKey, resolveIdentityScopeKey } from "./identity.js";
 import { computeIsQaOnly, senderZepAllowed, type TripwireBreach } from "./tripwire.js";
 import { ZepCloudClient } from "./zep-cloud-client.js";
 
@@ -567,14 +567,24 @@ const memoryPlugin = {
         // other strategies use synchronous derivation.
         let groupId: string;
         if (identitySql && cfg.groupIdStrategy === "identity") {
-          try {
-            const scopeKey = await resolveIdentityScopeKey(identitySql, ctx);
-            groupId = scopeKey ?? deriveGroupId(ctx, cfg);
-          } catch (err) {
-            api.logger.warn(
-              `memory-graphiti: identity resolution failed, falling back: ${String(err)}`,
-            );
-            groupId = deriveGroupId(ctx, cfg);
+          // Prefer the verified external caller identity (Clerk JWT `sub` for
+          // HTTP chat callers) BEFORE the DB lookup: the HTTP path has no
+          // channel/peer to query on, and keying on it unifies the HTTP/Clerk
+          // graph with the same person's WhatsApp graph (#834/#836). Channel
+          // callers carry no externalId → existing DB/derive path is unchanged.
+          const externalKey = externalIdScopeKey(ctx);
+          if (externalKey) {
+            groupId = externalKey;
+          } else {
+            try {
+              const scopeKey = await resolveIdentityScopeKey(identitySql, ctx);
+              groupId = scopeKey ?? deriveGroupId(ctx, cfg);
+            } catch (err) {
+              api.logger.warn(
+                `memory-graphiti: identity resolution failed, falling back: ${String(err)}`,
+              );
+              groupId = deriveGroupId(ctx, cfg);
+            }
           }
         } else {
           groupId = cfg.userId ?? (ctx.sessionKey ? deriveGroupId(ctx, cfg) : lastGroupId);
@@ -625,11 +635,19 @@ const memoryPlugin = {
 
           let groupId: string;
           if (identitySql && cfg.groupIdStrategy === "identity") {
-            try {
-              const scopeKey = await resolveIdentityScopeKey(identitySql, ctx);
-              groupId = scopeKey ?? deriveGroupId(ctx, cfg);
-            } catch {
-              groupId = deriveGroupId(ctx, cfg);
+            // Prefer the verified external caller identity (Clerk JWT `sub`) so
+            // capture keys the SAME graph recall does (#834/#836) — the shared
+            // externalIdScopeKey helper guarantees recall+capture cannot drift.
+            const externalKey = externalIdScopeKey(ctx);
+            if (externalKey) {
+              groupId = externalKey;
+            } else {
+              try {
+                const scopeKey = await resolveIdentityScopeKey(identitySql, ctx);
+                groupId = scopeKey ?? deriveGroupId(ctx, cfg);
+              } catch {
+                groupId = deriveGroupId(ctx, cfg);
+              }
             }
           } else {
             groupId = cfg.userId ?? deriveGroupId(ctx, cfg);

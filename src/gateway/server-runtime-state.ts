@@ -30,6 +30,7 @@ import { listenGatewayHttpServer } from "./server/http-listen.js";
 import { createGatewayPluginRequestHandler } from "./server/plugins-http.js";
 import type { GatewayTlsRuntime } from "./server/tls.js";
 import type { GatewayWsClient } from "./server/ws-types.js";
+import type { TauMeter } from "./tau-meter.js";
 
 export async function createGatewayRuntimeState(params: {
   cfg: import("../config/config.js").OpenClawConfig;
@@ -44,6 +45,12 @@ export async function createGatewayRuntimeState(params: {
   resolvedAuth: ResolvedGatewayAuth;
   /** Optional rate limiter for auth brute-force protection. */
   rateLimiter?: AuthRateLimiter;
+  /**
+   * Optional per-user_scope τ budget meter for the chat path (contract §9).
+   * Owned/disposed by the caller (server.impl). Shared across all bind-host
+   * servers so a user's budget is process-global.
+   */
+  tauMeter?: TauMeter;
   gatewayTls?: GatewayTlsRuntime;
   hooksConfig: () => HooksConfigResolved | null;
   pluginRegistry: PluginRegistry;
@@ -115,6 +122,13 @@ export async function createGatewayRuntimeState(params: {
     log: params.logPlugins,
   });
 
+  // Per-user_scope τ meter (contract §9) is owned + disposed by the caller
+  // (server.impl, alongside authRateLimiter) and threaded in here. The same
+  // reference is shared across every bind-host HTTP server below so a user's
+  // budget is process-global (one budget per user_scope regardless of which
+  // loopback alias served the request). Undefined → chat path is unmetered.
+  const tauMeter = params.tauMeter;
+
   const bindHosts = await resolveGatewayListenHosts(params.bindHost);
   const httpServers: HttpServer[] = [];
   const httpBindHosts: string[] = [];
@@ -132,6 +146,7 @@ export async function createGatewayRuntimeState(params: {
       handlePluginRequest,
       resolvedAuth: params.resolvedAuth,
       rateLimiter: params.rateLimiter,
+      tauMeter,
       tlsOptions: params.gatewayTls?.enabled ? params.gatewayTls.tlsOptions : undefined,
     });
     try {

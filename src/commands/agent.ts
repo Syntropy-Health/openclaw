@@ -151,6 +151,7 @@ function runAgentAttempt(params: {
     groupChannel: params.runContext.groupChannel,
     groupSpace: params.runContext.groupSpace,
     spawnedBy: params.spawnedBy,
+    externalId: params.opts.externalId,
     currentChannelId: params.runContext.currentChannelId,
     currentThreadTs: params.runContext.currentThreadTs,
     replyToMode: params.runContext.replyToMode,

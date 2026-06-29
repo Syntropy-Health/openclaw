@@ -41,6 +41,13 @@ export type RunEmbeddedPiAgentParams = {
   senderName?: string | null;
   senderUsername?: string | null;
   senderE164?: string | null;
+  /**
+   * The verified external caller identity (e.g. the Clerk JWT `sub` for HTTP
+   * chat callers); null/absent for channel callers. Threaded into the agent
+   * hook ctx so memory-graphiti's identity strategy can key the graph on it
+   * (#834/#836).
+   */
+  externalId?: string | null;
   /** Whether the sender is an owner (required for owner-only tools). */
   senderIsOwner?: boolean;
   /** Current channel ID for auto-threading (Slack). */
