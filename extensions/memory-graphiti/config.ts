@@ -64,6 +64,13 @@ export type GraphitiConfig = {
 export type GroupIdContext = {
   sessionKey?: string;
   messageProvider?: string;
+  /**
+   * Verified external caller identity (e.g. the Clerk JWT `sub` for HTTP chat
+   * callers); null/absent for channel callers. When present, the identity
+   * strategy keys the graph on it directly so an HTTP/Clerk user shares the
+   * same graph as the same person on other channels (#834/#836).
+   */
+  externalId?: string | null;
 };
 
 const ALLOWED_KEYS = [

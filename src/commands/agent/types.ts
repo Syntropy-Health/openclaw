@@ -52,6 +52,12 @@ export type AgentCommandOpts = {
   replyAccountId?: string;
   /** Override delivery thread/topic id (separate from session routing). */
   threadId?: string | number;
+  /**
+   * The verified external caller identity (e.g. the Clerk JWT `sub` for HTTP
+   * chat callers); absent for channel callers. Threaded into the embedded run
+   * params → agent hook ctx so memory-graphiti keys the graph on it (#834/#836).
+   */
+  externalId?: string | null;
   /** Message channel context (webchat|voicewake|whatsapp|...). */
   messageChannel?: string;
   channel?: string; // delivery channel (whatsapp|telegram|...)

@@ -223,6 +223,7 @@ export async function runEmbeddedPiAgent(
               workspaceDir: params.workspaceDir,
               messageProvider: params.messageProvider ?? undefined,
               senderE164: params.senderE164,
+              externalId: params.externalId,
             },
           );
           if (earlyHookResult?.providerOverride) {

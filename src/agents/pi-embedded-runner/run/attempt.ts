@@ -876,6 +876,7 @@ export async function runEmbeddedAttempt(
                     workspaceDir: params.workspaceDir,
                     messageProvider: params.messageProvider ?? undefined,
                     senderE164: params.senderE164,
+                    externalId: params.externalId,
                   },
                 )
                 .catch((hookErr: unknown) => {
@@ -1125,6 +1126,7 @@ export async function runEmbeddedAttempt(
                 workspaceDir: params.workspaceDir,
                 messageProvider: params.messageProvider ?? undefined,
                 senderE164: params.senderE164,
+                externalId: params.externalId,
               },
             )
             .catch((err) => {

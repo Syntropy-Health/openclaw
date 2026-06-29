@@ -14,7 +14,7 @@ export async function handleGatewayPostJsonEndpoint(
     trustedProxies?: string[];
     rateLimiter?: AuthRateLimiter;
   },
-): Promise<false | { body: unknown } | undefined> {
+): Promise<false | { body: unknown; externalId?: string } | undefined> {
   const url = new URL(req.url ?? "/", `http://${req.headers.host || "localhost"}`);
   if (url.pathname !== opts.pathname) {
     return false;
@@ -25,14 +25,14 @@ export async function handleGatewayPostJsonEndpoint(
     return undefined;
   }
 
-  const authorized = await authorizeGatewayBearerRequestOrReply({
+  const authResult = await authorizeGatewayBearerRequestOrReply({
     req,
     res,
     auth: opts.auth,
     trustedProxies: opts.trustedProxies,
     rateLimiter: opts.rateLimiter,
   });
-  if (!authorized) {
+  if (!authResult.ok) {
     return undefined;
   }
 
@@ -41,5 +41,7 @@ export async function handleGatewayPostJsonEndpoint(
     return undefined;
   }
 
-  return { body };
+  // `externalId` (the verified Clerk `sub`) is the server-derived user_scope
+  // source; only present for a clerk-jwt-authenticated request.
+  return { body, externalId: authResult.externalId };
 }

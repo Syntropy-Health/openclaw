@@ -51,6 +51,28 @@ export function derivePeerId(sessionKey: string): string {
   return rest[0] ?? sessionKey;
 }
 
+/**
+ * Prefer the verified external caller identity (e.g. the Clerk JWT `sub` for
+ * HTTP chat callers) as the canonical identity-strategy scope key.
+ *
+ * This is the SINGLE source of truth for the HTTP/Clerk → group_id mapping,
+ * called by BOTH the recall (before_agent_start) and capture (agent_end) hooks
+ * so they can never drift. When present, it equals the same person's
+ * lp_users.external_id on other channels — so keying on it here unifies the
+ * HTTP/Clerk graph with the WhatsApp graph (#834/#836).
+ *
+ * Returns null when ctx carries no usable externalId (every channel caller —
+ * the existing DB/derive identity path is then byte-identical).
+ */
+export function externalIdScopeKey(ctx: GroupIdContext): string | null {
+  const externalId =
+    typeof ctx.externalId === "string" && ctx.externalId.length > 0 ? ctx.externalId : null;
+  if (!externalId) {
+    return null;
+  }
+  return deriveScopeKey({ external_id: externalId, id: externalId });
+}
+
 // ---------------------------------------------------------------------------
 // Identity DB query
 // ---------------------------------------------------------------------------

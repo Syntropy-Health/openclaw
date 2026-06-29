@@ -12,15 +12,22 @@ import {
 } from "./agent-prompt.js";
 import type { AuthRateLimiter } from "./auth-rate-limit.js";
 import type { ResolvedGatewayAuth } from "./auth.js";
-import { sendJson, setSseHeaders, writeDone } from "./http-common.js";
+import { sendJson, sendRateLimited, setSseHeaders, writeDone } from "./http-common.js";
 import { handleGatewayPostJsonEndpoint } from "./http-endpoint-helpers.js";
-import { resolveAgentIdForRequest, resolveSessionKey } from "./http-utils.js";
+import {
+  deriveUserScopeFromSub,
+  resolveAgentIdForRequest,
+  resolveSessionKey,
+} from "./http-utils.js";
+import type { TauMeter } from "./tau-meter.js";
 
 type OpenAiHttpOptions = {
   auth: ResolvedGatewayAuth;
   maxBodyBytes?: number;
   trustedProxies?: string[];
   rateLimiter?: AuthRateLimiter;
+  /** Per-user_scope τ budget meter (§9). No-op for non-Clerk requests. */
+  tauMeter?: TauMeter;
 };
 
 type OpenAiChatMessage = {
@@ -130,6 +137,7 @@ function resolveOpenAiSessionKey(params: {
   req: IncomingMessage;
   agentId: string;
   user?: string | undefined;
+  userScope?: string | undefined;
 }): string {
   return resolveSessionKey({ ...params, prefix: "openai" });
 }
@@ -166,7 +174,9 @@ export async function handleOpenAiHttpRequest(
   const user = typeof payload.user === "string" ? payload.user : undefined;
 
   const agentId = resolveAgentIdForRequest({ req, model });
-  const sessionKey = resolveOpenAiSessionKey({ req, agentId, user });
+  // L1 user_scope server-derived from the verified Clerk `sub` (never body `user`).
+  const userScope = deriveUserScopeFromSub(handled.externalId);
+  const sessionKey = resolveOpenAiSessionKey({ req, agentId, user, userScope });
   const prompt = buildAgentPrompt(payload.messages);
   if (!prompt.message) {
     sendJson(res, 400, {
@@ -175,6 +185,14 @@ export async function handleOpenAiHttpRequest(
         type: "invalid_request_error",
       },
     });
+    return true;
+  }
+
+  // τ-metering (§9): per-user_scope budget. No-op for non-Clerk requests. On
+  // exhaustion → 429 + Retry-After, before any agent run.
+  const tauCheck = opts.tauMeter?.check(userScope);
+  if (tauCheck && !tauCheck.allowed) {
+    sendRateLimited(res, tauCheck.retryAfterMs);
     return true;
   }
 
@@ -188,6 +206,7 @@ export async function handleOpenAiHttpRequest(
           message: prompt.message,
           extraSystemPrompt: prompt.extraSystemPrompt,
           sessionKey,
+          externalId: handled.externalId ?? null,
           runId,
           deliver: false,
           messageChannel: "webchat",
@@ -205,6 +224,13 @@ export async function handleOpenAiHttpRequest(
               .filter(Boolean)
               .join("\n\n")
           : "No response from OpenClaw.";
+
+      // Record τ spend for the §9 budget. This OpenAI-compat path does not
+      // surface real token usage (usage is reported as 0), so a completed turn
+      // costs 1 (turn-rate metering) — the same fallback tauTurnCost() applies
+      // on the /v1/responses path when usage is absent. Without this the budget
+      // would be checked but never debited, leaving this surface unmetered.
+      opts.tauMeter?.record(userScope, 1);
 
       sendJson(res, 200, {
         id: runId,
@@ -282,6 +308,10 @@ export async function handleOpenAiHttpRequest(
       if (phase === "end" || phase === "error") {
         closed = true;
         unsubscribe();
+        // Record τ spend for the §9 budget once at terminal lifecycle (mirrors
+        // the non-stream path; cost 1 since this surface reports no real usage).
+        // Guarded by `closed` above so a turn is charged exactly once.
+        opts.tauMeter?.record(userScope, 1);
         writeDone(res);
         res.end();
       }
@@ -300,6 +330,7 @@ export async function handleOpenAiHttpRequest(
           message: prompt.message,
           extraSystemPrompt: prompt.extraSystemPrompt,
           sessionKey,
+          externalId: handled.externalId ?? null,
           runId,
           deliver: false,
           messageChannel: "webchat",

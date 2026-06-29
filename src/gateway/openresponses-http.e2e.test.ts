@@ -429,6 +429,25 @@ describe("OpenResponses HTTP API (e2e)", () => {
     }
   });
 
+  it("threads the verified externalId into the agentCommand run params (#834/#836)", async () => {
+    const port = enabledPort;
+    try {
+      // Token auth carries no Clerk `sub` → externalId must be threaded as null
+      // (not undefined/omitted), so memory-graphiti's identity strategy keeps
+      // the existing channel DB/derive path. A Clerk caller would carry the sub.
+      agentCommand.mockReset();
+      agentCommand.mockResolvedValueOnce({ payloads: [{ text: "ok" }] } as never);
+      const res = await postResponses(port, { model: "openclaw", input: "hi" });
+      expect(res.status).toBe(200);
+      const [opts] = agentCommand.mock.calls[0] ?? [];
+      expect(opts as Record<string, unknown> | undefined).toHaveProperty("externalId");
+      expect((opts as { externalId?: string | null } | undefined)?.externalId).toBeNull();
+      await ensureResponseConsumed(res);
+    } finally {
+      // shared server
+    }
+  });
+
   it("streams OpenResponses SSE events", async () => {
     const port = enabledPort;
     try {

@@ -84,6 +84,7 @@ import {
   refreshGatewayHealthSnapshot,
 } from "./server/health-state.js";
 import { loadGatewayTlsRuntime } from "./server/tls.js";
+import { createTauMeter, type TauMeter } from "./tau-meter.js";
 
 export { __resetModelCatalogCacheForTest } from "./server-model-catalog.js";
 
@@ -305,6 +306,22 @@ export async function startGatewayServer(
     ? createAuthRateLimiter(rateLimitConfig)
     : undefined;
 
+  // Per-user_scope τ meter (contract §9): one process-global budget per
+  // user_scope shared across all bind-host HTTP servers and both chat surfaces.
+  // Constructed only when explicitly enabled (resolvedAuth.tau present), so the
+  // chat path is an unmetered no-op by default (behavior-preserving). Disposed
+  // on shutdown alongside authRateLimiter.
+  const tauMeter: TauMeter | undefined = resolvedAuth.tau
+    ? createTauMeter({
+        maxCostPerWindow: resolvedAuth.tau.maxCostPerWindow,
+        windowMs: resolvedAuth.tau.windowMs,
+        retryAfterMs: resolvedAuth.tau.retryAfterMs,
+      })
+    : undefined;
+  if (tauMeter) {
+    log.info("gateway: τ-meter enabled on the chat path (per user_scope budget)");
+  }
+
   let controlUiRootState: ControlUiRootState | undefined;
   if (controlUiRootOverride) {
     const resolvedOverride = resolveControlUiRootOverrideSync(controlUiRootOverride);
@@ -376,6 +393,7 @@ export async function startGatewayServer(
     openResponsesConfig,
     resolvedAuth,
     rateLimiter: authRateLimiter,
+    tauMeter,
     gatewayTls,
     hooksConfig: () => hooksConfig,
     pluginRegistry,
@@ -750,6 +768,7 @@ export async function startGatewayServer(
       }
       skillsChangeUnsub();
       authRateLimiter?.dispose();
+      tauMeter?.dispose();
       channelHealthMonitor?.stop();
       await close(opts);
     },
