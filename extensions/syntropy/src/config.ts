@@ -21,6 +21,22 @@
 import { Type, type Static } from "@sinclair/typebox";
 import { Value } from "@sinclair/typebox/value";
 
+// Braintrust observability config — default OFF. When enabled, the extension
+// initializes a single Braintrust logger and wraps each MCP tool call in a
+// span. Project namespace is "claw" (per-app; SJ/others get their own).
+//
+// ⚠️ PHI SAFETY: syntropy MCP calls carry health data (PHI). Spans default to
+// METADATA-ONLY (tool name, label, ok, durationMs) and MUST NOT log raw
+// args/results. Setting `logContent: true` sends MCP inputs/outputs (PHI) to
+// Braintrust cloud — documented as QA / synthetic-data ONLY. The default-OFF
+// path loads no braintrust code at all (lazy dynamic import in index.ts).
+const BraintrustSchema = Type.Object({
+  enabled: Type.Boolean({ default: false }),
+  apiKey: Type.Optional(Type.String({ minLength: 1 })),
+  projectName: Type.String({ minLength: 1, default: "claw" }),
+  logContent: Type.Boolean({ default: false }),
+});
+
 const ConfigSchema = Type.Object({
   syntropyBaseUrl: Type.String({ minLength: 1 }),
   databaseUrl: Type.String({ minLength: 1 }),
@@ -30,6 +46,11 @@ const ConfigSchema = Type.Object({
   // 3 KG-direct tools are not registered.
   kgBaseUrl: Type.Optional(Type.String({ minLength: 1 })),
   enableKgDirect: Type.Optional(Type.Boolean()),
+  // Braintrust observability — always present in the resolved config (with
+  // defaults applied) so callers can read `cfg.braintrust.enabled` without a
+  // null-check. Default is `{ enabled:false, projectName:"claw",
+  // logContent:false }` → no-op, zero overhead.
+  braintrust: BraintrustSchema,
 });
 
 // Vault access is now via the same `databaseUrl` connection (SJ + openclaw
@@ -48,6 +69,7 @@ function isValidUrl(s: string): boolean {
 }
 
 export type SyntropyConfig = Static<typeof ConfigSchema>;
+export type BraintrustConfig = Static<typeof BraintrustSchema>;
 
 /**
  * Minimal env shape we depend on. Accepting it as a parameter rather than
@@ -63,6 +85,7 @@ export type ParseEnv = {
 } & {
   readonly NODE_ENV?: string;
   readonly DATABASE_URL?: string;
+  readonly BRAINTRUST_API_KEY?: string;
 };
 
 const DEV_DEFAULT_BASE_URL = "http://localhost:3000";
@@ -111,6 +134,32 @@ export function parseSyntropyConfig(
     candidate.enableKgDirect = input.enableKgDirect;
   }
 
+  // Braintrust — layer explicit input over env, then let TypeBox defaults
+  // (enabled=false, projectName="claw", logContent=false) fill the rest.
+  // apiKey resolves: input.braintrust.apiKey ?? env.BRAINTRUST_API_KEY.
+  const btInput =
+    input.braintrust && typeof input.braintrust === "object"
+      ? (input.braintrust as Record<string, unknown>)
+      : {};
+  const btCandidate: Record<string, unknown> = {};
+  if (typeof btInput.enabled === "boolean") btCandidate.enabled = btInput.enabled;
+  if (typeof btInput.projectName === "string" && btInput.projectName.length > 0) {
+    btCandidate.projectName = btInput.projectName;
+  }
+  if (typeof btInput.logContent === "boolean") btCandidate.logContent = btInput.logContent;
+  const btApiKey =
+    typeof btInput.apiKey === "string" && btInput.apiKey.length > 0
+      ? btInput.apiKey
+      : typeof env.BRAINTRUST_API_KEY === "string" && env.BRAINTRUST_API_KEY.length > 0
+        ? env.BRAINTRUST_API_KEY
+        : undefined;
+  if (btApiKey !== undefined) btCandidate.apiKey = btApiKey;
+  // Apply schema defaults + strip unknowns for the nested object.
+  candidate.braintrust = Value.Clean(
+    BraintrustSchema,
+    Value.Default(BraintrustSchema, btCandidate),
+  );
+
   const envLabel = isProduction ? "production" : env.NODE_ENV || "development";
 
   if (!Value.Check(ConfigSchema, candidate)) {
@@ -140,6 +189,7 @@ export function parseSyntropyConfig(
   const result: SyntropyConfig = {
     syntropyBaseUrl: candidate.syntropyBaseUrl as string,
     databaseUrl: candidate.databaseUrl as string,
+    braintrust: candidate.braintrust as SyntropyConfig["braintrust"],
   };
   if (candidate.kgBaseUrl !== undefined) result.kgBaseUrl = candidate.kgBaseUrl as string;
   if (candidate.enableKgDirect !== undefined) {
