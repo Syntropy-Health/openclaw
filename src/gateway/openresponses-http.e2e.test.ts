@@ -921,4 +921,83 @@ describe("OpenResponses HTTP API (e2e)", () => {
       }
     });
   });
+
+  // ───────────────────────────────────────────────────────────────────────────
+  // CORS for browser clients (Flutter web preview / browser integration tests).
+  // Opt-in allowlist; native mobile (no Origin) unaffected.
+  // ───────────────────────────────────────────────────────────────────────────
+  describe("CORS (browser integration tests)", () => {
+    const ORIGIN = "http://localhost:8550";
+
+    it("OPTIONS preflight from an allowed origin → 204 + Access-Control-* headers", async () => {
+      await writeGatewayConfig({
+        gateway: { http: { cors: { allowedOrigins: [ORIGIN] }, endpoints: { responses: { enabled: true } } } },
+      });
+      const port = await getFreePort();
+      const server = await startServer(port, { openResponsesEnabled: true });
+      try {
+        const res = await fetch(`http://127.0.0.1:${port}/v1/responses`, {
+          method: "OPTIONS",
+          headers: {
+            origin: ORIGIN,
+            "access-control-request-method": "POST",
+            "access-control-request-headers": "authorization, content-type",
+          },
+        });
+        expect(res.status).toBe(204);
+        expect(res.headers.get("access-control-allow-origin")).toBe(ORIGIN);
+        expect((res.headers.get("access-control-allow-methods") ?? "")).toContain("POST");
+        expect((res.headers.get("access-control-allow-headers") ?? "").toLowerCase()).toContain(
+          "authorization",
+        );
+        expect(res.headers.get("vary") ?? "").toContain("Origin");
+        await ensureResponseConsumed(res);
+      } finally {
+        await server.close({ reason: "cors preflight test done" });
+      }
+    });
+
+    it("actual POST from an allowed origin → Access-Control-Allow-Origin echoed on the 200", async () => {
+      await writeGatewayConfig({
+        gateway: { http: { cors: { allowedOrigins: [ORIGIN] }, endpoints: { responses: { enabled: true } } } },
+      });
+      const port = await getFreePort();
+      const server = await startServer(port, { openResponsesEnabled: true });
+      try {
+        agentCommand.mockReset();
+        agentCommand.mockResolvedValueOnce({ payloads: [{ text: "hi" }], meta: {} } as never);
+        const res = await postResponses(
+          port,
+          { model: "openclaw", input: "hi", stream: false },
+          { origin: ORIGIN },
+        );
+        expect(res.status).toBe(200);
+        expect(res.headers.get("access-control-allow-origin")).toBe(ORIGIN);
+        await ensureResponseConsumed(res);
+      } finally {
+        await server.close({ reason: "cors post test done" });
+      }
+    });
+
+    it("disallowed origin → NO Access-Control-Allow-Origin (browser blocks)", async () => {
+      await writeGatewayConfig({
+        gateway: { http: { cors: { allowedOrigins: [ORIGIN] }, endpoints: { responses: { enabled: true } } } },
+      });
+      const port = await getFreePort();
+      const server = await startServer(port, { openResponsesEnabled: true });
+      try {
+        agentCommand.mockReset();
+        agentCommand.mockResolvedValueOnce({ payloads: [{ text: "hi" }], meta: {} } as never);
+        const res = await postResponses(
+          port,
+          { model: "openclaw", input: "hi", stream: false },
+          { origin: "https://evil.example" },
+        );
+        expect(res.headers.get("access-control-allow-origin")).toBeNull();
+        await ensureResponseConsumed(res);
+      } finally {
+        await server.close({ reason: "cors disallowed test done" });
+      }
+    });
+  });
 });

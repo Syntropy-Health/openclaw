@@ -48,6 +48,7 @@ import {
   resolveHookChannel,
   resolveHookDeliver,
 } from "./hooks.js";
+import { applyApiCors, endPreflight, resolveCorsAllowedOrigins } from "./cors.js";
 import { sendGatewayAuthFailure } from "./http-common.js";
 import { getBearerToken, getHeader } from "./http-utils.js";
 import { isPrivateOrLoopbackAddress, resolveGatewayClientIp } from "./net.js";
@@ -487,6 +488,21 @@ export function createGatewayHttpServer(opts: {
       const configSnapshot = loadConfig();
       const trustedProxies = configSnapshot.gateway?.trustedProxies ?? [];
       const requestPath = new URL(req.url ?? "/", "http://localhost").pathname;
+      // CORS for the public HTTP API endpoints so browser clients (Flutter web
+      // preview, browser integration tests) can call them cross-origin. Opt-in
+      // via gateway.http.cors.allowedOrigins / OPENCLAW_HTTP_CORS_ORIGINS; native
+      // mobile is unaffected (no Origin header → no CORS headers). Auth unchanged.
+      if (requestPath === "/v1/responses" || requestPath === "/v1/chat/completions") {
+        const corsAllowlist = resolveCorsAllowedOrigins({
+          configOrigins: configSnapshot.gateway?.http?.cors?.allowedOrigins,
+          env: process.env,
+        });
+        const { preflight } = applyApiCors(req, res, corsAllowlist);
+        if (preflight) {
+          endPreflight(res);
+          return;
+        }
+      }
       if (await handleHooksRequest(req, res)) {
         return;
       }
