@@ -90,4 +90,14 @@ describe("config schema regressions", () => {
     });
     expect(res.ok).toBe(false);
   });
+
+  it("accepts gateway.customBindHost (strict-schema gap regression)", () => {
+    // Read at runtime (server-runtime-config.ts) + on the GatewayConfig type, but
+    // was missing from the strict gateway zod object — so `gateway.bind: 'custom'`
+    // with a customBindHost failed validation. Pin that it validates.
+    const res = validateConfigObject({
+      gateway: { bind: "custom", customBindHost: "0.0.0.0" },
+    });
+    expect(res.ok).toBe(true);
+  });
 });
