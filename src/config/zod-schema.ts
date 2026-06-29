@@ -488,6 +488,12 @@ export const OpenClawSchema = z
           .optional(),
         http: z
           .object({
+            cors: z
+              .object({
+                allowedOrigins: z.array(z.string()).optional(),
+              })
+              .strict()
+              .optional(),
             endpoints: z
               .object({
                 chatCompletions: z

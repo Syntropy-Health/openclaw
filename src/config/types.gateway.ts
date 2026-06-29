@@ -307,8 +307,22 @@ export type GatewayHttpEndpointsConfig = {
   responses?: GatewayHttpResponsesConfig;
 };
 
+export type GatewayHttpCorsConfig = {
+  /**
+   * Browser origins allowed to call the HTTP API endpoints (`/v1/responses`,
+   * `/v1/chat/completions`) cross-origin — needed for browser-based clients
+   * (Flutter web preview, browser integration tests). Exact-match allowlist
+   * (e.g. "http://localhost:8550", "https://app.example.com"). Use ["*"] only
+   * for trusted dev/test (echoes the request Origin). Native mobile apps do NOT
+   * need this (CORS is browser-only). Also settable via OPENCLAW_HTTP_CORS_ORIGINS
+   * (comma-separated). When empty/unset, no CORS headers are emitted (default).
+   */
+  allowedOrigins?: string[];
+};
+
 export type GatewayHttpConfig = {
   endpoints?: GatewayHttpEndpointsConfig;
+  cors?: GatewayHttpCorsConfig;
 };
 
 export type GatewayNodesConfig = {
