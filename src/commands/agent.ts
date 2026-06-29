@@ -534,12 +534,24 @@ export async function agentCommand(
       // Track model fallback attempts so retries on an existing session don't
       // re-inject the original prompt as a duplicate user message.
       let fallbackAttemptIndex = 0;
+      // Per-candidate timeout (issue #112i, opt-in via env): cap a slow/throttled
+      // candidate so we fail over to the next model fast instead of waiting out
+      // its inner provider retries. Unset/<=0 = disabled (no behavior change).
+      const perCandidateTimeoutMs = (() => {
+        const raw = process.env.OPENCLAW_MODEL_CANDIDATE_TIMEOUT_MS?.trim();
+        if (!raw) {
+          return undefined;
+        }
+        const parsed = Number.parseInt(raw, 10);
+        return Number.isFinite(parsed) && parsed > 0 ? parsed : undefined;
+      })();
       const fallbackResult = await runWithModelFallback({
         cfg,
         provider,
         model,
         agentDir,
         fallbacksOverride: effectiveFallbacksOverride,
+        perCandidateTimeoutMs,
         run: (providerOverride, modelOverride) => {
           const isFallbackRetry = fallbackAttemptIndex > 0;
           fallbackAttemptIndex += 1;

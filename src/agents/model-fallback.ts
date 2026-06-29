@@ -9,6 +9,7 @@ import { DEFAULT_MODEL, DEFAULT_PROVIDER } from "./defaults.js";
 import {
   coerceToFailoverError,
   describeFailoverError,
+  FailoverError,
   isFailoverError,
   isTimeoutError,
 } from "./failover-error.js";
@@ -262,6 +263,29 @@ export const _probeThrottleInternals = {
   resolveProbeThrottleKey,
 } as const;
 
+/**
+ * A cancelable timer that rejects with a `timeout` FailoverError after `ms`
+ * (issue #112i per-candidate timeout). Raced against a candidate run; when it
+ * wins, the existing catch treats it as a failover → next candidate.
+ */
+function candidateTimeoutReject(
+  candidate: ModelCandidate,
+  ms: number,
+): { promise: Promise<never>; clear: () => void } {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const promise = new Promise<never>((_, reject) => {
+    timer = setTimeout(() => {
+      reject(
+        new FailoverError(
+          `model ${candidate.provider}/${candidate.model} exceeded per-candidate timeout ${ms}ms`,
+          { reason: "timeout", provider: candidate.provider, model: candidate.model, status: 408 },
+        ),
+      );
+    }, ms);
+  });
+  return { promise, clear: () => clearTimeout(timer) };
+}
+
 export async function runWithModelFallback<T>(params: {
   cfg: OpenClawConfig | undefined;
   provider: string;
@@ -271,6 +295,15 @@ export async function runWithModelFallback<T>(params: {
   fallbacksOverride?: string[];
   run: (provider: string, model: string) => Promise<T>;
   onError?: ModelFallbackErrorHandler;
+  /**
+   * Per-candidate timeout in ms (issue #112i, opt-in accelerator). When > 0, a
+   * candidate run that exceeds it is abandoned as a `timeout` failover so the
+   * next model is tried — capping a slow/throttled primary (whose inner provider
+   * retries can take ~90s before it throws) instead of burning the whole turn.
+   * Default undefined/0 = disabled (no behavior change; legitimately slow runs
+   * are NOT abandoned). The abandoned run is orphaned (it finishes in the bg).
+   */
+  perCandidateTimeoutMs?: number;
 }): Promise<ModelFallbackRunResult<T>> {
   const candidates = resolveFallbackCandidates({
     cfg: params.cfg,
@@ -327,8 +360,21 @@ export async function runWithModelFallback<T>(params: {
         lastProbeAttempt.set(probeThrottleKey, now);
       }
     }
+    let candidateTimeout: { promise: Promise<never>; clear: () => void } | null = null;
     try {
-      const result = await params.run(candidate.provider, candidate.model);
+      const runPromise = params.run(candidate.provider, candidate.model);
+      // Per-candidate timeout (issue #112i): cap a slow/throttled candidate so we
+      // fail over fast instead of waiting out its inner provider retries. On
+      // timeout the race rejects with a FailoverError → handled by the catch
+      // below like any other failover. Disabled when perCandidateTimeoutMs falsy.
+      const result =
+        params.perCandidateTimeoutMs && params.perCandidateTimeoutMs > 0
+          ? await Promise.race([
+              runPromise,
+              (candidateTimeout = candidateTimeoutReject(candidate, params.perCandidateTimeoutMs))
+                .promise,
+            ])
+          : await runPromise;
       return {
         result,
         provider: candidate.provider,
@@ -373,6 +419,8 @@ export async function runWithModelFallback<T>(params: {
         attempt: i + 1,
         total: candidates.length,
       });
+    } finally {
+      candidateTimeout?.clear();
     }
   }
 
