@@ -464,3 +464,61 @@ describe("runWithModelFallback", () => {
     expect(result.model).toBe("gpt-4.1-mini");
   });
 });
+
+describe("runWithModelFallback per-candidate timeout (issue #112i)", () => {
+  it("abandons a slow/hung candidate and fails over to the next model", async () => {
+    const cfg = makeCfg(); // primary openai/gpt-4.1-mini, fallback anthropic/claude-haiku-3-5
+    const run = vi
+      .fn()
+      .mockImplementationOnce(() => new Promise(() => {})) // primary hangs (never resolves)
+      .mockResolvedValueOnce("ok-from-fallback");
+
+    const result = await runWithModelFallback({
+      cfg,
+      provider: "openai",
+      model: "gpt-4.1-mini",
+      run,
+      perCandidateTimeoutMs: 30,
+    });
+
+    expect(result.result).toBe("ok-from-fallback");
+    expect(run).toHaveBeenCalledTimes(2);
+    expect(run.mock.calls[1]?.[0]).toBe("anthropic");
+    expect(result.attempts[0]?.reason).toBe("timeout");
+  });
+
+  it("does NOT abandon a slow-but-completing candidate when the timeout is disabled", async () => {
+    const cfg = makeCfg();
+    const run = vi
+      .fn()
+      .mockImplementationOnce(
+        () => new Promise<string>((resolve) => setTimeout(() => resolve("slow-ok"), 40)),
+      );
+
+    const result = await runWithModelFallback({
+      cfg,
+      provider: "openai",
+      model: "gpt-4.1-mini",
+      run, // no perCandidateTimeoutMs → disabled
+    });
+
+    expect(result.result).toBe("slow-ok");
+    expect(run).toHaveBeenCalledTimes(1); // primary completed, no failover
+  });
+
+  it("throws when the last candidate also times out (no fallback left)", async () => {
+    const cfg = makeCfg();
+    const run = vi.fn().mockImplementation(() => new Promise(() => {})); // every candidate hangs
+
+    await expect(
+      runWithModelFallback({
+        cfg,
+        provider: "openai",
+        model: "gpt-4.1-mini",
+        run,
+        perCandidateTimeoutMs: 25,
+      }),
+    ).rejects.toThrow(/All models failed/);
+    expect(run).toHaveBeenCalledTimes(2); // primary + fallback both attempted then timed out
+  });
+});
