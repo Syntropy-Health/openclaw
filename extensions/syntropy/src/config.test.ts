@@ -102,6 +102,8 @@ describe("parseSyntropyConfig", () => {
     expect(cfg).toEqual({
       syntropyBaseUrl: "https://api.syntropy.example",
       databaseUrl: "postgres://localhost/db",
+      // braintrust is always present (defaults applied) — see dedicated suite.
+      braintrust: { enabled: false, projectName: "claw", logContent: false },
     });
   });
 
@@ -169,5 +171,83 @@ describe("parseSyntropyConfig", () => {
     // false !== undefined — index.ts uses this to distinguish "user
     // explicitly disabled" from "not configured at all".
     expect(cfg.enableKgDirect).toBe(false);
+  });
+
+  // -------------------------------------------------------------------------
+  // Braintrust observability — default OFF; PHI-safe defaults.
+  // -------------------------------------------------------------------------
+
+  const base = {
+    syntropyBaseUrl: "https://api.syntropy.example",
+    databaseUrl: "postgres://localhost/db",
+  };
+
+  test("braintrust defaults: disabled, project=claw, logContent=false, no apiKey", () => {
+    const cfg = parseSyntropyConfig(base, { NODE_ENV: "production" });
+    expect(cfg.braintrust).toEqual({
+      enabled: false,
+      projectName: "claw",
+      logContent: false,
+    });
+    expect(cfg.braintrust.apiKey).toBeUndefined();
+  });
+
+  test("braintrust apiKey layers from env.BRAINTRUST_API_KEY", () => {
+    const cfg = parseSyntropyConfig(
+      { ...base, braintrust: { enabled: true } },
+      { NODE_ENV: "production", BRAINTRUST_API_KEY: "bt_env_key" },
+    );
+    expect(cfg.braintrust.enabled).toBe(true);
+    expect(cfg.braintrust.apiKey).toBe("bt_env_key");
+  });
+
+  test("explicit braintrust.apiKey wins over env.BRAINTRUST_API_KEY", () => {
+    const cfg = parseSyntropyConfig(
+      { ...base, braintrust: { enabled: true, apiKey: "bt_explicit" } },
+      { NODE_ENV: "production", BRAINTRUST_API_KEY: "bt_env_key" },
+    );
+    expect(cfg.braintrust.apiKey).toBe("bt_explicit");
+  });
+
+  test("braintrust.projectName override is honored", () => {
+    const cfg = parseSyntropyConfig(
+      { ...base, braintrust: { enabled: true, projectName: "claw-staging" } },
+      { NODE_ENV: "production" },
+    );
+    expect(cfg.braintrust.projectName).toBe("claw-staging");
+  });
+
+  test("braintrust.logContent opt-in is preserved", () => {
+    const cfg = parseSyntropyConfig(
+      { ...base, braintrust: { enabled: true, logContent: true } },
+      { NODE_ENV: "production" },
+    );
+    expect(cfg.braintrust.logContent).toBe(true);
+  });
+
+  test("env.BRAINTRUST_API_KEY present but braintrust disabled → still off, key still resolved", () => {
+    // Disabled is the gate; index.ts only inits when enabled. The key may still
+    // be carried (harmless) since enabled=false short-circuits init.
+    const cfg = parseSyntropyConfig(base, {
+      NODE_ENV: "production",
+      BRAINTRUST_API_KEY: "bt_env_key",
+    });
+    expect(cfg.braintrust.enabled).toBe(false);
+  });
+
+  test("braintrust strips unknown nested fields", () => {
+    const cfg = parseSyntropyConfig(
+      {
+        ...base,
+        braintrust: { enabled: true, apiKey: "k", bogus: "x", projectName: "claw" },
+      },
+      { NODE_ENV: "production" },
+    );
+    expect(cfg.braintrust).toEqual({
+      enabled: true,
+      apiKey: "k",
+      projectName: "claw",
+      logContent: false,
+    });
   });
 });
