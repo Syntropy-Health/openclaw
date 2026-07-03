@@ -9,6 +9,7 @@ import {
   type ResolvedGatewayAuth,
   resolveGatewayAuth,
 } from "./auth.js";
+import { chatServiceSidecarEnabled } from "./chat-service-mode.js";
 import { normalizeControlUiBasePath } from "./control-ui-shared.js";
 import { resolveHooksConfig } from "./hooks.js";
 import { isLoopbackHost, resolveGatewayBindHost } from "./net.js";
@@ -39,6 +40,8 @@ export async function resolveGatewayRuntimeConfig(params: {
   openResponsesEnabled?: boolean;
   auth?: GatewayAuthConfig;
   tailscale?: GatewayTailscaleConfig;
+  /** When false (chat-service mode), default non-chat sidecars (canvas) OFF. */
+  channelsEnabled?: boolean;
 }): Promise<GatewayRuntimeConfig> {
   const bindMode = params.bind ?? params.cfg.gateway?.bind ?? "loopback";
   const customBindHost = params.cfg.gateway?.customBindHost;
@@ -82,8 +85,14 @@ export async function resolveGatewayRuntimeConfig(params: {
   const hasSharedSecret =
     (authMode === "token" && hasToken) || (authMode === "password" && hasPassword);
   const hooksConfig = resolveHooksConfig(params.cfg);
+  // Canvas host is a UI/workspace feature the channels-off chat-service doesn't
+  // need (issue #113 — lean startup footprint). In chat-service mode default it
+  // OFF unless explicitly enabled (canvasHost.enabled === true). Full gateway
+  // behavior is unchanged.
   const canvasHostEnabled =
-    process.env.OPENCLAW_SKIP_CANVAS_HOST !== "1" && params.cfg.canvasHost?.enabled !== false;
+    process.env.OPENCLAW_SKIP_CANVAS_HOST !== "1" &&
+    params.cfg.canvasHost?.enabled !== false &&
+    chatServiceSidecarEnabled(params.channelsEnabled, params.cfg.canvasHost?.enabled);
 
   const trustedProxies = params.cfg.gateway?.trustedProxies ?? [];
 

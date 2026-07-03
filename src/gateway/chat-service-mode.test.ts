@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { OpenClawConfig } from "../config/config.js";
-import { resolveChatServiceMode } from "./chat-service-mode.js";
+import { chatServiceSidecarEnabled, resolveChatServiceMode } from "./chat-service-mode.js";
 
 const cfg = (gateway?: OpenClawConfig["gateway"]): Pick<OpenClawConfig, "gateway"> => ({ gateway });
 
@@ -64,5 +64,22 @@ describe("resolveChatServiceMode", () => {
     });
     // Unparseable ⇒ env override ignored ⇒ runMode chat-service ⇒ off.
     expect(result.channelsEnabled).toBe(false);
+  });
+});
+
+describe("chatServiceSidecarEnabled (issue #113 — lean chat-service sidecars)", () => {
+  it("full gateway (channelsEnabled=true/undefined) → sidecar honored (true)", () => {
+    expect(chatServiceSidecarEnabled(true, undefined)).toBe(true);
+    expect(chatServiceSidecarEnabled(undefined, undefined)).toBe(true); // default = full
+  });
+
+  it("chat-service (channelsEnabled=false) → sidecar OFF unless explicitly opted in", () => {
+    expect(chatServiceSidecarEnabled(false, undefined)).toBe(false);
+    expect(chatServiceSidecarEnabled(false, false)).toBe(false);
+    expect(chatServiceSidecarEnabled(false, true)).toBe(true); // explicit opt-in wins
+  });
+
+  it("full gateway ignores the opt-in (already on)", () => {
+    expect(chatServiceSidecarEnabled(true, false)).toBe(true);
   });
 });
