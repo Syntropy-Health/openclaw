@@ -2,7 +2,7 @@
   "agents": {
     "defaults": {
       "model": {
-        "primary": "cerebras/qwen-3-235b-a22b-instruct-2507"
+        "primary": "anthropic/claude-sonnet-4-5"
       }
     }
   },
