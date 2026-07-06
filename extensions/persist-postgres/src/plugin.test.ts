@@ -199,3 +199,79 @@ describe("persist-postgres plugin registration", () => {
     expect(api.logger.error).not.toHaveBeenCalled();
   });
 });
+
+describe("persist-postgres transcript retention", () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  test("schedules an unref'd retention sweep when retentionDays > 0", async () => {
+    const { default: plugin } = await import("./index.js");
+    const fakeTimer = { unref: vi.fn() } as unknown as ReturnType<typeof setInterval>;
+    const setIntervalSpy = vi.spyOn(globalThis, "setInterval").mockReturnValue(fakeTimer);
+    const api = createMockApi({
+      pluginConfig: { databaseUrl: "postgresql://localhost:5432/test", retentionDays: 1 },
+    });
+
+    plugin.register(api);
+
+    expect(setIntervalSpy).toHaveBeenCalledTimes(1);
+    expect(fakeTimer.unref).toHaveBeenCalled();
+    expect(api.logger.info).toHaveBeenCalledWith(
+      expect.stringContaining("transcript retention enabled"),
+    );
+  });
+
+  test("does not schedule a sweep when retentionDays is absent or non-positive", async () => {
+    const { default: plugin } = await import("./index.js");
+    const setIntervalSpy = vi.spyOn(globalThis, "setInterval");
+
+    const apiUnset = createMockApi({
+      pluginConfig: { databaseUrl: "postgresql://localhost:5432/test" },
+    });
+    plugin.register(apiUnset);
+    expect(setIntervalSpy).not.toHaveBeenCalled();
+
+    const apiZero = createMockApi({
+      pluginConfig: { databaseUrl: "postgresql://localhost:5432/test", retentionDays: 0 },
+    });
+    plugin.register(apiZero);
+    expect(setIntervalSpy).not.toHaveBeenCalled();
+  });
+
+  test("clears the retention sweep timer on gateway_stop", async () => {
+    const { default: plugin } = await import("./index.js");
+    const fakeTimer = { unref: vi.fn() } as unknown as ReturnType<typeof setInterval>;
+    vi.spyOn(globalThis, "setInterval").mockReturnValue(fakeTimer);
+    const clearIntervalSpy = vi.spyOn(globalThis, "clearInterval");
+    const api = createMockApi({
+      pluginConfig: { databaseUrl: "postgresql://localhost:5432/test", retentionDays: 1 },
+    });
+
+    plugin.register(api);
+    const stopHook = api._hooks.find((h) => h.name === "gateway_stop");
+    await stopHook!.handler({}, {});
+
+    expect(clearIntervalSpy).toHaveBeenCalledWith(fakeTimer);
+  });
+});
+
+describe("purgeExpiredConversations", () => {
+  test("returns 0 without querying when retentionDays is non-positive", async () => {
+    const { purgeExpiredConversations } = await import("./db.js");
+    const sql = vi.fn();
+    expect(await purgeExpiredConversations(sql as never, 0)).toBe(0);
+    expect(await purgeExpiredConversations(sql as never, -3)).toBe(0);
+    expect(await purgeExpiredConversations(sql as never, Number.NaN)).toBe(0);
+    expect(sql).not.toHaveBeenCalled();
+  });
+
+  test("deletes expired rows and returns the purged count", async () => {
+    const { purgeExpiredConversations } = await import("./db.js");
+    const deleteResult = Object.assign([], { count: 3 });
+    const sql = vi.fn(() => Promise.resolve(deleteResult));
+    const purged = await purgeExpiredConversations(sql as never, 1);
+    expect(purged).toBe(3);
+    expect(sql).toHaveBeenCalledTimes(1);
+  });
+});

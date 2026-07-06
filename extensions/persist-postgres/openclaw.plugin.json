@@ -14,6 +14,11 @@
     "properties": {
       "databaseUrl": {
         "type": "string"
+      },
+      "retentionDays": {
+        "type": "number",
+        "minimum": 0,
+        "description": "Transcript retention window in days. Conversations (and their message content) inactive for longer than this are purged by an hourly sweep. 0 or unset = keep forever."
       }
     },
     "required": []
