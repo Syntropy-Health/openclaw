@@ -48,7 +48,9 @@
       },
       "persist-postgres": {
         "enabled": true,
-        "config": {}
+        "config": {
+          "retentionDays": 1
+        }
       },
       "auth-memory-gate": {
         "enabled": true,

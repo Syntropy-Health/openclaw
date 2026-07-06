@@ -1,5 +1,8 @@
 import type { OpenClawPluginApi } from "openclaw/plugin-sdk";
-import { createPgClient, ensureSchema, persistMessage } from "./db.js";
+import { createPgClient, ensureSchema, persistMessage, purgeExpiredConversations } from "./db.js";
+
+// How often the retention sweep runs when a retention window is configured.
+const PURGE_INTERVAL_MS = 60 * 60 * 1000; // hourly
 
 const persistPostgresPlugin = {
   id: "persist-postgres",
@@ -20,6 +23,13 @@ const persistPostgresPlugin = {
     let schemaReady = false;
     let initError: unknown = null;
 
+    // Transcript retention: when retentionDays > 0, expired conversations (and
+    // their cascaded message content) are swept periodically so the persisted
+    // chat store stays session-only / short-lived. Unset or <= 0 = keep forever
+    // (backward-compatible default).
+    const retentionDays = Number(api.pluginConfig?.retentionDays ?? 0);
+    let purgeTimer: ReturnType<typeof setInterval> | undefined;
+
     async function ensureReady() {
       if (schemaReady) {
         return;
@@ -37,6 +47,25 @@ const persistPostgresPlugin = {
         api.logger.error(`persist-postgres: init failed (will not retry): ${err}`);
         throw err;
       }
+    }
+
+    // Schedule the retention sweep when a window is configured. The timer is
+    // unref'd so it never keeps the process alive, and cleared on gateway_stop.
+    if (Number.isFinite(retentionDays) && retentionDays > 0) {
+      api.logger.info(`persist-postgres: transcript retention enabled (${retentionDays}d sweep)`);
+      purgeTimer = setInterval(() => {
+        ensureReady()
+          .then(() => purgeExpiredConversations(sql, retentionDays))
+          .then((purged) => {
+            if (purged > 0) {
+              api.logger.info(
+                `persist-postgres: purged ${purged} conversation(s) older than ${retentionDays}d`,
+              );
+            }
+          })
+          .catch((err) => api.logger.error(`persist-postgres: retention sweep error: ${err}`));
+      }, PURGE_INTERVAL_MS);
+      purgeTimer.unref?.();
     }
 
     // Persist the user prompt when an agent run starts
@@ -104,6 +133,9 @@ const persistPostgresPlugin = {
       "gateway_stop",
       async (_event, _ctx) => {
         try {
+          if (purgeTimer) {
+            clearInterval(purgeTimer);
+          }
           await sql.end({ timeout: 5 });
           api.logger.info("persist-postgres: database connections closed");
         } catch (err) {

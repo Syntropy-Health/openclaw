@@ -183,6 +183,36 @@ export async function persistMessage(
 }
 
 /**
+ * Purge conversations (and their cascaded messages) whose last activity is
+ * older than the retention window.
+ *
+ * Enforces the transcript retention policy: the persisted chat store is meant
+ * to be short-lived (session-only / <= a small number of days), with the
+ * durable observability record living in tracing rather than here. A
+ * non-positive or non-finite `retentionDays` is treated as "no purge" and
+ * returns 0 without touching the database.
+ *
+ * `lp_messages.conversation_id` is declared `ON DELETE CASCADE`, so deleting an
+ * expired conversation removes its message content in the same statement — the
+ * prompt/response text does not outlive the retention window.
+ *
+ * Returns the number of conversations purged.
+ */
+export async function purgeExpiredConversations(
+  sql: postgres.Sql,
+  retentionDays: number,
+): Promise<number> {
+  if (!Number.isFinite(retentionDays) || retentionDays <= 0) {
+    return 0;
+  }
+  const result = await sql`
+    DELETE FROM lp_conversations
+    WHERE last_message_at < now() - make_interval(days => ${retentionDays})
+  `;
+  return result.count ?? 0;
+}
+
+/**
  * Query conversations with optional date-range filters.
  * Mirrors the createdAfter/createdBefore/updatedAfter/updatedBefore
  * params from the sessions.list API.
