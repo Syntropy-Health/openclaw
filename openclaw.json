@@ -17,7 +17,6 @@
       "allowFrom": ["*"]
     },
     "whatsapp": {
-      "enabled": true,
       "dmPolicy": "open",
       "allowFrom": ["*"]
     }
