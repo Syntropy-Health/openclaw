@@ -2,7 +2,7 @@
   "agents": {
     "defaults": {
       "model": {
-        "primary": "anthropic/claude-sonnet-4-5"
+        "primary": "anthropic/claude-haiku-4-5"
       }
     }
   },
