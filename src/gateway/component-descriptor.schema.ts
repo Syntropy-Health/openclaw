@@ -18,8 +18,43 @@
 
 import { z } from "zod";
 
-/** ≥128-bit CSPRNG id minted by the Confirm Governor — never backend-supplied. */
+/**
+ * ≥128-bit CSPRNG id minted by the Confirm Governor — never backend-supplied.
+ *
+ * SECURITY NOTE: the pattern guarantees id CAPACITY (≥132 bits), not entropy or
+ * provenance. A schema-valid pending_id is NOT authorization — the Confirm
+ * Governor mints/overwrites pending ids server-side and validates every incoming
+ * id against its own single-use store; never trust a descriptor-supplied value.
+ */
 export const PENDING_ID_PATTERN = /^cnf_[A-Za-z0-9_-]{22,}$/;
+
+const UNSAFE_KEYS = new Set(["__proto__", "constructor", "prototype"]);
+
+/**
+ * Deep-sanitize a JSON.parse'd value before validation (prototype-pollution
+ * guard). JSON.parse creates `__proto__` as an OWN key; zod's looseObject
+ * copies unknown keys by assignment, which would turn that key into the parsed
+ * object's PROTOTYPE — making unvalidated values (e.g. a fake `pending_id`)
+ * readable via normal property access while bypassing every declared check.
+ * Rebuilding with plain objects and dropping the unsafe keys closes the class.
+ * (Object.entries only visits own enumerable keys, so the rebuild is safe.)
+ */
+function stripUnsafeKeys(value: unknown): unknown {
+  if (Array.isArray(value)) {
+    return value.map(stripUnsafeKeys);
+  }
+  if (value !== null && typeof value === "object") {
+    const out: Record<string, unknown> = {};
+    for (const [key, entry] of Object.entries(value)) {
+      if (UNSAFE_KEYS.has(key)) {
+        continue;
+      }
+      out[key] = stripUnsafeKeys(entry);
+    }
+    return out;
+  }
+  return value;
+}
 
 const KEY_PATTERN = /^[a-z][a-z0-9_]*$/;
 
@@ -71,17 +106,14 @@ export const ComponentUiSchema = z
     path: ["expires_at"],
   });
 
-/**
- * openclaw's `ChannelPayloadDescriptor` — the wire shape a plugin tool result
- * carries and the HTTP/channel render paths consume.
- */
-export const ComponentDescriptorSchema = z.looseObject({
+const ComponentDescriptorBaseSchema = z.looseObject({
   type: z.literal("component"),
   /** Indexes the client component registry. Unknown key ⇒ render `ui.summary`. */
   key: z.string().regex(KEY_PATTERN),
   /**
    * Optional render hint; "navigate"/"url" semantics are owned by the
    * openclaw-channel-tool-hooks A&D (additive-within-v1 vocabulary).
+   * Canonical default is "component" — consumers treat absence as "component".
    */
   render: z.enum(["component", "navigate", "url"]).optional(),
   /** Renderer-specific pure data — renderers MUST output-encode. */
@@ -89,10 +121,25 @@ export const ComponentDescriptorSchema = z.looseObject({
   ui: ComponentUiSchema,
 });
 
+/**
+ * openclaw's `ChannelPayloadDescriptor` — the wire shape a plugin tool result
+ * carries and the HTTP/channel render paths consume. Input is deep-sanitized
+ * (prototype-pollution guard) before validation; always validate through THIS
+ * schema (or `parseComponentDescriptor`), not the un-sanitized sub-schemas.
+ */
+export const ComponentDescriptorSchema = z.preprocess(
+  stripUnsafeKeys,
+  ComponentDescriptorBaseSchema,
+);
+
 export type ComponentFieldConstraints = z.infer<typeof ComponentFieldConstraintsSchema>;
 export type ComponentFieldDescriptor = z.infer<typeof ComponentFieldDescriptorSchema>;
 export type ComponentUi = z.infer<typeof ComponentUiSchema>;
-export type ComponentDescriptor = z.infer<typeof ComponentDescriptorSchema>;
+export type ComponentDescriptor = z.infer<typeof ComponentDescriptorBaseSchema>;
+
+/** A&D (C1/D5) name for the same contract — alias so the doc term resolves in code. */
+export const ChannelPayloadDescriptorSchema = ComponentDescriptorSchema;
+export type ChannelPayloadDescriptor = ComponentDescriptor;
 
 /** Parse helper: returns the typed descriptor or null (never throws). */
 export function parseComponentDescriptor(value: unknown): ComponentDescriptor | null {
