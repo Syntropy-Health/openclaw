@@ -1,9 +1,10 @@
 import type { OpenClawPluginApi } from "openclaw/plugin-sdk";
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import type {
-  McpToolDescriptor,
-  McpToolListResult,
-  McpToolResult,
+import {
+  McpSession,
+  type McpToolDescriptor,
+  type McpToolListResult,
+  type McpToolResult,
 } from "../../syntropy/src/client.js";
 import {
   createSyntropyMcpPlugin,
@@ -336,7 +337,7 @@ describe("syntropy-mcp tool factory", () => {
       "kg_secret",
       "log_food",
       { food_name: "blueberries" },
-      { label: "kg-mcp" },
+      { label: "kg-mcp", session: expect.any(McpSession) },
     );
     expect(result.content[0]!.text).toContain("logged");
   });
@@ -468,6 +469,64 @@ describe("syntropy-mcp tool factory", () => {
     const call = callTool.mock.calls.at(-1)!;
     expect(call[0]).toBe("http://sj2.local");
     expect(call[2]).toBe("search");
+  });
+
+  it("threads ONE McpSession per server through both discovery and execute", async () => {
+    const discoverySessions: unknown[] = [];
+    const executeSessions: unknown[] = [];
+    const listTools = vi.fn(
+      async (
+        _baseUrl: string,
+        _token: string,
+        opts: { label: string; session?: McpSession },
+      ): Promise<McpToolListResult> => {
+        discoverySessions.push(opts.session);
+        return okList([descriptor("log_food")]);
+      },
+    );
+    const callTool = vi.fn(
+      async (
+        _baseUrl: string,
+        _token: string,
+        _toolName: string,
+        _args: Record<string, unknown>,
+        opts: { label: string; session?: McpSession },
+      ): Promise<McpToolResult> => {
+        executeSessions.push(opts.session);
+        return { data: { done: true }, ok: true };
+      },
+    );
+    const env: NodeJS.ProcessEnv = { KG_MCP_API_KEY: "kg_secret", SJ_MCP_API_KEY: "sj_secret" };
+    const twoServers = baseConfig({
+      servers: [
+        { ...kgServer },
+        {
+          id: "sj2",
+          baseUrl: "http://sj2.local",
+          auth: "static-key",
+          apiKeyEnv: "SJ_MCP_API_KEY",
+          label: "sj2-mcp",
+        },
+      ],
+    });
+    const ctx = setup({ pluginConfig: twoServers, listTools, callTool, env });
+    await flush();
+
+    // Discovery received one distinct session instance per server.
+    expect(discoverySessions).toHaveLength(2);
+    expect(discoverySessions[0]).toBeInstanceOf(McpSession);
+    expect(discoverySessions[1]).toBeInstanceOf(McpSession);
+    expect(discoverySessions[0]).not.toBe(discoverySessions[1]);
+
+    // Execute for each server reuses the SAME instance discovery used.
+    const tools = factoryTools(ctx);
+    const kgTool = tools.find((t) => t.name === "log_food")!;
+    const sjTool = tools.find((t) => t.name === "sj2:log_food")!;
+    await (kgTool.execute as (id: string, args: unknown) => Promise<unknown>)("c1", {});
+    await (sjTool.execute as (id: string, args: unknown) => Promise<unknown>)("c2", {});
+    expect(executeSessions).toHaveLength(2);
+    expect(executeSessions[0]).toBe(discoverySessions[0]);
+    expect(executeSessions[1]).toBe(discoverySessions[1]);
   });
 
   it("returns the error result without retrying for non-unknown-tool errors", async () => {

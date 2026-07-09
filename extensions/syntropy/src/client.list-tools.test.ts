@@ -159,6 +159,48 @@ describe("listMcpTools", () => {
     expect(res.error).not.toContain(TOKEN);
   });
 
+  it("sends the MCP-required Accept header (application/json, text/event-stream)", async () => {
+    const mockFetch = vi
+      .mocked(globalThis.fetch)
+      .mockResolvedValue(jsonRpcResponse({ result: { tools: [] } }));
+
+    await listMcpTools(BASE_URL, TOKEN, { label: LABEL });
+
+    const [, init] = mockFetch.mock.calls[0]!;
+    const headers = init?.headers as Record<string, string>;
+    expect(headers["Accept"]).toBe("application/json, text/event-stream");
+  });
+
+  it("parses an SSE-framed (text/event-stream) tools/list response", async () => {
+    vi.mocked(globalThis.fetch).mockResolvedValue(
+      new Response(
+        'event: message\ndata: {"jsonrpc":"2.0","id":"1","result":{"tools":[{"name":"kg_query"}]}}\n\n',
+        { status: 200, headers: { "Content-Type": "text/event-stream" } },
+      ),
+    );
+
+    const res = await listMcpTools(BASE_URL, TOKEN, { label: LABEL });
+    expect(res.ok).toBe(true);
+    if (!res.ok) throw new Error("unreachable");
+    expect(res.tools).toHaveLength(1);
+    expect(res.tools[0]!.name).toBe("kg_query");
+  });
+
+  it("returns ok=false (never throws) on an SSE body with no data: line", async () => {
+    vi.mocked(globalThis.fetch).mockResolvedValue(
+      new Response("event: message\n\n", {
+        status: 200,
+        headers: { "Content-Type": "text/event-stream" },
+      }),
+    );
+
+    const res = await listMcpTools(BASE_URL, TOKEN, { label: LABEL });
+    expect(res.ok).toBe(false);
+    if (res.ok) throw new Error("unreachable");
+    expect(res.error).toContain(LABEL);
+    expect(res.error).not.toContain(TOKEN);
+  });
+
   it("returns ok=false (never throws) on a non-JSON response body", async () => {
     vi.mocked(globalThis.fetch).mockResolvedValue(
       new Response("<html>gateway error</html>", { status: 200 }),

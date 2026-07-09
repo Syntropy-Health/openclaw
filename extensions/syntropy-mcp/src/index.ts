@@ -26,7 +26,13 @@
 import type { AgentToolResult } from "@mariozechner/pi-agent-core";
 import { Type, type TObject, type TSchema } from "@sinclair/typebox";
 import type { OpenClawPluginApi } from "openclaw/plugin-sdk";
-import { callMcpTool, type McpToolResult } from "../../syntropy/src/client.js";
+import {
+  callMcpTool,
+  listMcpTools,
+  McpSession,
+  type McpToolListResult,
+  type McpToolResult,
+} from "../../syntropy/src/client.js";
 import {
   ToolCatalog,
   type CatalogEntry,
@@ -139,11 +145,21 @@ export type CallToolFn = (
   authToken: string,
   toolName: string,
   args: Record<string, unknown>,
-  opts: { label: string },
+  opts: { label: string; session?: McpSession },
 ) => Promise<McpToolResult>;
 
+/**
+ * Discovery-transport signature incl. the optional session — matches
+ * {@link listMcpTools}. Narrower `{ label }`-only fns remain assignable.
+ */
+export type ListToolsWithSessionFn = (
+  baseUrl: string,
+  authToken: string,
+  opts: { label: string; session?: McpSession },
+) => Promise<McpToolListResult>;
+
 export type SyntropyMcpOverrides = {
-  listTools?: ListToolsFn;
+  listTools?: ListToolsWithSessionFn;
   callTool?: CallToolFn;
   env?: NodeJS.ProcessEnv;
   now?: () => number;
@@ -207,6 +223,8 @@ type ServerRuntime = {
   baseUrl: string;
   label: string;
   getToken: () => Promise<string>;
+  /** ONE lazily-established MCP session per configured server (T1.4). */
+  session: McpSession;
 };
 
 function buildAgentTool(params: {
@@ -240,7 +258,10 @@ function buildAgentTool(params: {
           const msg = err instanceof Error ? err.message : String(err);
           return { data: null, ok: false, error: `${server.label} auth failed: ${msg}` };
         }
-        return callTool(server.baseUrl, token, wireName, toolArgs, { label: server.label });
+        return callTool(server.baseUrl, token, wireName, toolArgs, {
+          label: server.label,
+          session: server.session,
+        });
       };
 
       let result = await callOnce();
@@ -304,9 +325,14 @@ export function createSyntropyMcpPlugin(overrides: SyntropyMcpOverrides = {}) {
 
       const runtimes = new Map<string, ServerRuntime>();
       const catalogServers: McpServerConfig[] = [];
+      // ONE McpSession per configured server, threaded through BOTH discovery
+      // (catalog listTools, looked up by baseUrl — the only key the catalog
+      // hands the transport) and tool execute (see buildAgentTool).
+      const sessionsByBaseUrl = new Map<string, McpSession>();
 
       for (const spec of config.servers) {
         const label = spec.label ?? spec.id;
+        const session = new McpSession(spec.baseUrl);
         if (spec.auth === "static-key") {
           const apiKeyEnv = spec.apiKeyEnv as string; // validated by the parser
           const registerTimeValue = env[apiKeyEnv];
@@ -326,8 +352,9 @@ export function createSyntropyMcpPlugin(overrides: SyntropyMcpOverrides = {}) {
             }
             return value;
           };
-          runtimes.set(spec.id, { id: spec.id, baseUrl: spec.baseUrl, label, getToken });
+          runtimes.set(spec.id, { id: spec.id, baseUrl: spec.baseUrl, label, getToken, session });
           catalogServers.push({ id: spec.id, baseUrl: spec.baseUrl, label, getToken });
+          sessionsByBaseUrl.set(spec.baseUrl, session);
           continue;
         }
 
@@ -339,15 +366,25 @@ export function createSyntropyMcpPlugin(overrides: SyntropyMcpOverrides = {}) {
         );
         const getToken = (): Promise<string> =>
           Promise.reject(new Error("exchange-not-implemented (B2)"));
-        runtimes.set(spec.id, { id: spec.id, baseUrl: spec.baseUrl, label, getToken });
+        runtimes.set(spec.id, { id: spec.id, baseUrl: spec.baseUrl, label, getToken, session });
         catalogServers.push({ id: spec.id, baseUrl: spec.baseUrl, label, getToken });
+        sessionsByBaseUrl.set(spec.baseUrl, session);
       }
+
+      // The catalog's ListToolsFn signature stays `{ label }`-only; the plugin
+      // wraps the transport so each server's session rides along by baseUrl.
+      const baseListTools: ListToolsWithSessionFn = overrides.listTools ?? listMcpTools;
+      const listToolsWithSession: ListToolsFn = (listBaseUrl, token, listOpts) =>
+        baseListTools(listBaseUrl, token, {
+          ...listOpts,
+          session: sessionsByBaseUrl.get(listBaseUrl),
+        });
 
       const catalog = new ToolCatalog(catalogServers, {
         refreshSeconds: config.refreshSeconds,
         maxStaleSeconds: config.maxStaleSeconds,
         now: overrides.now,
-        listTools: overrides.listTools,
+        listTools: listToolsWithSession,
         log: api.logger,
       });
       const serverIds = catalogServers.map((server) => server.id);
