@@ -1,0 +1,6 @@
+{
+  "type": "message",
+  "key": "food_log_card",
+  "props": {},
+  "ui": { "summary": "not a component" }
+}

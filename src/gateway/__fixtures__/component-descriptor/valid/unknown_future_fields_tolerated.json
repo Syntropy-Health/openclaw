@@ -1,0 +1,23 @@
+{
+  "type": "component",
+  "key": "food_log_card",
+  "render": "component",
+  "future_top_level_field": {
+    "note": "tolerant readers ignore unknown fields (additive-within-v1)"
+  },
+  "props": { "title": "Chicken bowl" },
+  "ui": {
+    "summary": "Log chicken bowl",
+    "fields": [
+      {
+        "name": "quantity",
+        "type": "integer",
+        "value": 1,
+        "constraints": { "min": 1, "max": 5 },
+        "future_field_prop": true
+      }
+    ],
+    "commit_tool": "log_food",
+    "future_ui_field": "ignored"
+  }
+}

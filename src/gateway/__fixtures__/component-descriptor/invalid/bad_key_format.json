@@ -1,0 +1,6 @@
+{
+  "type": "component",
+  "key": "Food-Log-Card!",
+  "props": {},
+  "ui": { "summary": "Log salmon meal" }
+}

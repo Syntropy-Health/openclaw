@@ -1,0 +1,12 @@
+{
+  "type": "component",
+  "key": "paywall_card",
+  "props": {
+    "remaining": 0,
+    "limit": 25,
+    "resets_at": "2026-07-14T00:00:00Z"
+  },
+  "ui": {
+    "summary": "You've reached this week's plan limit. It resets Monday."
+  }
+}
