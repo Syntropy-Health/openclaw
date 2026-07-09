@@ -152,8 +152,11 @@ export class ToolCatalog {
       const pastMaxStale = ageSeconds > this.maxStaleSeconds;
 
       for (const descriptor of entry.tools) {
-        // Fail-closed: past the stale horizon, mutating tools are dropped.
-        if (pastMaxStale && this.isMutating(descriptor)) continue;
+        // Fail-closed (A&D S6/R6): past the stale horizon, only tools that are
+        // PROVABLY read-only survive. Absent/ambiguous annotations mean "not
+        // provably read-only" — a compromised backend must not keep write
+        // tools alive past the safety net simply by omitting annotations.
+        if (pastMaxStale && !this.isProvablyReadOnly(descriptor)) continue;
 
         let surfaced = descriptor;
         if (seenNames.has(descriptor.name)) {
@@ -172,8 +175,21 @@ export class ToolCatalog {
   }
 
   /**
-   * A tool is mutating when its annotations say so; absent annotations mean
-   * NOT mutating (read-default).
+   * A tool is PROVABLY read-only only when its annotations positively assert
+   * it. This is the predicate for the max-stale fail-closed drop (A&D S6) —
+   * strictly stronger than `!isMutating` (which is the GATING read-default).
+   */
+  isProvablyReadOnly(descriptor: McpToolDescriptor): boolean {
+    const annotations = descriptor.annotations;
+    if (!annotations) return false;
+    return annotations.readOnlyHint === true || annotations.mutates === false;
+  }
+
+  /**
+   * GATING predicate: a tool is mutating when its annotations say so; absent
+   * annotations mean NOT mutating (read-default, A&D "read-tool defaults").
+   * NOTE: the max-stale drop deliberately does NOT use this — see
+   * isProvablyReadOnly.
    */
   isMutating(descriptor: McpToolDescriptor): boolean {
     const annotations = descriptor.annotations;

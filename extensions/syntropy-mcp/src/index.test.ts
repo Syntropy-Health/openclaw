@@ -261,12 +261,14 @@ describe("syntropy-mcp discovery priming", () => {
     await flush();
     expect(listTools).toHaveBeenCalledTimes(1);
 
-    // Backoff timer scheduled for attempt 2.
+    // Backoff timer scheduled for attempt 2 — exact exponential delays
+    // (1000ms base doubling; the 30s cap is unreachable with 3 attempts).
     expect(ctx.timers.pendingTimeouts()).toHaveLength(1);
-    expect(ctx.timers.pendingTimeouts()[0]!.ms).toBeLessThanOrEqual(30_000);
+    expect(ctx.timers.pendingTimeouts()[0]!.ms).toBe(1000);
     await ctx.timers.fireNextTimeout();
     expect(listTools).toHaveBeenCalledTimes(2);
 
+    expect(ctx.timers.pendingTimeouts()[0]!.ms).toBe(2000);
     await ctx.timers.fireNextTimeout();
     expect(listTools).toHaveBeenCalledTimes(3);
 
@@ -381,6 +383,91 @@ describe("syntropy-mcp tool factory", () => {
     expect(callTool).toHaveBeenCalledTimes(2);
     expect(listTools).toHaveBeenCalledTimes(2);
     expect(result.content[0]!.text).toContain("second try ok");
+  });
+
+  it("TEST-B1-1: retry-also-fails is bounded to exactly one retry and surfaces the error", async () => {
+    const callTool = vi.fn(
+      async (): Promise<McpToolResult> => ({
+        data: null,
+        ok: false,
+        error: 'Unknown tool: "log_food"',
+      }),
+    );
+    const listTools = vi.fn(
+      async (): Promise<McpToolListResult> => okList([descriptor("log_food")]),
+    );
+    const ctx = setup({ pluginConfig: baseConfig(), listTools, callTool });
+    await flush();
+
+    const tools = factoryTools(ctx);
+    const tool = tools.find((t) => t.name === "log_food")!;
+    const result = (await (tool.execute as (id: string, args: unknown) => Promise<unknown>)(
+      "call1",
+      {},
+    )) as { content: Array<{ text?: string }> };
+
+    // Exactly one retry: 2 transport calls total, 1 extra discovery refresh.
+    expect(callTool).toHaveBeenCalledTimes(2);
+    expect(listTools).toHaveBeenCalledTimes(2); // prime + the refresh
+    expect(result.content[0]?.text ?? "").toMatch(/Unknown tool/);
+  });
+
+  it("TEST-B1-2: execute fails closed (no transport call) when getToken rejects post-registration", async () => {
+    const callTool = vi.fn(async (): Promise<McpToolResult> => ({ data: { ok: 1 }, ok: true }));
+    const env: NodeJS.ProcessEnv = { KG_MCP_API_KEY: "kg_secret" };
+    const ctx = setup({ pluginConfig: baseConfig(), callTool, env });
+    await flush();
+
+    const tool = factoryTools(ctx).find((t) => t.name === "log_food")!;
+    // Simulate rotation-to-empty AFTER registration + discovery.
+    delete env.KG_MCP_API_KEY;
+    const result = (await (tool.execute as (id: string, args: unknown) => Promise<unknown>)(
+      "call1",
+      {},
+    )) as { content: Array<{ text?: string }> };
+
+    expect(callTool).not.toHaveBeenCalled();
+    const text = result.content[0]?.text ?? "";
+    expect(text).toMatch(/auth failed/);
+    expect(text).not.toContain("kg_secret");
+  });
+
+  it("TEST-B1-3: a collision-prefixed tool executes against the UNPREFIXED wire name on its owning server", async () => {
+    const env: NodeJS.ProcessEnv = { KG_MCP_API_KEY: "kg_secret", SJ_MCP_API_KEY: "sj_secret" };
+    const twoServers = baseConfig({
+      servers: [
+        { ...kgServer },
+        {
+          id: "sj2",
+          baseUrl: "http://sj2.local",
+          auth: "static-key",
+          apiKeyEnv: "SJ_MCP_API_KEY",
+          label: "sj2-mcp",
+        },
+      ],
+    });
+    const listTools = vi.fn(async (): Promise<McpToolListResult> => okList([descriptor("search")]));
+    const callTool = vi.fn(
+      async (
+        _baseUrl: string,
+        _token: string,
+        _toolName: string,
+        _args: Record<string, unknown>,
+        _opts: { label: string },
+      ): Promise<McpToolResult> => ({ data: { hits: [] }, ok: true }),
+    );
+    const ctx = setup({ pluginConfig: twoServers, listTools, callTool, env });
+    await flush();
+
+    const tools = factoryTools(ctx);
+    const prefixed = tools.find((t) => t.name === "sj2:search");
+    expect(prefixed).toBeDefined();
+    await (prefixed!.execute as (id: string, args: unknown) => Promise<unknown>)("call1", {});
+
+    // The wire call must use the unprefixed name, on the OWNING server.
+    const call = callTool.mock.calls.at(-1)!;
+    expect(call[0]).toBe("http://sj2.local");
+    expect(call[2]).toBe("search");
   });
 
   it("returns the error result without retrying for non-unknown-tool errors", async () => {

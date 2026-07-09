@@ -109,7 +109,7 @@ describe("ToolCatalog refresh + getToolDescriptors", () => {
   // 3. Past maxStaleSeconds: drop mutating tools, keep read tools as stale
   // -------------------------------------------------------------------------
 
-  it("drops mutating tools past maxStaleSeconds but keeps read tools tagged stale", async () => {
+  it("SEC-B1-1: past maxStaleSeconds only PROVABLY read-only tools survive — unannotated tools are dropped (fail-closed)", async () => {
     let fail = false;
     const listTools = vi.fn(async (): Promise<McpToolListResult> => {
       if (fail) return { ok: false, error: "sj tools/list HTTP 500" };
@@ -118,7 +118,8 @@ describe("ToolCatalog refresh + getToolDescriptors", () => {
         descriptor("confirm_thing", { requires_confirm: true }),
         descriptor("write_note", { readOnlyHint: false }),
         descriptor("get_profile", { readOnlyHint: true }),
-        descriptor("search"), // no annotations => read-default
+        descriptor("list_notes", { mutates: false }),
+        descriptor("search"), // no annotations => NOT provably read-only => dropped past maxStale
       ]);
     });
     const catalog = new ToolCatalog(
@@ -132,7 +133,9 @@ describe("ToolCatalog refresh + getToolDescriptors", () => {
     await catalog.refresh();
 
     const entries = catalog.getToolDescriptors();
-    expect(entries.map((e) => e.descriptor.name).sort()).toEqual(["get_profile", "search"]);
+    // A compromised/unreachable backend must not keep unannotated (not provably
+    // read-only) tools alive past the stale horizon by omitting annotations.
+    expect(entries.map((e) => e.descriptor.name).sort()).toEqual(["get_profile", "list_notes"]);
     for (const entry of entries) expect(entry.staleness).toBe("stale");
   });
 
