@@ -1,0 +1,76 @@
+{
+  "id": "syntropy-mcp",
+  "name": "Syntropy MCP Tools",
+  "description": "Dynamic MCP tool surface — discovers tools from configured MCP servers via tools/list and registers them into the agent loop.",
+  "configSchema": {
+    "type": "object",
+    "additionalProperties": false,
+    "properties": {
+      "servers": {
+        "type": "array",
+        "description": "MCP servers to discover tools from. Empty/absent means the plugin stays inert.",
+        "items": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "id": {
+              "type": "string",
+              "description": "Server id (e.g. \"kg\", \"sj\") — tags descriptors and prefixes name collisions."
+            },
+            "baseUrl": {
+              "type": "string",
+              "description": "MCP base URL; tools/list and tools/call go to <baseUrl>/mcp."
+            },
+            "auth": {
+              "type": "string",
+              "enum": ["static-key", "m2m-exchange"],
+              "description": "Auth mode. static-key reads a Bearer from apiKeyEnv per request; m2m-exchange is fail-closed until the token-exchange client (B2) lands."
+            },
+            "apiKeyEnv": {
+              "type": "string",
+              "description": "static-key only: env var holding the Bearer token (e.g. KG_MCP_API_KEY). Missing/empty env fail-closes the server."
+            },
+            "resource": {
+              "type": "string",
+              "description": "m2m-exchange only: canonical resource URI the exchanged token is minted for (e.g. https://…/mcp)."
+            },
+            "exchangePath": {
+              "type": "string",
+              "description": "m2m-exchange only: token-exchange endpoint path (e.g. /tokens/exchange)."
+            },
+            "label": {
+              "type": "string",
+              "description": "Error-message label; defaults to id."
+            }
+          },
+          "required": ["id", "baseUrl", "auth"]
+        }
+      },
+      "refreshSeconds": {
+        "type": "number",
+        "description": "Tool-catalog cache TTL and periodic-refresh interval. Default 300."
+      },
+      "maxStaleSeconds": {
+        "type": "number",
+        "description": "Fail-closed horizon: past this age mutating tools are dropped. Default 3 × refreshSeconds."
+      }
+    },
+    "required": []
+  },
+  "uiHints": {
+    "servers": {
+      "label": "MCP Servers",
+      "help": "Per-server discovery config. No servers configured means no discovered tools (plugin inert)."
+    },
+    "refreshSeconds": {
+      "label": "Refresh Interval (s)",
+      "placeholder": "300",
+      "advanced": true
+    },
+    "maxStaleSeconds": {
+      "label": "Max Stale (s)",
+      "placeholder": "900",
+      "advanced": true
+    }
+  }
+}
