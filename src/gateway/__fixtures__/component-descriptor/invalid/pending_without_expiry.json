@@ -1,0 +1,10 @@
+{
+  "type": "component",
+  "key": "food_log_card",
+  "props": {},
+  "ui": {
+    "summary": "Log salmon meal",
+    "commit_tool": "log_food",
+    "pending_id": "cnf_8f3kQ2mN7pXvB4tYw9ZrLa"
+  }
+}

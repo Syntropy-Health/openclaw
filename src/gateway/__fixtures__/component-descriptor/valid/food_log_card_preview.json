@@ -1,0 +1,23 @@
+{
+  "type": "component",
+  "key": "food_log_card",
+  "props": {
+    "title": "Salmon meal",
+    "macros": { "calories": 340, "protein_g": 34, "carbs_g": 2, "fat_g": 22 },
+    "confidence": 0.86,
+    "photo_ref": null
+  },
+  "ui": {
+    "summary": "Log salmon meal — 340 cal, 34g protein",
+    "fields": [
+      { "name": "food_text", "type": "string", "value": "salmon meal", "label": "Food", "sensitivity": "health", "constraints": { "maxLength": 200 } },
+      { "name": "quantity", "type": "number", "value": 1, "label": "Servings", "constraints": { "min": 0.25, "max": 10, "step": 0.25 } },
+      { "name": "meal_type", "type": "enum", "value": "dinner", "label": "Meal", "constraints": { "options": ["breakfast", "lunch", "dinner", "snack"] } },
+      { "name": "photo", "type": "photo", "value": null, "label": "Meal photo" }
+    ],
+    "commit_tool": "log_food",
+    "cancel_tool": null,
+    "pending_id": "cnf_8f3kQ2mN7pXvB4tYw9ZrLa",
+    "expires_at": "2026-07-09T02:30:00Z"
+  }
+}

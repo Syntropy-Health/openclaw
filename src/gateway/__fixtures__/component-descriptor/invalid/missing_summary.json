@@ -1,0 +1,9 @@
+{
+  "type": "component",
+  "key": "food_log_card",
+  "props": { "title": "Salmon meal" },
+  "ui": {
+    "fields": [{ "name": "quantity", "type": "number", "value": 1 }],
+    "commit_tool": "log_food"
+  }
+}

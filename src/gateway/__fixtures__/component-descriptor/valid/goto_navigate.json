@@ -1,0 +1,13 @@
+{
+  "type": "component",
+  "key": "goto",
+  "render": "navigate",
+  "props": {
+    "label": "Supplement intake",
+    "url": "/intake/supplement",
+    "purpose": "Start your supplement intake"
+  },
+  "ui": {
+    "summary": "Go to Supplement intake: /intake/supplement"
+  }
+}
