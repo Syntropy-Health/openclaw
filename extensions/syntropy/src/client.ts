@@ -22,6 +22,22 @@ export interface McpToolResult {
 /** Result of a Syntropy Journals MCP tool call. Alias of {@link McpToolResult}. */
 export type SyntropyToolResult = McpToolResult;
 
+/** One tool entry from an MCP `tools/list` response. */
+export type McpToolDescriptor = {
+  name: string;
+  description?: string;
+  inputSchema?: Record<string, unknown>;
+  annotations?: Record<string, unknown>;
+};
+
+/** Result of an MCP `tools/list` discovery call. */
+export type McpToolListResult =
+  | { ok: true; tools: McpToolDescriptor[] }
+  | { ok: false; error: string };
+
+/** Shared request timeout for all MCP transport calls. */
+const MCP_TIMEOUT_MS = 15_000;
+
 // ---------------------------------------------------------------------------
 // Shared client
 // ---------------------------------------------------------------------------
@@ -67,7 +83,7 @@ export async function callMcpTool(
         params: { name: toolName, arguments: args },
         id: crypto.randomUUID(),
       }),
-      signal: AbortSignal.timeout(15_000),
+      signal: AbortSignal.timeout(MCP_TIMEOUT_MS),
     });
 
     if (!resp.ok) {
@@ -104,6 +120,88 @@ export async function callMcpTool(
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
     return { data: null, ok: false, error: `${label} call failed: ${msg}` };
+  }
+}
+
+/**
+ * Discover the tools an MCP server exposes via JSON-RPC `tools/list`.
+ *
+ * Uses the same Streamable-HTTP transport as {@link callMcpTool}: POST
+ * `${baseUrl}/mcp`, Bearer auth, shared timeout, JSON-RPC envelope. Entries
+ * missing a string `name` are skipped (not fatal). Never throws — all failures
+ * come back as `{ ok: false, error }`, and the auth token is never included
+ * in error strings.
+ *
+ * @param baseUrl    MCP base URL (e.g., "http://localhost:3000")
+ * @param authToken  Bearer token (e.g., `sj_*` API token)
+ * @param opts.label Error-message label (e.g. "Syntropy", "kg-mcp")
+ */
+export async function listMcpTools(
+  baseUrl: string,
+  authToken: string,
+  opts: { label: string },
+): Promise<McpToolListResult> {
+  const { label } = opts;
+
+  try {
+    const resp = await fetch(`${baseUrl}/mcp`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${authToken}`,
+      },
+      body: JSON.stringify({
+        jsonrpc: "2.0",
+        method: "tools/list",
+        params: {},
+        id: crypto.randomUUID(),
+      }),
+      signal: AbortSignal.timeout(MCP_TIMEOUT_MS),
+    });
+
+    if (!resp.ok) {
+      return { ok: false, error: `${label} tools/list HTTP ${resp.status}` };
+    }
+
+    const json = (await resp.json()) as Record<string, unknown>;
+
+    // JSON-RPC error envelope
+    if (json.error && typeof json.error === "object") {
+      const message = (json.error as { message?: string }).message ?? "unknown error";
+      return { ok: false, error: `${label} tools/list error: ${message}` };
+    }
+
+    const result = json.result as Record<string, unknown> | undefined;
+    const rawTools = result?.tools;
+    if (!Array.isArray(rawTools)) {
+      return { ok: false, error: `${label} tools/list returned no tools array` };
+    }
+
+    const tools: McpToolDescriptor[] = [];
+    for (const entry of rawTools) {
+      if (!entry || typeof entry !== "object") continue;
+      const { name, description, inputSchema, annotations } = entry as {
+        name?: unknown;
+        description?: unknown;
+        inputSchema?: unknown;
+        annotations?: unknown;
+      };
+      if (typeof name !== "string") continue; // skip nameless entries, not fatal
+      const tool: McpToolDescriptor = { name };
+      if (typeof description === "string") tool.description = description;
+      if (inputSchema && typeof inputSchema === "object") {
+        tool.inputSchema = inputSchema as Record<string, unknown>;
+      }
+      if (annotations && typeof annotations === "object") {
+        tool.annotations = annotations as Record<string, unknown>;
+      }
+      tools.push(tool);
+    }
+
+    return { ok: true, tools };
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    return { ok: false, error: `${label} tools/list failed: ${msg}` };
   }
 }
 
