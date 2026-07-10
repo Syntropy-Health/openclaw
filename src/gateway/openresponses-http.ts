@@ -74,6 +74,20 @@ const DEFAULT_BODY_BYTES = 20 * 1024 * 1024;
 const DEFAULT_MAX_URL_PARTS = 8;
 const DEFAULT_TURN_TIMEOUT_MS = 120_000;
 
+/**
+ * Fallback assistant text when a turn produced no narration and no component
+ * degradation floor applies. Also the sentinel the ui.summary floor treats as
+ * "empty" (see applyComponentSummaryFloor).
+ */
+const NO_RESPONSE_SENTINEL = "No response from OpenClaw.";
+
+/**
+ * Max ComponentDescriptors lifted from one turn's reply-payload channelData
+ * (SEC-1 bound, compromised-backend threat model): extras beyond the cap are
+ * dropped, never thrown.
+ */
+const MAX_COMPONENTS_PER_TURN = 8;
+
 /** Sentinel returned by withTurnTimeout when the per-turn deadline fires first. */
 const TURN_TIMEOUT = Symbol("openresponses-turn-timeout");
 
@@ -438,9 +452,29 @@ function extractComponentDescriptors(payloads: unknown): ComponentDescriptor[] {
     const descriptor = parseComponentDescriptor(carrier.component);
     if (descriptor) {
       descriptors.push(descriptor);
+      // SEC-1 bound: never lift more than the cap from one turn (a compromised
+      // backend must not be able to flood the client with components).
+      if (descriptors.length >= MAX_COMPONENTS_PER_TURN) {
+        break;
+      }
     }
   }
   return descriptors;
+}
+
+/**
+ * ui.summary degradation floor (A&D D5 / Component 5 / R4): when the LLM produced
+ * no narration (empty text or the no-response sentinel) but at least one component
+ * was lifted, seed the assistant message text from the FIRST descriptor's
+ * `ui.summary` so a non-component-aware client still shows the confirmation text.
+ * When the LLM already narrated real text, keep it verbatim (never append or
+ * double-narrate). Applied identically on the stream + non-stream paths.
+ */
+function applyComponentSummaryFloor(text: string, components: ComponentDescriptor[]): string {
+  if ((text.length === 0 || text === NO_RESPONSE_SENTINEL) && components.length > 0) {
+    return components[0].ui.summary;
+  }
+  return text;
 }
 
 async function runResponsesAgentCommand(params: {
@@ -772,17 +806,22 @@ export async function handleOpenResponsesHttpRequest(
         return true;
       }
 
-      const content =
+      // Lift any ComponentDescriptors riding in payload channelData into
+      // additive `component` output items (T3.1).
+      const descriptors = extractComponentDescriptors(payloads);
+      const joinedText =
         Array.isArray(payloads) && payloads.length > 0
           ? payloads
               .map((p) => (typeof p.text === "string" ? p.text : ""))
               .filter(Boolean)
               .join("\n\n")
-          : "No response from OpenClaw.";
+          : NO_RESPONSE_SENTINEL;
+      // ui.summary degradation floor (DESIGN-1): seed message text from the first
+      // descriptor's summary when the LLM narrated nothing, so a component-only
+      // turn never renders as the empty/sentinel placeholder.
+      const content = applyComponentSummaryFloor(joinedText, descriptors);
 
-      // Lift any ComponentDescriptors riding in payload channelData into
-      // additive `component` output items (T3.1). The assistant text stays as-is.
-      const componentItems = extractComponentDescriptors(payloads).map((component) =>
+      const componentItems = descriptors.map((component) =>
         createComponentOutputItem({ id: `comp_${randomUUID()}`, component }),
       );
 
@@ -870,12 +909,18 @@ export async function handleOpenResponsesHttpRequest(
       return;
     }
 
+    // ui.summary degradation floor (DESIGN-1): finalComponents is guaranteed set
+    // here (set alongside finalUsage, which gates this success terminal), so a
+    // component-only turn seeds the message text from the first descriptor's
+    // summary rather than the empty/sentinel placeholder. Identical to non-stream.
+    const finalText = applyComponentSummaryFloor(finalizeRequested.text, finalComponents);
+
     writeSseEvent(res, {
       type: "response.output_text.done",
       item_id: outputItemId,
       output_index: 0,
       content_index: 0,
-      text: finalizeRequested.text,
+      text: finalText,
     });
 
     writeSseEvent(res, {
@@ -883,12 +928,12 @@ export async function handleOpenResponsesHttpRequest(
       item_id: outputItemId,
       output_index: 0,
       content_index: 0,
-      part: { type: "output_text", text: finalizeRequested.text },
+      part: { type: "output_text", text: finalText },
     });
 
     const completedItem = createAssistantOutputItem({
       id: outputItemId,
-      text: finalizeRequested.text,
+      text: finalText,
       status: "completed",
     });
 
@@ -1001,7 +1046,7 @@ export async function handleOpenResponsesHttpRequest(
     if (evt.stream === "lifecycle") {
       const phase = evt.data?.phase;
       if (phase === "end" || phase === "error") {
-        const finalText = accumulatedText || "No response from OpenClaw.";
+        const finalText = accumulatedText || NO_RESPONSE_SENTINEL;
         const finalStatus = phase === "error" ? "failed" : "completed";
         requestFinalize(finalStatus, finalText);
       }
@@ -1155,13 +1200,16 @@ export async function handleOpenResponsesHttpRequest(
           return;
         }
 
-        const content =
+        const joinedText =
           Array.isArray(payloads) && payloads.length > 0
             ? payloads
                 .map((p) => (typeof p.text === "string" ? p.text : ""))
                 .filter(Boolean)
                 .join("\n\n")
-            : "No response from OpenClaw.";
+            : NO_RESPONSE_SENTINEL;
+        // Apply the ui.summary floor here too (finalComponents already captured
+        // above) so the emitted delta matches the terminal message text.
+        const content = applyComponentSummaryFloor(joinedText, finalComponents);
 
         accumulatedText = content;
         sawAssistantDelta = true;

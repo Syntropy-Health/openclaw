@@ -31,6 +31,14 @@ export const PENDING_ID_PATTERN = /^cnf_[A-Za-z0-9_-]{22,}$/;
 const UNSAFE_KEYS = new Set(["__proto__", "constructor", "prototype"]);
 
 /**
+ * Recursion depth guard for stripUnsafeKeys (SEC-1, CWE-674): a compromised
+ * backend could send deeply-nested channelData to exhaust the stack. Beyond this
+ * depth the sub-tree is returned as-is (unsanitized but bounded) — the descriptor
+ * then simply fails schema validation and is dropped by parseComponentDescriptor.
+ */
+const MAX_STRIP_DEPTH = 64;
+
+/**
  * Deep-sanitize a JSON.parse'd value before validation (prototype-pollution
  * guard). JSON.parse creates `__proto__` as an OWN key; zod's looseObject
  * copies unknown keys by assignment, which would turn that key into the parsed
@@ -38,10 +46,17 @@ const UNSAFE_KEYS = new Set(["__proto__", "constructor", "prototype"]);
  * readable via normal property access while bypassing every declared check.
  * Rebuilding with plain objects and dropping the unsafe keys closes the class.
  * (Object.entries only visits own enumerable keys, so the rebuild is safe.)
+ *
+ * Recursion is bounded by MAX_STRIP_DEPTH (CWE-674 stack-exhaustion guard); a
+ * sub-tree past the limit is returned without further descent (fail-silent —
+ * never throws from the lift/parse path).
  */
-function stripUnsafeKeys(value: unknown): unknown {
+function stripUnsafeKeys(value: unknown, depth = 0): unknown {
+  if (depth >= MAX_STRIP_DEPTH) {
+    return value;
+  }
   if (Array.isArray(value)) {
-    return value.map(stripUnsafeKeys);
+    return value.map((entry) => stripUnsafeKeys(entry, depth + 1));
   }
   if (value !== null && typeof value === "object") {
     const out: Record<string, unknown> = {};
@@ -49,7 +64,7 @@ function stripUnsafeKeys(value: unknown): unknown {
       if (UNSAFE_KEYS.has(key)) {
         continue;
       }
-      out[key] = stripUnsafeKeys(entry);
+      out[key] = stripUnsafeKeys(entry, depth + 1);
     }
     return out;
   }
@@ -128,7 +143,9 @@ const ComponentDescriptorBaseSchema = z.looseObject({
  * schema (or `parseComponentDescriptor`), not the un-sanitized sub-schemas.
  */
 export const ComponentDescriptorSchema = z.preprocess(
-  stripUnsafeKeys,
+  // Wrap so zod's preprocess (value, ctx) signature never leaks `ctx` into the
+  // depth accumulator — the recursion must always start at depth 0.
+  (value) => stripUnsafeKeys(value),
   ComponentDescriptorBaseSchema,
 );
 
