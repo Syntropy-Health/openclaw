@@ -26,6 +26,7 @@
 import type { AgentToolResult } from "@mariozechner/pi-agent-core";
 import { Type, type TObject, type TSchema } from "@sinclair/typebox";
 import type { OpenClawPluginApi } from "openclaw/plugin-sdk";
+import { TtlCache } from "../../syntropy/src/cache.js";
 import {
   callMcpTool,
   listMcpTools,
@@ -39,6 +40,8 @@ import {
   type ListToolsFn,
   type McpServerConfig,
 } from "./catalog.js";
+import { ConfirmGovernor } from "./governor.js";
+import { PendingConfirmStore } from "./pending-confirm-store.js";
 
 // ---------------------------------------------------------------------------
 // Config
@@ -54,6 +57,13 @@ export type SyntropyMcpServerSpec = {
   resource?: string;
   /** m2m-exchange: token-exchange endpoint path (B2). */
   exchangePath?: string;
+  /**
+   * Allowlist of this server's mutating commit-tool names (B1/B4). ONLY a tool
+   * named here can be gated by the Confirm Governor — a descriptor whose
+   * `ui.commit_tool` is not in this set renders summary-only, and a commit call
+   * to a tool not in ANY server's allowlist is never gated (nor blocked) here.
+   */
+  commitTools?: string[];
   /** Error-message label; defaults to `id`. */
   label?: string;
 };
@@ -71,7 +81,7 @@ function parseServer(raw: unknown, index: number): SyntropyMcpServerSpec {
     throw new Error(`servers[${index}] must be an object`);
   }
   const entry = raw as Record<string, unknown>;
-  const { id, baseUrl, auth, apiKeyEnv, resource, exchangePath, label } = entry;
+  const { id, baseUrl, auth, apiKeyEnv, resource, exchangePath, commitTools, label } = entry;
   if (typeof id !== "string" || !id.trim()) {
     throw new Error(`servers[${index}].id must be a non-empty string`);
   }
@@ -91,6 +101,13 @@ function parseServer(raw: unknown, index: number): SyntropyMcpServerSpec {
   if (typeof apiKeyEnv === "string") spec.apiKeyEnv = apiKeyEnv.trim();
   if (typeof resource === "string") spec.resource = resource.trim();
   if (typeof exchangePath === "string") spec.exchangePath = exchangePath.trim();
+  if (commitTools !== undefined) {
+    if (!Array.isArray(commitTools) || !commitTools.every((t) => typeof t === "string")) {
+      throw new Error(`servers[${index}] ("${id}") commitTools must be an array of strings`);
+    }
+    const names = commitTools.map((t) => (t as string).trim()).filter((t) => t.length > 0);
+    if (names.length > 0) spec.commitTools = names;
+  }
   if (typeof label === "string" && label.trim()) spec.label = label.trim();
   return spec;
 }
@@ -167,6 +184,12 @@ export type SyntropyMcpOverrides = {
   clearIntervalFn?: (handle: unknown) => void;
   setTimeoutFn?: (fn: () => void, ms: number) => unknown;
   clearTimeoutFn?: (handle: unknown) => void;
+  /** B4: inject a pre-built pending store (tests); default real. */
+  pendingStore?: PendingConfirmStore;
+  /** B4: inject a pre-built governor (tests); default real over pendingStore. */
+  governor?: ConfirmGovernor;
+  /** B4: injectable pending-id source for the default store (tests). */
+  mintId?: () => string;
 };
 
 // ---------------------------------------------------------------------------
@@ -227,13 +250,23 @@ type ServerRuntime = {
   session: McpSession;
 };
 
+/** Marker key the producer bridge (A4) lifts into a reply payload's channelData. */
+export const OPENCLAW_COMPONENT_MARKER = "__openclaw_component";
+
 function buildAgentTool(params: {
   entry: CatalogEntry;
   server: ServerRuntime;
   catalog: ToolCatalog;
   callTool: CallToolFn;
+  governor: ConfirmGovernor;
+  /** Session key from the tool-factory ctx — the seam that resolves externalId. */
+  sessionKey: string;
+  /** Resolve the verified externalId cached by before_agent_start for a session. */
+  resolveExternalId: (sessionKey: string) => string | undefined;
+  logger: OpenClawPluginApi["logger"];
 }) {
-  const { entry, server, catalog, callTool } = params;
+  const { entry, server, catalog, callTool, governor, sessionKey, resolveExternalId, logger } =
+    params;
   const surfacedName = entry.descriptor.name;
   // The catalog prefixes colliding names with "<serverId>:"; the wire name
   // the MCP server knows is the unprefixed one.
@@ -271,7 +304,41 @@ function buildAgentTool(params: {
         await catalog.refresh(server.id);
         result = await callOnce();
       }
-      return toAgentResult(result);
+
+      const agentResult = toAgentResult(result);
+      // Defense-in-depth (SEC-FORGE-MARKER): the component marker is a
+      // GATEWAY-ONLY channel. Strip any pre-existing marker a backend smuggled
+      // into the tool-result details BEFORE preview, so only a marker the
+      // Governor itself stamps can ever reach the producer bridge.
+      if (agentResult.details && typeof agentResult.details === "object") {
+        delete (agentResult.details as Record<string, unknown>)[OPENCLAW_COMPONENT_MARKER];
+      }
+      if (result.ok) {
+        // T4.2 PREVIEW: if this initiate result carries an allowlisted confirm
+        // descriptor, the Governor mints a pending + stamps pending_id/expiry.
+        // The stamped descriptor is marked for the producer bridge (A4) to lift
+        // into the reply payload's channelData; failure never breaks the call.
+        try {
+          const previewed = governor.preview({
+            toolResult: agentResult,
+            externalId: resolveExternalId(sessionKey),
+            sessionKey,
+            serverId: server.id,
+          });
+          if (previewed) {
+            agentResult.details = {
+              ...(agentResult.details as Record<string, unknown>),
+              [OPENCLAW_COMPONENT_MARKER]: {
+                type: "component",
+                component: previewed.descriptor,
+              },
+            };
+          }
+        } catch (err) {
+          logger.error(`syntropy-mcp: preview error for "${surfacedName}": ${err}`);
+        }
+      }
+      return agentResult;
     },
   };
 }
@@ -389,6 +456,40 @@ export function createSyntropyMcpPlugin(overrides: SyntropyMcpOverrides = {}) {
       });
       const serverIds = catalogServers.map((server) => server.id);
 
+      // ------------------------------------------------------------------
+      // B4 Confirm Governor — preview/confirm/commit-guard over the pending store
+      // ------------------------------------------------------------------
+
+      // Per-server commit-tool allowlist (B1/B4). Only servers that actually
+      // registered a catalog server contribute — a fail-closed/excluded server
+      // gates nothing. Empty for a server without a commitTools config.
+      const registeredIds = new Set(serverIds);
+      const commitToolsByServer = new Map<string, Set<string>>();
+      for (const spec of config.servers) {
+        if (!registeredIds.has(spec.id)) continue;
+        commitToolsByServer.set(spec.id, new Set(spec.commitTools ?? []));
+      }
+
+      const hasGatedCommitTools = [...commitToolsByServer.values()].some((set) => set.size > 0);
+
+      const pendingStore =
+        overrides.pendingStore ??
+        new PendingConfirmStore({ now: overrides.now, randomId: overrides.mintId });
+      const governor =
+        overrides.governor ??
+        new ConfirmGovernor(pendingStore, { commitToolsByServer, now: overrides.now });
+
+      // Seam: before_agent_start has ctx.externalId (verified caller) + sessionKey;
+      // the sync tool factory and the before_tool_call guard have sessionKey only.
+      // Cache externalId by sessionKey (bounded TTL, mirrors B1's user cache) so
+      // both later stages resolve the identity the store isolates on.
+      const externalIdBySession = new TtlCache<string, string>({
+        ttlMs: 10 * 60_000,
+        maxSize: 10_000,
+      });
+      const resolveExternalId = (sessionKey: string): string | undefined =>
+        sessionKey ? externalIdBySession.get(sessionKey) : undefined;
+
       api.logger.info(
         `syntropy-mcp: enabled (servers=${serverIds.join(",") || "none"}, refresh=${config.refreshSeconds}s)`,
       );
@@ -431,21 +532,36 @@ export function createSyntropyMcpPlugin(overrides: SyntropyMcpOverrides = {}) {
         for (const id of serverIds) {
           if (catalog.needsRefresh(id)) void catalog.refresh(id);
         }
+        // The store owns no timer (mirrors the catalog's "never self-schedule"
+        // rule); the plugin's tick reclaims expired pendings.
+        pendingStore.sweepExpired();
       }, config.refreshSeconds * 1000);
 
       // ------------------------------------------------------------------
       // Tool factory (SYNC) — snapshot of the catalog at agent start
       // ------------------------------------------------------------------
 
-      api.registerTool(() => {
+      api.registerTool((ctx) => {
         try {
           const entries = catalog.getToolDescriptors();
           if (entries.length === 0) return null;
+          const sessionKey = ctx.sessionKey ?? "";
           const tools = [];
           for (const entry of entries) {
             const server = runtimes.get(entry.serverId);
             if (!server) continue; // defensive: catalog only knows registered servers
-            tools.push(buildAgentTool({ entry, server, catalog, callTool }));
+            tools.push(
+              buildAgentTool({
+                entry,
+                server,
+                catalog,
+                callTool,
+                governor,
+                sessionKey,
+                resolveExternalId,
+                logger: api.logger,
+              }),
+            );
           }
           return tools.length > 0 ? tools : null;
         } catch (err) {
@@ -460,19 +576,77 @@ export function createSyntropyMcpPlugin(overrides: SyntropyMcpOverrides = {}) {
 
       api.on(
         "before_agent_start",
-        async () => {
+        async (event, ctx) => {
           try {
+            // Cache the verified caller identity for this session so the sync
+            // tool factory (preview) and the before_tool_call guard can resolve
+            // it (their contexts carry sessionKey only). On an identity DOWNGRADE
+            // (same session, no verified externalId this turn) DELETE the cached
+            // identity — fail-closed, so a stale identity can never authorize a
+            // replayed pending_id on an unverified turn.
+            const sessionKey = ctx?.sessionKey ?? "";
+            if (sessionKey) {
+              if (ctx?.externalId) externalIdBySession.set(sessionKey, ctx.externalId);
+              else externalIdBySession.delete(sessionKey);
+            }
+
+            // T4.3 CONFIRM PARSE: if this raw turn is a CONFIRM/CANCEL directive,
+            // validate + stage (or cancel) as a side effect. The staging result
+            // does not change the binding (the guard does that) but its soft
+            // note / hard error is surfaced so the user gets a re-prompt.
+            let confirmNote: string | undefined;
+            if (typeof event?.prompt === "string") {
+              const parsed = governor.parseConfirmTurn(event.prompt, ctx?.externalId ?? undefined);
+              if (parsed.error) {
+                confirmNote = `[SYNTROPY_MCP] Your confirmation was not applied: ${parsed.error}. Re-send the confirmation with valid values.`;
+              } else if (parsed.note) {
+                confirmNote = `[SYNTROPY_MCP] ${parsed.note}`;
+              }
+            }
+
             const names = catalog.getToolDescriptors().map((entry) => entry.descriptor.name);
-            if (names.length === 0) return {};
-            return {
-              prependContext: `[SYNTROPY_MCP] Discovered MCP tools available: ${names.join(", ")}`,
-            };
+            if (names.length === 0) {
+              return confirmNote ? { prependContext: confirmNote } : {};
+            }
+            let prependContext = `[SYNTROPY_MCP] Discovered MCP tools available: ${names.join(", ")}`;
+            // Advertise the confirm protocol ONLY when a commit tool is gated, so
+            // a plain discovery config keeps its single-line context.
+            if (hasGatedCommitTools) {
+              prependContext +=
+                "\n[SYNTROPY_MCP] When the user sends a `<CONFIRM pending_id=… fields={…}>` turn, " +
+                "call the named commit tool passing that pending_id — the gateway binds the reviewed values.";
+            }
+            if (confirmNote) prependContext += `\n${confirmNote}`;
+            return { prependContext };
           } catch (err) {
             api.logger.error(`syntropy-mcp: before_agent_start error: ${err}`);
             return {};
           }
         },
         { priority: 30 },
+      );
+
+      // ------------------------------------------------------------------
+      // Hook: before_tool_call (priority 40) — T4.4 COMMIT GUARD (the CRIT fix)
+      // ------------------------------------------------------------------
+
+      api.on(
+        "before_tool_call",
+        async (event, ctx) => {
+          try {
+            return governor.guardBeforeToolCall(event, resolveExternalId(ctx?.sessionKey ?? ""));
+          } catch (err) {
+            api.logger.error(`syntropy-mcp: before_tool_call guard error: ${err}`);
+            // Fail-closed: if the guard itself throws on a commit tool, block it.
+            // Key on the SURFACED name (via the governor's resolver) so a
+            // collision-prefixed commit tool is still caught here.
+            if (governor.isGatedCommitTool(event.toolName)) {
+              return { block: true, blockReason: "Confirmation guard error — action blocked." };
+            }
+            return undefined;
+          }
+        },
+        { priority: 40 },
       );
 
       // ------------------------------------------------------------------

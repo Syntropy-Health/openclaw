@@ -963,6 +963,9 @@ export async function runEmbeddedPiAgent(
             toolResultFormat: resolvedToolResultFormat,
             suppressToolErrorWarnings: params.suppressToolErrorWarnings,
             inlineToolResultsAllowed: false,
+            // A4: surface any component descriptor a tool result marked
+            // (Confirm Governor) onto the assistant payload's channelData.
+            toolResultMessages: attempt.messagesSnapshot,
           });
 
           // Timeout aborts can leave the run without any assistant payloads.

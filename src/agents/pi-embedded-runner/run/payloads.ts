@@ -4,6 +4,7 @@ import type { ReasoningLevel, VerboseLevel } from "../../../auto-reply/thinking.
 import { isSilentReplyText, SILENT_REPLY_TOKEN } from "../../../auto-reply/tokens.js";
 import { formatToolAggregate } from "../../../auto-reply/tool-meta.js";
 import type { OpenClawConfig } from "../../../config/config.js";
+import { parseComponentDescriptor } from "../../../gateway/component-descriptor.schema.js";
 import {
   BILLING_ERROR_USER_MESSAGE,
   formatAssistantErrorText,
@@ -19,6 +20,78 @@ import {
   formatReasoningMessage,
 } from "../../pi-embedded-utils.js";
 import { isLikelyMutatingToolName } from "../../tool-mutation.js";
+
+/**
+ * A4 PRODUCER BRIDGE — reserved tool-result marker → reply-payload channelData.
+ *
+ * The syntropy-mcp Confirm Governor stamps a confirmation ComponentDescriptor
+ * and marks it on the tool result's `details.__openclaw_component` as the wire
+ * shape `{ type: "component", component }`. This bridge lifts that marker onto
+ * the assistant reply payload's `channelData`, which is exactly the shape the
+ * gateway's `extractComponentDescriptors` (B3) consumes. The marker string is a
+ * cross-boundary contract with the plugin; keep the two literals in sync.
+ *
+ * BEHAVIOR-PRESERVING: with no marked tool result the lift returns undefined and
+ * no `channelData` is attached — payloads are byte-identical to before.
+ */
+export const OPENCLAW_COMPONENT_MARKER = "__openclaw_component";
+
+/**
+ * Scan the run's tool-result messages for the reserved component marker and
+ * return the channelData carrier to attach. LAST-WINS: the ACTUAL last valid
+ * marker of the turn is surfaced (we iterate to the end rather than stopping at
+ * an arbitrary count). Only ONE component is ever surfaced here; the gateway
+ * consumer (openresponses-http.ts, SEC-1) enforces the per-turn component cap.
+ * Returns undefined when no valid marker is present.
+ */
+export function extractComponentChannelData(
+  messages: ReadonlyArray<{ role?: string; details?: unknown }> | undefined,
+): Record<string, unknown> | undefined {
+  if (!messages) {
+    return undefined;
+  }
+  let carrier: Record<string, unknown> | undefined;
+  for (const message of messages) {
+    if (!message || message.role !== "toolResult") {
+      continue;
+    }
+    const details = message.details;
+    if (!details || typeof details !== "object") {
+      continue;
+    }
+    const marker = (details as Record<string, unknown>)[OPENCLAW_COMPONENT_MARKER];
+    if (!marker || typeof marker !== "object") {
+      continue;
+    }
+    const shape = marker as { type?: unknown; component?: unknown };
+    if (shape.type !== "component" || !shape.component || typeof shape.component !== "object") {
+      continue;
+    }
+    // Defense-in-depth: re-validate the descriptor on the channel path (the
+    // gateway re-validates too, but this path may not). A forged/invalid
+    // descriptor is dropped rather than surfaced.
+    if (!parseComponentDescriptor(shape.component)) {
+      continue;
+    }
+    // Last-wins: the most recent valid component of the turn is surfaced.
+    carrier = { type: "component", component: shape.component };
+  }
+  return carrier;
+}
+
+/** The `ui.summary` of a channelData carrier, if present as a non-empty string. */
+function carrierSummaryText(carrier: Record<string, unknown>): string | undefined {
+  const component = carrier.component;
+  if (!component || typeof component !== "object") {
+    return undefined;
+  }
+  const ui = (component as Record<string, unknown>).ui;
+  if (!ui || typeof ui !== "object") {
+    return undefined;
+  }
+  const summary = (ui as Record<string, unknown>).summary;
+  return typeof summary === "string" && summary.trim() ? summary : undefined;
+}
 
 type ToolMetaEntry = { toolName: string; meta?: string };
 type LastToolError = {
@@ -77,6 +150,11 @@ export function buildEmbeddedRunPayloads(params: {
   toolResultFormat?: ToolResultFormat;
   suppressToolErrorWarnings?: boolean;
   inlineToolResultsAllowed: boolean;
+  /**
+   * A4: the run's tool-result messages, scanned for the reserved component
+   * marker. Omitted/undefined ⇒ no channelData is attached (behavior-preserving).
+   */
+  toolResultMessages?: ReadonlyArray<{ role?: string; details?: unknown }>;
 }): Array<{
   text?: string;
   mediaUrl?: string;
@@ -86,6 +164,7 @@ export function buildEmbeddedRunPayloads(params: {
   audioAsVoice?: boolean;
   replyToTag?: boolean;
   replyToCurrent?: boolean;
+  channelData?: Record<string, unknown>;
 }> {
   const replyItems: Array<{
     text: string;
@@ -285,7 +364,7 @@ export function buildEmbeddedRunPayloads(params: {
   }
 
   const hasAudioAsVoiceTag = replyItems.some((item) => item.audioAsVoice);
-  return replyItems
+  const built = replyItems
     .map((item) => ({
       text: item.text?.trim() ? item.text.trim() : undefined,
       mediaUrls: item.media?.length ? item.media : undefined,
@@ -304,5 +383,41 @@ export function buildEmbeddedRunPayloads(params: {
         return false;
       }
       return true;
-    });
+    }) as Array<{
+    text?: string;
+    mediaUrl?: string;
+    mediaUrls?: string[];
+    replyToId?: string;
+    isError?: boolean;
+    audioAsVoice?: boolean;
+    replyToTag?: boolean;
+    replyToCurrent?: boolean;
+    channelData?: Record<string, unknown>;
+  }>;
+
+  // A4: lift a marked component onto the assistant text payload's channelData.
+  // Attach to the LAST text-bearing, non-error payload — the turn's narration
+  // the confirmation UI accompanies. No marker ⇒ nothing attached.
+  const channelData = extractComponentChannelData(params.toolResultMessages);
+  if (channelData) {
+    let attached = false;
+    for (let i = built.length - 1; i >= 0; i--) {
+      if (built[i].text && !built[i].isError) {
+        built[i].channelData = channelData;
+        attached = true;
+        break;
+      }
+    }
+    // CODE-SILENT-DROP: a pending was already minted, but this turn produced no
+    // eligible text payload (silent-LLM / media-only / error-only). Synthesize a
+    // minimal reply seeded from the component's ui.summary so the confirmation
+    // still egresses — the user must always receive the pending_id.
+    if (!attached) {
+      const summary = carrierSummaryText(channelData);
+      if (summary) {
+        built.push({ text: summary, channelData });
+      }
+    }
+  }
+  return built;
 }
