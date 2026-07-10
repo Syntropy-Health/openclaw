@@ -45,6 +45,7 @@ import { handleGatewayPostJsonEndpoint } from "./http-endpoint-helpers.js";
 import {
   deriveUserScopeFromSub,
   resolveAgentIdForRequest,
+  resolveChannelFromHeader,
   resolveSessionKey,
 } from "./http-utils.js";
 import {
@@ -452,6 +453,8 @@ async function runResponsesAgentCommand(params: {
   /** Verified external caller identity (Clerk JWT `sub`); threaded to memory-graphiti (#834/#836). */
   externalId: string | null;
   runId: string;
+  /** Presentation-only channel (allowlisted; defaults to "webchat"). */
+  channel?: string;
   deps: ReturnType<typeof createDefaultDeps>;
 }) {
   return agentCommand(
@@ -465,7 +468,7 @@ async function runResponsesAgentCommand(params: {
       externalId: params.externalId,
       runId: params.runId,
       deliver: false,
-      messageChannel: "webchat",
+      messageChannel: params.channel ?? "webchat",
       bestEffortDeliver: false,
     },
     defaultRuntime,
@@ -628,6 +631,9 @@ export async function handleOpenResponsesHttpRequest(
   // client-sent `user` field). When present it partitions the session/memory.
   const userScope = deriveUserScopeFromSub(handled.externalId);
   const sessionKey = resolveOpenResponsesSessionKey({ req, agentId, user, userScope });
+  // Presentation-only channel (allowlisted). Feeds messageChannel ONLY — never
+  // auth/externalId/userScope/sessionKey (A&D §S10). Unknown/absent ⇒ webchat.
+  const channel = resolveChannelFromHeader(req) ?? "webchat";
 
   // τ-metering (§9): per-user_scope budget. No-op for non-Clerk requests
   // (userScope undefined). On exhaustion → 429 + Retry-After, before any agent
@@ -684,6 +690,7 @@ export async function handleOpenResponsesHttpRequest(
           sessionKey,
           externalId: handled.externalId ?? null,
           runId: responseId,
+          channel,
           deps,
         }),
         limits.turnTimeoutMs,
@@ -1018,6 +1025,7 @@ export async function handleOpenResponsesHttpRequest(
           sessionKey,
           externalId: handled.externalId ?? null,
           runId: responseId,
+          channel,
           deps,
         }),
         limits.turnTimeoutMs,

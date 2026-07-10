@@ -17,6 +17,7 @@ import { handleGatewayPostJsonEndpoint } from "./http-endpoint-helpers.js";
 import {
   deriveUserScopeFromSub,
   resolveAgentIdForRequest,
+  resolveChannelFromHeader,
   resolveSessionKey,
 } from "./http-utils.js";
 import type { TauMeter } from "./tau-meter.js";
@@ -177,6 +178,9 @@ export async function handleOpenAiHttpRequest(
   // L1 user_scope server-derived from the verified Clerk `sub` (never body `user`).
   const userScope = deriveUserScopeFromSub(handled.externalId);
   const sessionKey = resolveOpenAiSessionKey({ req, agentId, user, userScope });
+  // Presentation-only channel (allowlisted). Feeds messageChannel ONLY — never
+  // auth/externalId/userScope/sessionKey (A&D §S10). Unknown/absent ⇒ webchat.
+  const channel = resolveChannelFromHeader(req) ?? "webchat";
   const prompt = buildAgentPrompt(payload.messages);
   if (!prompt.message) {
     sendJson(res, 400, {
@@ -209,7 +213,7 @@ export async function handleOpenAiHttpRequest(
           externalId: handled.externalId ?? null,
           runId,
           deliver: false,
-          messageChannel: "webchat",
+          messageChannel: channel,
           bestEffortDeliver: false,
         },
         defaultRuntime,
@@ -333,7 +337,7 @@ export async function handleOpenAiHttpRequest(
           externalId: handled.externalId ?? null,
           runId,
           deliver: false,
-          messageChannel: "webchat",
+          messageChannel: channel,
           bestEffortDeliver: false,
         },
         defaultRuntime,

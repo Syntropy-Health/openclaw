@@ -49,6 +49,38 @@ export function resolveAgentIdFromHeader(req: IncomingMessage): string | undefin
   return normalizeAgentId(raw);
 }
 
+/**
+ * Default allowlist for the presentation-only `x-openclaw-channel` header.
+ *
+ * The header influences ONLY the downstream `messageChannel` (delivery/markdown
+ * presentation via MARKDOWN_CAPABLE_CHANNELS). It must NEVER let an arbitrary
+ * client string flow into `messageChannel`, so it is a strict allowlist and an
+ * unknown/absent value resolves to `undefined` (the caller then defaults to the
+ * behavior-preserving `"webchat"`).
+ */
+const DEFAULT_CHANNEL_ALLOWLIST: readonly string[] = ["webchat", "shrinemobile"];
+
+/**
+ * Resolve the presentation-only channel from the `x-openclaw-channel` request
+ * header. Trims and lowercases the value and returns it ONLY when it is in the
+ * allowlist; otherwise (unknown, absent, or empty) returns `undefined` so the
+ * caller can default to `"webchat"`. Never throws.
+ *
+ * INVARIANT (A&D §S10): this value feeds ONLY `messageChannel` — it must not
+ * influence auth, externalId, userScope, or sessionKey derivation.
+ */
+export function resolveChannelFromHeader(
+  req: IncomingMessage,
+  opts?: { allowlist?: string[] },
+): string | undefined {
+  const raw = getHeader(req, "x-openclaw-channel")?.trim().toLowerCase();
+  if (!raw) {
+    return undefined;
+  }
+  const allowlist = opts?.allowlist ?? DEFAULT_CHANNEL_ALLOWLIST;
+  return allowlist.includes(raw) ? raw : undefined;
+}
+
 export function resolveAgentIdFromModel(model: string | undefined): string | undefined {
   const raw = model?.trim();
   if (!raw) {
