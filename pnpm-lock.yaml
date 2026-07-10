@@ -552,6 +552,8 @@ importers:
         specifier: workspace:*
         version: link:../..
 
+  extensions/syntropy-mcp: {}
+
   extensions/telegram:
     devDependencies:
       openclaw:

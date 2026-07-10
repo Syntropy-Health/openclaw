@@ -68,10 +68,15 @@ else
 fi
 
 echo "==> Verify installed version"
-INSTALLED_VERSION="$(openclaw --version 2>/dev/null | head -n 1 | tr -d '\r')"
-echo "installed=$INSTALLED_VERSION expected=$EXPECTED_VERSION"
-if [[ "$INSTALLED_VERSION" != "$EXPECTED_VERSION" ]]; then
-  echo "ERROR: expected openclaw@$EXPECTED_VERSION, got openclaw@$INSTALLED_VERSION" >&2
+# The CLI may print a bare version ("2026.6.11") OR a banner-style line
+# ("🦞 OpenClaw 2026.6.11 (abc1234) — tagline") first — extract the version
+# token instead of exact-matching the whole line (fixes the install-smoke
+# false-negative on the banner format).
+RAW_VERSION_OUTPUT="$(openclaw --version 2>/dev/null | head -n 1 | tr -d '\r')"
+INSTALLED_VERSION="$(printf '%s' "$RAW_VERSION_OUTPUT" | grep -oE '[0-9]+\.[0-9]+\.[0-9]+([.-][0-9A-Za-z.]+)?' | head -n 1)"
+echo "installed=$INSTALLED_VERSION expected=$EXPECTED_VERSION raw=$RAW_VERSION_OUTPUT"
+if [[ -z "$INSTALLED_VERSION" || "$INSTALLED_VERSION" != "$EXPECTED_VERSION" ]]; then
+  echo "ERROR: expected openclaw@$EXPECTED_VERSION, got openclaw@${INSTALLED_VERSION:-<unparsed>} (raw: $RAW_VERSION_OUTPUT)" >&2
   exit 1
 fi
 

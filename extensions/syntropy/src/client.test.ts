@@ -125,6 +125,38 @@ describe("callSyntropyTool", () => {
     expect(res.error).toMatch(/ECONNREFUSED/);
   });
 
+  it("sends the MCP-required Accept header (application/json, text/event-stream)", async () => {
+    const mockFetch = vi.mocked(globalThis.fetch).mockResolvedValue(
+      new Response(JSON.stringify({ jsonrpc: "2.0", result: { content: [] }, id: "x" }), {
+        status: 200,
+      }),
+    );
+
+    await callSyntropyTool(BASE_URL, TOKEN, "log_food", {});
+
+    const [, init] = mockFetch.mock.calls[0]!;
+    const headers = init?.headers as Record<string, string>;
+    expect(headers["Accept"]).toBe("application/json, text/event-stream");
+  });
+
+  it("parses an SSE-framed (text/event-stream) result envelope, unwrapping content[] text", async () => {
+    const envelope = JSON.stringify({
+      jsonrpc: "2.0",
+      id: "1",
+      result: { content: [{ type: "text", text: '{"meal_id":42,"calories":95}' }] },
+    });
+    vi.mocked(globalThis.fetch).mockResolvedValue(
+      new Response(`event: message\ndata: ${envelope}\n\n`, {
+        status: 200,
+        headers: { "Content-Type": "text/event-stream" },
+      }),
+    );
+
+    const res = await callSyntropyTool(BASE_URL, TOKEN, "log_food", {});
+    expect(res.ok).toBe(true);
+    expect(res.data).toEqual({ meal_id: 42, calories: 95 });
+  });
+
   it("handles raw JSON-RPC results without an MCP content array", async () => {
     vi.mocked(globalThis.fetch).mockResolvedValue(
       new Response(JSON.stringify({ jsonrpc: "2.0", id: "x", result: { ok: true, count: 3 } }), {

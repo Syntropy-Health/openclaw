@@ -1,0 +1,12 @@
+{
+  "name": "@openclaw/syntropy-mcp",
+  "version": "2026.2.1",
+  "private": true,
+  "description": "Syntropy MCP dynamic tool surface — per-server discovered-tool catalog",
+  "type": "module",
+  "openclaw": {
+    "extensions": [
+      "./src/index.ts"
+    ]
+  }
+}
