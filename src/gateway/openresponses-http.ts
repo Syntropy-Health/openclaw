@@ -36,6 +36,10 @@ import {
 } from "./agent-prompt.js";
 import type { AuthRateLimiter } from "./auth-rate-limit.js";
 import type { ResolvedGatewayAuth } from "./auth.js";
+import {
+  parseComponentDescriptor,
+  type ComponentDescriptor,
+} from "./component-descriptor.schema.js";
 import { sendJson, sendRateLimited, setSseHeaders, writeDone } from "./http-common.js";
 import { handleGatewayPostJsonEndpoint } from "./http-endpoint-helpers.js";
 import {
@@ -399,6 +403,45 @@ function createAssistantOutputItem(params: {
   };
 }
 
+function createComponentOutputItem(params: {
+  id: string;
+  component: ComponentDescriptor;
+}): OutputItem {
+  return {
+    type: "component",
+    id: params.id,
+    component: params.component,
+  };
+}
+
+/**
+ * Lift ComponentDescriptors (C1 contract) that ride in reply payloads'
+ * `channelData` (wire shape `{ type: "component", component: <descriptor> }`).
+ * A payload whose channelData is not a component, or whose descriptor fails to
+ * parse, is dropped silently — never crashes the chat path.
+ */
+function extractComponentDescriptors(payloads: unknown): ComponentDescriptor[] {
+  if (!Array.isArray(payloads)) {
+    return [];
+  }
+  const descriptors: ComponentDescriptor[] = [];
+  for (const payload of payloads) {
+    const channelData = (payload as { channelData?: unknown } | null | undefined)?.channelData;
+    if (!channelData || typeof channelData !== "object") {
+      continue;
+    }
+    const carrier = channelData as { type?: unknown; component?: unknown };
+    if (carrier.type !== "component") {
+      continue;
+    }
+    const descriptor = parseComponentDescriptor(carrier.component);
+    if (descriptor) {
+      descriptors.push(descriptor);
+    }
+  }
+  return descriptors;
+}
+
 async function runResponsesAgentCommand(params: {
   message: string;
   images: ImageContent[];
@@ -665,7 +708,11 @@ export async function handleOpenResponsesHttpRequest(
         return true;
       }
 
-      const payloads = (result as { payloads?: Array<{ text?: string }> } | null)?.payloads;
+      const payloads = (
+        result as {
+          payloads?: Array<{ text?: string; channelData?: Record<string, unknown> }>;
+        } | null
+      )?.payloads;
       const usage = extractUsageFromResult(result);
       // Record τ spend for the budget (turn count when usage is absent).
       opts.tauMeter?.record(userScope, tauTurnCost(usage));
@@ -726,12 +773,19 @@ export async function handleOpenResponsesHttpRequest(
               .join("\n\n")
           : "No response from OpenClaw.";
 
+      // Lift any ComponentDescriptors riding in payload channelData into
+      // additive `component` output items (T3.1). The assistant text stays as-is.
+      const componentItems = extractComponentDescriptors(payloads).map((component) =>
+        createComponentOutputItem({ id: `comp_${randomUUID()}`, component }),
+      );
+
       const response = createResponseResource({
         id: responseId,
         model,
         status: "completed",
         output: [
           createAssistantOutputItem({ id: outputItemId, text: content, status: "completed" }),
+          ...componentItems,
         ],
         usage,
       });
@@ -764,6 +818,10 @@ export async function handleOpenResponsesHttpRequest(
   let finalUsage: Usage | undefined;
   let finalizeRequested: { status: ResponseResource["status"]; text: string } | null = null;
   let finalError: { code: string; message: string } | null = null;
+  // ComponentDescriptors lifted from the final payloads' channelData (T3.1),
+  // captured where finalUsage is set (see the async run block below). Emitted as
+  // additive `component` output items on the success terminal only.
+  let finalComponents: ComponentDescriptor[] = [];
 
   const maybeFinalize = () => {
     if (closed) {
@@ -833,11 +891,30 @@ export async function handleOpenResponsesHttpRequest(
       item: completedItem,
     });
 
+    // Additive `component` output items (T3.1) at output_index 1,2,… — mirrors the
+    // function_call streaming block. Success terminal only; none on failure.
+    const componentItems = finalComponents.map((component) =>
+      createComponentOutputItem({ id: `comp_${randomUUID()}`, component }),
+    );
+    componentItems.forEach((item, offset) => {
+      const outputIndex = offset + 1;
+      writeSseEvent(res, {
+        type: "response.output_item.added",
+        output_index: outputIndex,
+        item,
+      });
+      writeSseEvent(res, {
+        type: "response.output_item.done",
+        output_index: outputIndex,
+        item,
+      });
+    });
+
     const finalResponse = createResponseResource({
       id: responseId,
       model,
       status: finalizeRequested.status,
-      output: [completedItem],
+      output: [completedItem, ...componentItems],
       usage,
     });
 
@@ -961,6 +1038,12 @@ export async function handleOpenResponsesHttpRequest(
       }
 
       finalUsage = extractUsageFromResult(result);
+      // Capture ComponentDescriptors from the resolved payloads' channelData so
+      // the success terminal (maybeFinalize) can emit them (T3.1). maybeFinalize
+      // never proceeds until finalUsage is set, so this runs before it finalizes.
+      finalComponents = extractComponentDescriptors(
+        (result as { payloads?: unknown } | null)?.payloads,
+      );
 
       // Surface an agent-run failure as the contract `response.failed` terminal
       // (§85/§99) instead of dressing the error up as a completed reply. Force the
