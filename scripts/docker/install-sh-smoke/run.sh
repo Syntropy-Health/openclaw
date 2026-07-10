@@ -59,11 +59,16 @@ fi
 if [[ -n "${OPENCLAW_INSTALL_LATEST_OUT:-}" ]]; then
   printf "%s" "$LATEST_VERSION" > "${OPENCLAW_INSTALL_LATEST_OUT:-}"
 fi
-INSTALLED_VERSION="$("$CLI_NAME" --version 2>/dev/null | head -n 1 | tr -d '\r')"
-echo "cli=$CLI_NAME installed=$INSTALLED_VERSION expected=$LATEST_VERSION"
+# `--version` may print a bare version ("2026.6.11") OR a banner-style line
+# ("🦞 OpenClaw 2026.6.11 (abc1234) — tagline"); extract the version token
+# instead of exact-matching the whole line (fixes the install-smoke
+# false-negative on the banner format).
+RAW_VERSION_OUTPUT="$("$CLI_NAME" --version 2>/dev/null | head -n 1 | tr -d '\r')"
+INSTALLED_VERSION="$(printf '%s' "$RAW_VERSION_OUTPUT" | grep -oE '[0-9]+\.[0-9]+\.[0-9]+([.-][0-9A-Za-z.]+)?' | head -n 1)"
+echo "cli=$CLI_NAME installed=$INSTALLED_VERSION expected=$LATEST_VERSION raw=$RAW_VERSION_OUTPUT"
 
-if [[ "$INSTALLED_VERSION" != "$LATEST_VERSION" ]]; then
-  echo "ERROR: expected ${CLI_NAME}@${LATEST_VERSION}, got ${CLI_NAME}@${INSTALLED_VERSION}" >&2
+if [[ -z "$INSTALLED_VERSION" || "$INSTALLED_VERSION" != "$LATEST_VERSION" ]]; then
+  echo "ERROR: expected ${CLI_NAME}@${LATEST_VERSION}, got ${CLI_NAME}@${INSTALLED_VERSION:-<unparsed>} (raw: $RAW_VERSION_OUTPUT)" >&2
   exit 1
 fi
 
