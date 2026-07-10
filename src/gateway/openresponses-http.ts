@@ -36,11 +36,16 @@ import {
 } from "./agent-prompt.js";
 import type { AuthRateLimiter } from "./auth-rate-limit.js";
 import type { ResolvedGatewayAuth } from "./auth.js";
+import {
+  parseComponentDescriptor,
+  type ComponentDescriptor,
+} from "./component-descriptor.schema.js";
 import { sendJson, sendRateLimited, setSseHeaders, writeDone } from "./http-common.js";
 import { handleGatewayPostJsonEndpoint } from "./http-endpoint-helpers.js";
 import {
   deriveUserScopeFromSub,
   resolveAgentIdForRequest,
+  resolveChannelFromHeader,
   resolveSessionKey,
 } from "./http-utils.js";
 import {
@@ -68,6 +73,20 @@ type OpenResponsesHttpOptions = {
 const DEFAULT_BODY_BYTES = 20 * 1024 * 1024;
 const DEFAULT_MAX_URL_PARTS = 8;
 const DEFAULT_TURN_TIMEOUT_MS = 120_000;
+
+/**
+ * Fallback assistant text when a turn produced no narration and no component
+ * degradation floor applies. Also the sentinel the ui.summary floor treats as
+ * "empty" (see applyComponentSummaryFloor).
+ */
+const NO_RESPONSE_SENTINEL = "No response from OpenClaw.";
+
+/**
+ * Max ComponentDescriptors lifted from one turn's reply-payload channelData
+ * (SEC-1 bound, compromised-backend threat model): extras beyond the cap are
+ * dropped, never thrown.
+ */
+const MAX_COMPONENTS_PER_TURN = 8;
 
 /** Sentinel returned by withTurnTimeout when the per-turn deadline fires first. */
 const TURN_TIMEOUT = Symbol("openresponses-turn-timeout");
@@ -399,6 +418,65 @@ function createAssistantOutputItem(params: {
   };
 }
 
+function createComponentOutputItem(params: {
+  id: string;
+  component: ComponentDescriptor;
+}): OutputItem {
+  return {
+    type: "component",
+    id: params.id,
+    component: params.component,
+  };
+}
+
+/**
+ * Lift ComponentDescriptors (C1 contract) that ride in reply payloads'
+ * `channelData` (wire shape `{ type: "component", component: <descriptor> }`).
+ * A payload whose channelData is not a component, or whose descriptor fails to
+ * parse, is dropped silently — never crashes the chat path.
+ */
+function extractComponentDescriptors(payloads: unknown): ComponentDescriptor[] {
+  if (!Array.isArray(payloads)) {
+    return [];
+  }
+  const descriptors: ComponentDescriptor[] = [];
+  for (const payload of payloads) {
+    const channelData = (payload as { channelData?: unknown } | null | undefined)?.channelData;
+    if (!channelData || typeof channelData !== "object") {
+      continue;
+    }
+    const carrier = channelData as { type?: unknown; component?: unknown };
+    if (carrier.type !== "component") {
+      continue;
+    }
+    const descriptor = parseComponentDescriptor(carrier.component);
+    if (descriptor) {
+      descriptors.push(descriptor);
+      // SEC-1 bound: never lift more than the cap from one turn (a compromised
+      // backend must not be able to flood the client with components).
+      if (descriptors.length >= MAX_COMPONENTS_PER_TURN) {
+        break;
+      }
+    }
+  }
+  return descriptors;
+}
+
+/**
+ * ui.summary degradation floor (A&D D5 / Component 5 / R4): when the LLM produced
+ * no narration (empty text or the no-response sentinel) but at least one component
+ * was lifted, seed the assistant message text from the FIRST descriptor's
+ * `ui.summary` so a non-component-aware client still shows the confirmation text.
+ * When the LLM already narrated real text, keep it verbatim (never append or
+ * double-narrate). Applied identically on the stream + non-stream paths.
+ */
+function applyComponentSummaryFloor(text: string, components: ComponentDescriptor[]): string {
+  if ((text.length === 0 || text === NO_RESPONSE_SENTINEL) && components.length > 0) {
+    return components[0].ui.summary;
+  }
+  return text;
+}
+
 async function runResponsesAgentCommand(params: {
   message: string;
   images: ImageContent[];
@@ -409,6 +487,8 @@ async function runResponsesAgentCommand(params: {
   /** Verified external caller identity (Clerk JWT `sub`); threaded to memory-graphiti (#834/#836). */
   externalId: string | null;
   runId: string;
+  /** Presentation-only channel (allowlisted; defaults to "webchat"). */
+  channel?: string;
   deps: ReturnType<typeof createDefaultDeps>;
 }) {
   return agentCommand(
@@ -422,7 +502,7 @@ async function runResponsesAgentCommand(params: {
       externalId: params.externalId,
       runId: params.runId,
       deliver: false,
-      messageChannel: "webchat",
+      messageChannel: params.channel ?? "webchat",
       bestEffortDeliver: false,
     },
     defaultRuntime,
@@ -585,6 +665,9 @@ export async function handleOpenResponsesHttpRequest(
   // client-sent `user` field). When present it partitions the session/memory.
   const userScope = deriveUserScopeFromSub(handled.externalId);
   const sessionKey = resolveOpenResponsesSessionKey({ req, agentId, user, userScope });
+  // Presentation-only channel (allowlisted). Feeds messageChannel ONLY — never
+  // auth/externalId/userScope/sessionKey (A&D §S10). Unknown/absent ⇒ webchat.
+  const channel = resolveChannelFromHeader(req) ?? "webchat";
 
   // τ-metering (§9): per-user_scope budget. No-op for non-Clerk requests
   // (userScope undefined). On exhaustion → 429 + Retry-After, before any agent
@@ -641,6 +724,7 @@ export async function handleOpenResponsesHttpRequest(
           sessionKey,
           externalId: handled.externalId ?? null,
           runId: responseId,
+          channel,
           deps,
         }),
         limits.turnTimeoutMs,
@@ -665,7 +749,11 @@ export async function handleOpenResponsesHttpRequest(
         return true;
       }
 
-      const payloads = (result as { payloads?: Array<{ text?: string }> } | null)?.payloads;
+      const payloads = (
+        result as {
+          payloads?: Array<{ text?: string; channelData?: Record<string, unknown> }>;
+        } | null
+      )?.payloads;
       const usage = extractUsageFromResult(result);
       // Record τ spend for the budget (turn count when usage is absent).
       opts.tauMeter?.record(userScope, tauTurnCost(usage));
@@ -718,13 +806,24 @@ export async function handleOpenResponsesHttpRequest(
         return true;
       }
 
-      const content =
+      // Lift any ComponentDescriptors riding in payload channelData into
+      // additive `component` output items (T3.1).
+      const descriptors = extractComponentDescriptors(payloads);
+      const joinedText =
         Array.isArray(payloads) && payloads.length > 0
           ? payloads
               .map((p) => (typeof p.text === "string" ? p.text : ""))
               .filter(Boolean)
               .join("\n\n")
-          : "No response from OpenClaw.";
+          : NO_RESPONSE_SENTINEL;
+      // ui.summary degradation floor (DESIGN-1): seed message text from the first
+      // descriptor's summary when the LLM narrated nothing, so a component-only
+      // turn never renders as the empty/sentinel placeholder.
+      const content = applyComponentSummaryFloor(joinedText, descriptors);
+
+      const componentItems = descriptors.map((component) =>
+        createComponentOutputItem({ id: `comp_${randomUUID()}`, component }),
+      );
 
       const response = createResponseResource({
         id: responseId,
@@ -732,6 +831,7 @@ export async function handleOpenResponsesHttpRequest(
         status: "completed",
         output: [
           createAssistantOutputItem({ id: outputItemId, text: content, status: "completed" }),
+          ...componentItems,
         ],
         usage,
       });
@@ -764,6 +864,10 @@ export async function handleOpenResponsesHttpRequest(
   let finalUsage: Usage | undefined;
   let finalizeRequested: { status: ResponseResource["status"]; text: string } | null = null;
   let finalError: { code: string; message: string } | null = null;
+  // ComponentDescriptors lifted from the final payloads' channelData (T3.1),
+  // captured where finalUsage is set (see the async run block below). Emitted as
+  // additive `component` output items on the success terminal only.
+  let finalComponents: ComponentDescriptor[] = [];
 
   const maybeFinalize = () => {
     if (closed) {
@@ -805,12 +909,18 @@ export async function handleOpenResponsesHttpRequest(
       return;
     }
 
+    // ui.summary degradation floor (DESIGN-1): finalComponents is guaranteed set
+    // here (set alongside finalUsage, which gates this success terminal), so a
+    // component-only turn seeds the message text from the first descriptor's
+    // summary rather than the empty/sentinel placeholder. Identical to non-stream.
+    const finalText = applyComponentSummaryFloor(finalizeRequested.text, finalComponents);
+
     writeSseEvent(res, {
       type: "response.output_text.done",
       item_id: outputItemId,
       output_index: 0,
       content_index: 0,
-      text: finalizeRequested.text,
+      text: finalText,
     });
 
     writeSseEvent(res, {
@@ -818,12 +928,12 @@ export async function handleOpenResponsesHttpRequest(
       item_id: outputItemId,
       output_index: 0,
       content_index: 0,
-      part: { type: "output_text", text: finalizeRequested.text },
+      part: { type: "output_text", text: finalText },
     });
 
     const completedItem = createAssistantOutputItem({
       id: outputItemId,
-      text: finalizeRequested.text,
+      text: finalText,
       status: "completed",
     });
 
@@ -833,11 +943,30 @@ export async function handleOpenResponsesHttpRequest(
       item: completedItem,
     });
 
+    // Additive `component` output items (T3.1) at output_index 1,2,… — mirrors the
+    // function_call streaming block. Success terminal only; none on failure.
+    const componentItems = finalComponents.map((component) =>
+      createComponentOutputItem({ id: `comp_${randomUUID()}`, component }),
+    );
+    componentItems.forEach((item, offset) => {
+      const outputIndex = offset + 1;
+      writeSseEvent(res, {
+        type: "response.output_item.added",
+        output_index: outputIndex,
+        item,
+      });
+      writeSseEvent(res, {
+        type: "response.output_item.done",
+        output_index: outputIndex,
+        item,
+      });
+    });
+
     const finalResponse = createResponseResource({
       id: responseId,
       model,
       status: finalizeRequested.status,
-      output: [completedItem],
+      output: [completedItem, ...componentItems],
       usage,
     });
 
@@ -917,7 +1046,7 @@ export async function handleOpenResponsesHttpRequest(
     if (evt.stream === "lifecycle") {
       const phase = evt.data?.phase;
       if (phase === "end" || phase === "error") {
-        const finalText = accumulatedText || "No response from OpenClaw.";
+        const finalText = accumulatedText || NO_RESPONSE_SENTINEL;
         const finalStatus = phase === "error" ? "failed" : "completed";
         requestFinalize(finalStatus, finalText);
       }
@@ -941,6 +1070,7 @@ export async function handleOpenResponsesHttpRequest(
           sessionKey,
           externalId: handled.externalId ?? null,
           runId: responseId,
+          channel,
           deps,
         }),
         limits.turnTimeoutMs,
@@ -961,6 +1091,12 @@ export async function handleOpenResponsesHttpRequest(
       }
 
       finalUsage = extractUsageFromResult(result);
+      // Capture ComponentDescriptors from the resolved payloads' channelData so
+      // the success terminal (maybeFinalize) can emit them (T3.1). maybeFinalize
+      // never proceeds until finalUsage is set, so this runs before it finalizes.
+      finalComponents = extractComponentDescriptors(
+        (result as { payloads?: unknown } | null)?.payloads,
+      );
 
       // Surface an agent-run failure as the contract `response.failed` terminal
       // (§85/§99) instead of dressing the error up as a completed reply. Force the
@@ -1064,13 +1200,16 @@ export async function handleOpenResponsesHttpRequest(
           return;
         }
 
-        const content =
+        const joinedText =
           Array.isArray(payloads) && payloads.length > 0
             ? payloads
                 .map((p) => (typeof p.text === "string" ? p.text : ""))
                 .filter(Boolean)
                 .join("\n\n")
-            : "No response from OpenClaw.";
+            : NO_RESPONSE_SENTINEL;
+        // Apply the ui.summary floor here too (finalComponents already captured
+        // above) so the emitted delta matches the terminal message text.
+        const content = applyComponentSummaryFloor(joinedText, finalComponents);
 
         accumulatedText = content;
         sawAssistantDelta = true;

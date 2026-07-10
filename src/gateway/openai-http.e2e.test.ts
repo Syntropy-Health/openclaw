@@ -384,6 +384,32 @@ describe("OpenAI-compatible HTTP API (e2e)", () => {
     );
   });
 
+  it("TEST-2 (D6): x-openclaw-channel drives messageChannel on /v1/chat/completions", async () => {
+    const port = enabledPort;
+    const channelForHeader = async (
+      headers?: Record<string, string>,
+    ): Promise<string | undefined> => {
+      agentCommand.mockReset();
+      agentCommand.mockResolvedValueOnce({ payloads: [{ text: "hi" }] } as never);
+      const res = await postChatCompletions(
+        port,
+        { stream: false, model: "openclaw", messages: [{ role: "user", content: "hi" }] },
+        headers,
+      );
+      expect(res.status).toBe(200);
+      await res.text();
+      const [opts] = agentCommand.mock.calls[0] ?? [];
+      return (opts as { messageChannel?: string } | undefined)?.messageChannel;
+    };
+
+    // allowlisted → passes through
+    expect(await channelForHeader({ "x-openclaw-channel": "shrinemobile" })).toBe("shrinemobile");
+    // non-allowlisted → defaults to webchat
+    expect(await channelForHeader({ "x-openclaw-channel": "telegram" })).toBe("webchat");
+    // absent → defaults to webchat
+    expect(await channelForHeader()).toBe("webchat");
+  });
+
   it("streams SSE chunks when stream=true", async () => {
     const port = enabledPort;
     try {

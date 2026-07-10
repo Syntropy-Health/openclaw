@@ -12,7 +12,11 @@
 
 import type { IncomingMessage } from "node:http";
 import { describe, expect, it } from "vitest";
-import { deriveUserScopeFromSub, resolveSessionKey } from "./http-utils.js";
+import {
+  deriveUserScopeFromSub,
+  resolveChannelFromHeader,
+  resolveSessionKey,
+} from "./http-utils.js";
 
 function reqWith(headers: Record<string, string> = {}): IncomingMessage {
   return { headers } as unknown as IncomingMessage;
@@ -28,6 +32,87 @@ describe("deriveUserScopeFromSub", () => {
     expect(deriveUserScopeFromSub(undefined)).toBeUndefined();
     expect(deriveUserScopeFromSub("")).toBeUndefined();
     expect(deriveUserScopeFromSub("   ")).toBeUndefined();
+  });
+});
+
+describe("resolveChannelFromHeader — presentation-only x-openclaw-channel", () => {
+  it("returns an allowlisted value, normalized (trim + lowercase)", () => {
+    expect(resolveChannelFromHeader(reqWith({ "x-openclaw-channel": "webchat" }))).toBe("webchat");
+    expect(resolveChannelFromHeader(reqWith({ "x-openclaw-channel": "  WebChat  " }))).toBe(
+      "webchat",
+    );
+  });
+
+  it("returns 'shrinemobile' for the shrinemobile channel (any case)", () => {
+    expect(resolveChannelFromHeader(reqWith({ "x-openclaw-channel": "shrinemobile" }))).toBe(
+      "shrinemobile",
+    );
+    expect(resolveChannelFromHeader(reqWith({ "x-openclaw-channel": "SHRINEMOBILE" }))).toBe(
+      "shrinemobile",
+    );
+  });
+
+  it("returns undefined for a non-allowlisted channel (caller defaults to webchat)", () => {
+    expect(resolveChannelFromHeader(reqWith({ "x-openclaw-channel": "telegram" }))).toBeUndefined();
+  });
+
+  it("returns undefined when the header is absent", () => {
+    expect(resolveChannelFromHeader(reqWith())).toBeUndefined();
+  });
+
+  it("uses the first value for an array-valued header", () => {
+    const req = {
+      headers: { "x-openclaw-channel": ["shrinemobile", "telegram"] },
+    } as unknown as IncomingMessage;
+    expect(resolveChannelFromHeader(req)).toBe("shrinemobile");
+  });
+
+  it("respects a custom allowlist", () => {
+    expect(
+      resolveChannelFromHeader(reqWith({ "x-openclaw-channel": "telegram" }), {
+        allowlist: ["telegram"],
+      }),
+    ).toBe("telegram");
+    // default 'webchat' is NOT allowed under a custom allowlist that omits it.
+    expect(
+      resolveChannelFromHeader(reqWith({ "x-openclaw-channel": "webchat" }), {
+        allowlist: ["telegram"],
+      }),
+    ).toBeUndefined();
+  });
+
+  it("never throws on a malformed header value", () => {
+    expect(() => resolveChannelFromHeader(reqWith({ "x-openclaw-channel": "" }))).not.toThrow();
+    expect(resolveChannelFromHeader(reqWith({ "x-openclaw-channel": "" }))).toBeUndefined();
+  });
+});
+
+describe("channel header is presentation-only (A&D §S10 invariant)", () => {
+  // Two otherwise-identical requests differing ONLY in x-openclaw-channel MUST
+  // resolve to the SAME sessionKey and userScope — the channel is not an input
+  // to identity/partition derivation, only to messageChannel presentation.
+  it("resolveSessionKey is byte-identical regardless of the channel header", () => {
+    const base = { "x-openclaw-session-key": "thread-42" };
+    const webchat = resolveSessionKey({
+      req: reqWith({ ...base, "x-openclaw-channel": "webchat" }),
+      agentId: "main",
+      userScope: "user_2abc",
+      prefix: "openresponses",
+    });
+    const shrinemobile = resolveSessionKey({
+      req: reqWith({ ...base, "x-openclaw-channel": "shrinemobile" }),
+      agentId: "main",
+      userScope: "user_2abc",
+      prefix: "openresponses",
+    });
+    expect(webchat).toBe(shrinemobile);
+    expect(webchat).toBe("agent:main:openresponses-user:user_2abc:thread-42");
+  });
+
+  it("deriveUserScopeFromSub does not take the channel header as an input", () => {
+    // userScope derives solely from the verified sub; the channel cannot alter it.
+    expect(deriveUserScopeFromSub("user_2abc")).toBe(deriveUserScopeFromSub("user_2abc"));
+    expect(deriveUserScopeFromSub("user_2abc")).toBe("user_2abc");
   });
 });
 

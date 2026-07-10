@@ -8,6 +8,7 @@
  */
 
 import { z } from "zod";
+import { ComponentDescriptorSchema } from "./component-descriptor.schema.js";
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Content Parts
@@ -214,6 +215,21 @@ export const ResponseStatusSchema = z.enum([
 
 export type ResponseStatus = z.infer<typeof ResponseStatusSchema>;
 
+/**
+ * A `component` output item (T3.1) — carries a ComponentDescriptor (C1 contract)
+ * lifted from a reply payload's `channelData`. Additive to the assistant
+ * message; rides the existing `response.output_item.added/done` events.
+ */
+export const ComponentOutputItemSchema = z
+  .object({
+    type: z.literal("component"),
+    id: z.string(),
+    component: ComponentDescriptorSchema,
+  })
+  .strict();
+
+export type ComponentOutputItem = z.infer<typeof ComponentOutputItemSchema>;
+
 export const OutputItemSchema = z.discriminatedUnion("type", [
   z
     .object({
@@ -242,6 +258,7 @@ export const OutputItemSchema = z.discriminatedUnion("type", [
       summary: z.string().optional(),
     })
     .strict(),
+  ComponentOutputItemSchema,
 ]);
 
 export type OutputItem = z.infer<typeof OutputItemSchema>;
