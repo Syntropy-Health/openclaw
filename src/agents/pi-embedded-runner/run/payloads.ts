@@ -20,6 +20,63 @@ import {
 } from "../../pi-embedded-utils.js";
 import { isLikelyMutatingToolName } from "../../tool-mutation.js";
 
+/**
+ * A4 PRODUCER BRIDGE — reserved tool-result marker → reply-payload channelData.
+ *
+ * The syntropy-mcp Confirm Governor stamps a confirmation ComponentDescriptor
+ * and marks it on the tool result's `details.__openclaw_component` as the wire
+ * shape `{ type: "component", component }`. This bridge lifts that marker onto
+ * the assistant reply payload's `channelData`, which is exactly the shape the
+ * gateway's `extractComponentDescriptors` (B3) consumes. The marker string is a
+ * cross-boundary contract with the plugin; keep the two literals in sync.
+ *
+ * BEHAVIOR-PRESERVING: with no marked tool result the lift returns undefined and
+ * no `channelData` is attached — payloads are byte-identical to before.
+ */
+const OPENCLAW_COMPONENT_MARKER = "__openclaw_component";
+
+/** Mirrors the gateway consumer's SEC-1 per-turn cap (openresponses-http.ts). */
+const MAX_COMPONENTS_PER_TURN = 8;
+
+/**
+ * Scan the run's tool-result messages for the reserved component marker and
+ * return the channelData carrier to attach (last-wins, capped). Returns
+ * undefined when no valid marker is present.
+ */
+export function extractComponentChannelData(
+  messages: ReadonlyArray<{ role?: string; details?: unknown }> | undefined,
+): Record<string, unknown> | undefined {
+  if (!messages) {
+    return undefined;
+  }
+  let carrier: Record<string, unknown> | undefined;
+  let seen = 0;
+  for (const message of messages) {
+    if (!message || message.role !== "toolResult") {
+      continue;
+    }
+    const details = message.details;
+    if (!details || typeof details !== "object") {
+      continue;
+    }
+    const marker = (details as Record<string, unknown>)[OPENCLAW_COMPONENT_MARKER];
+    if (!marker || typeof marker !== "object") {
+      continue;
+    }
+    const shape = marker as { type?: unknown; component?: unknown };
+    if (shape.type !== "component" || !shape.component || typeof shape.component !== "object") {
+      continue;
+    }
+    if (seen >= MAX_COMPONENTS_PER_TURN) {
+      break;
+    }
+    seen++;
+    // Last-wins: the most recent valid component of the turn is surfaced.
+    carrier = { type: "component", component: shape.component };
+  }
+  return carrier;
+}
+
 type ToolMetaEntry = { toolName: string; meta?: string };
 type LastToolError = {
   toolName: string;
@@ -77,6 +134,11 @@ export function buildEmbeddedRunPayloads(params: {
   toolResultFormat?: ToolResultFormat;
   suppressToolErrorWarnings?: boolean;
   inlineToolResultsAllowed: boolean;
+  /**
+   * A4: the run's tool-result messages, scanned for the reserved component
+   * marker. Omitted/undefined ⇒ no channelData is attached (behavior-preserving).
+   */
+  toolResultMessages?: ReadonlyArray<{ role?: string; details?: unknown }>;
 }): Array<{
   text?: string;
   mediaUrl?: string;
@@ -86,6 +148,7 @@ export function buildEmbeddedRunPayloads(params: {
   audioAsVoice?: boolean;
   replyToTag?: boolean;
   replyToCurrent?: boolean;
+  channelData?: Record<string, unknown>;
 }> {
   const replyItems: Array<{
     text: string;
@@ -285,7 +348,7 @@ export function buildEmbeddedRunPayloads(params: {
   }
 
   const hasAudioAsVoiceTag = replyItems.some((item) => item.audioAsVoice);
-  return replyItems
+  const built = replyItems
     .map((item) => ({
       text: item.text?.trim() ? item.text.trim() : undefined,
       mediaUrls: item.media?.length ? item.media : undefined,
@@ -304,5 +367,29 @@ export function buildEmbeddedRunPayloads(params: {
         return false;
       }
       return true;
-    });
+    }) as Array<{
+    text?: string;
+    mediaUrl?: string;
+    mediaUrls?: string[];
+    replyToId?: string;
+    isError?: boolean;
+    audioAsVoice?: boolean;
+    replyToTag?: boolean;
+    replyToCurrent?: boolean;
+    channelData?: Record<string, unknown>;
+  }>;
+
+  // A4: lift a marked component onto the assistant text payload's channelData.
+  // Attach to the LAST text-bearing, non-error payload — the turn's narration
+  // the confirmation UI accompanies. No marker ⇒ nothing attached.
+  const channelData = extractComponentChannelData(params.toolResultMessages);
+  if (channelData) {
+    for (let i = built.length - 1; i >= 0; i--) {
+      if (built[i].text && !built[i].isError) {
+        built[i].channelData = channelData;
+        break;
+      }
+    }
+  }
+  return built;
 }

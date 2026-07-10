@@ -44,6 +44,13 @@ export type PendingConfirm = {
   previewArgs: Record<string, unknown>;
   /** ui.fields — the ONLY fields a user may override. */
   editableFields: ComponentFieldDescriptor[];
+  /**
+   * Set by {@link PendingConfirmStore.stage} on the user's confirm turn: the
+   * validated field overrides the Governor reconstructs the commit args from.
+   * Undefined until staged; a commit whose pending has no staged fields still
+   * commits the previewArgs (a confirm with an empty `fields={}` edit set).
+   */
+  confirmedFields?: Record<string, unknown>;
   expiresAtMs: number;
 };
 
@@ -132,6 +139,20 @@ export class PendingConfirmStore {
     if (pending === null) return null;
     this.pendings.delete(pendingId);
     return pending;
+  }
+
+  /**
+   * Attach the user's validated field overrides to a live pending (the confirm
+   * turn's staging step). Peek-then-set: returns false (and mutates nothing) if
+   * the pending is absent, expired, or owned by a different externalId, so a
+   * caller can never stage onto another user's pending. The pending is NOT
+   * consumed — the commit guard consumes it later. Overwrites any prior stage.
+   */
+  stage(externalId: string, pendingId: string, confirmedFields: Record<string, unknown>): boolean {
+    const pending = this.resolveLive(externalId, pendingId);
+    if (pending === null) return false;
+    pending.confirmedFields = confirmedFields;
+    return true;
   }
 
   /** Drop the pending; true iff it existed AND is owned by externalId. */

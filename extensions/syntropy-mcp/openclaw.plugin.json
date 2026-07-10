@@ -38,6 +38,11 @@
               "type": "string",
               "description": "m2m-exchange only: token-exchange endpoint path (e.g. /tokens/exchange)."
             },
+            "commitTools": {
+              "type": "array",
+              "items": { "type": "string" },
+              "description": "B4 confirm allowlist: mutating commit-tool names on this server that the Confirm Governor gates (preview→confirm→commit). A descriptor's ui.commit_tool must be listed here to be gated."
+            },
             "label": {
               "type": "string",
               "description": "Error-message label; defaults to id."

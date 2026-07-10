@@ -204,6 +204,44 @@ describe("PendingConfirmStore peek is non-consuming", () => {
 });
 
 // ---------------------------------------------------------------------------
+// 5b. stage — attach validated confirmedFields to a live pending
+// ---------------------------------------------------------------------------
+
+describe("PendingConfirmStore.stage", () => {
+  it("stages confirmedFields onto the pending; a later consume returns them", () => {
+    const store = makeStore();
+    const pending = store.mint(mintInput({ externalId: "user_A" }));
+
+    expect(store.stage("user_A", pending.pendingId, { grams: 150 })).toBe(true);
+
+    const got = store.consume("user_A", pending.pendingId);
+    expect(got?.confirmedFields).toEqual({ grams: 150 });
+    // previewArgs are untouched — the Governor merges them at commit time.
+    expect(got?.previewArgs).toEqual({ grams: 100 });
+  });
+
+  it("stage under a DIFFERENT externalId returns false and leaves the pending unchanged", () => {
+    const store = makeStore();
+    const pending = store.mint(mintInput({ externalId: "user_A" }));
+
+    expect(store.stage("user_B", pending.pendingId, { grams: 999 })).toBe(false);
+
+    const got = store.consume("user_A", pending.pendingId);
+    expect(got).not.toBeNull();
+    expect(got?.confirmedFields).toBeUndefined();
+  });
+
+  it("stage of an absent/expired id returns false", () => {
+    const store = makeStore({ ttlSeconds: 300 });
+    expect(store.stage("user_A", "cnf_0000000000000000000000", { grams: 1 })).toBe(false);
+
+    const pending = store.mint(mintInput({ externalId: "user_A" }));
+    nowMs = pending.expiresAtMs + 1; // expired
+    expect(store.stage("user_A", pending.pendingId, { grams: 1 })).toBe(false);
+  });
+});
+
+// ---------------------------------------------------------------------------
 // 6. cancel
 // ---------------------------------------------------------------------------
 

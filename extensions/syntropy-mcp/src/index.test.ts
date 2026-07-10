@@ -690,3 +690,166 @@ describe("syntropy-mcp timer lifecycle", () => {
     expect(ctx.timers.pendingTimeouts()).toHaveLength(0);
   });
 });
+
+// ---------------------------------------------------------------------------
+// B4 Confirm Governor wiring
+// ---------------------------------------------------------------------------
+
+function foodDescriptor() {
+  return {
+    type: "component",
+    key: "food_confirm",
+    props: {},
+    ui: {
+      summary: "Log salmon, 340 kcal?",
+      commit_tool: "syntropy_log_food",
+      fields: [
+        { name: "food_name", type: "string", value: "salmon" },
+        { name: "calories", type: "number", value: 340, constraints: { min: 0 } },
+      ],
+    },
+  };
+}
+
+const kgWithCommit = (over?: Record<string, unknown>) =>
+  baseConfig({
+    servers: [{ ...kgServer, commitTools: ["syntropy_log_food"] }],
+    ...over,
+  });
+
+async function fireAgentStart(
+  ctx: ReturnType<typeof setup>,
+  prompt: string,
+  hookCtx: { sessionKey?: string; externalId?: string | null },
+) {
+  const hook = ctx.hooks.get("before_agent_start")![0]!;
+  return hook.handler({ prompt }, hookCtx);
+}
+
+function guardHook(ctx: ReturnType<typeof setup>) {
+  const list = ctx.hooks.get("before_tool_call");
+  expect(list).toBeDefined();
+  return list![0]!;
+}
+
+describe("syntropy-mcp config — commitTools allowlist", () => {
+  it("parses a per-server commitTools array", () => {
+    const cfg = parseSyntropyMcpConfig(kgWithCommit());
+    expect(cfg.servers[0]!.commitTools).toEqual(["syntropy_log_food"]);
+  });
+
+  it("rejects a non-array / non-string commitTools", () => {
+    expect(() =>
+      parseSyntropyMcpConfig(baseConfig({ servers: [{ ...kgServer, commitTools: "x" }] })),
+    ).toThrow();
+    expect(() =>
+      parseSyntropyMcpConfig(baseConfig({ servers: [{ ...kgServer, commitTools: [1, 2] }] })),
+    ).toThrow();
+  });
+});
+
+describe("syntropy-mcp before_tool_call guard wiring", () => {
+  it("registers the guard at priority 40", async () => {
+    const ctx = setup({ pluginConfig: kgWithCommit() });
+    await flush();
+    expect(guardHook(ctx).priority).toBe(40);
+  });
+
+  it("blocks an unconfirmed commit tool and passes read tools through", async () => {
+    const ctx = setup({ pluginConfig: kgWithCommit() });
+    await flush();
+    await fireAgentStart(ctx, "hi", { sessionKey: "s1", externalId: "user_A" });
+
+    const guard = guardHook(ctx);
+    const blocked = await guard.handler(
+      { toolName: "syntropy_log_food", params: { food_name: "x" } },
+      { sessionKey: "s1", toolName: "syntropy_log_food" },
+    );
+    expect((blocked as { block?: boolean }).block).toBe(true);
+
+    const read = await guard.handler(
+      { toolName: "analyze_food", params: {} },
+      { sessionKey: "s1", toolName: "analyze_food" },
+    );
+    expect(read).toBeUndefined();
+  });
+});
+
+describe("syntropy-mcp preview → confirm → commit round-trip", () => {
+  it("mints on the initiate result, stages on CONFIRM, and binds the commit args", async () => {
+    // analyze_food is the discovered INITIATE tool; its result carries the C1
+    // descriptor whose commit_tool is the allowlisted syntropy_log_food.
+    const listTools = vi.fn(
+      async (): Promise<McpToolListResult> => okList([descriptor("analyze_food")]),
+    );
+    const callTool = vi.fn(
+      async (): Promise<McpToolResult> => ({ ok: true, data: { component: foodDescriptor() } }),
+    );
+    const ctx = setup({ pluginConfig: kgWithCommit(), listTools, callTool });
+    await flush();
+
+    // Cache the verified identity for this session.
+    await fireAgentStart(ctx, "analyze my salmon", { sessionKey: "s1", externalId: "user_A" });
+
+    // Run the initiate tool — execute marks the stamped descriptor for the bridge.
+    const tools = ctx.toolFactories[0]!({ sessionKey: "s1" }) as Array<{
+      name: string;
+      execute: (id: string, args: unknown) => Promise<{ details?: unknown }>;
+    }>;
+    const analyze = tools.find((t) => t.name === "analyze_food")!;
+    const result = await analyze.execute("call1", { food_name: "salmon" });
+    const marker = (result.details as Record<string, unknown>).__openclaw_component as {
+      type: string;
+      component: { ui: { pending_id: string } };
+    };
+    expect(marker.type).toBe("component");
+    const pendingId = marker.component.ui.pending_id;
+    expect(pendingId).toMatch(/^cnf_/);
+
+    // The user's CONFIRM turn stages a validated edit (calories 340 → 350).
+    await fireAgentStart(ctx, `<CONFIRM pending_id=${pendingId} fields={"calories":350}>`, {
+      sessionKey: "s1",
+      externalId: "user_A",
+    });
+
+    // The commit is bound to previewArgs ⊕ the staged edit — model junk discarded.
+    const committed = await guardHook(ctx).handler(
+      {
+        toolName: "syntropy_log_food",
+        params: { food_name: "HACKED", calories: 99999, pending_id: pendingId },
+      },
+      { sessionKey: "s1", toolName: "syntropy_log_food" },
+    );
+    expect(committed).toEqual({ params: { food_name: "salmon", calories: 350 } });
+
+    // Replay of the same pending is blocked (single-use).
+    const replay = await guardHook(ctx).handler(
+      { toolName: "syntropy_log_food", params: { pending_id: pendingId } },
+      { sessionKey: "s1", toolName: "syntropy_log_food" },
+    );
+    expect((replay as { block?: boolean }).block).toBe(true);
+  });
+
+  it("does not mint a pending for a caller without a verified externalId", async () => {
+    const listTools = vi.fn(
+      async (): Promise<McpToolListResult> => okList([descriptor("analyze_food")]),
+    );
+    const callTool = vi.fn(
+      async (): Promise<McpToolResult> => ({ ok: true, data: { component: foodDescriptor() } }),
+    );
+    const ctx = setup({ pluginConfig: kgWithCommit(), listTools, callTool });
+    await flush();
+
+    // before_agent_start with no externalId ⇒ nothing cached for the session.
+    await fireAgentStart(ctx, "analyze", { sessionKey: "s1", externalId: null });
+
+    const tools = ctx.toolFactories[0]!({ sessionKey: "s1" }) as Array<{
+      name: string;
+      execute: (id: string, args: unknown) => Promise<{ details?: unknown }>;
+    }>;
+    const analyze = tools.find((t) => t.name === "analyze_food")!;
+    const result = await analyze.execute("call1", { food_name: "salmon" });
+    // No marker — no gating capability without a verified identity (fail-closed).
+    expect((result.details as Record<string, unknown>).__openclaw_component).toBeUndefined();
+  });
+});
