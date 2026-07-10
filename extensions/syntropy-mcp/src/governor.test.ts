@@ -122,6 +122,61 @@ describe("guardBeforeToolCall — commit-arg binding (CRIT)", () => {
 });
 
 // ===========================================================================
+// SEC-COLLISION (#1) — a collision-prefixed commit tool STILL gates
+// ===========================================================================
+
+describe("guardBeforeToolCall — collision-prefixed commit tool is still gated", () => {
+  // Two servers whose commit tool name collides: the catalog surfaces the
+  // second one prefixed as "<serverId>:<name>". The guard MUST recognise the
+  // prefixed surfaced name as a commit tool (else it fails OPEN — the commit
+  // runs ungated with model params, defeating the Governor).
+  function twoServerGov(store: PendingConfirmStore) {
+    return new ConfirmGovernor(store, {
+      commitToolsByServer: new Map([
+        ["kg", new Set(["syntropy_log_food"])],
+        ["sj", new Set(["syntropy_log_food"])],
+      ]),
+      now,
+    });
+  }
+
+  it("blocks a call to the PREFIXED commit tool with no pending", () => {
+    const store = makeStore();
+    const gov = twoServerGov(store);
+    const result = gov.guardBeforeToolCall(
+      { toolName: "sj:syntropy_log_food", params: { food_name: "salmon" } },
+      "user_A",
+    );
+    expect(result?.block).toBe(true);
+    expect(result?.params).toBeUndefined();
+  });
+
+  it("reconstructs a call to the PREFIXED commit tool with a valid staged pending", () => {
+    const store = makeStore();
+    const gov = twoServerGov(store);
+    const pending = store.mint({
+      externalId: "user_A",
+      sessionKey: "sess_A",
+      serverId: "sj",
+      commitTool: "syntropy_log_food",
+      previewArgs: { food_name: "salmon", calories: 340 },
+      editableFields: [{ name: "calories", type: "number" }],
+    });
+    expect(store.stage("user_A", pending.pendingId, { calories: 350 })).toBe(true);
+
+    const result = gov.guardBeforeToolCall(
+      {
+        toolName: "sj:syntropy_log_food",
+        params: { food_name: "HACKED", calories: 99999, pending_id: pending.pendingId },
+      },
+      "user_A",
+    );
+    expect(result).toEqual({ params: { food_name: "salmon", calories: 350 } });
+    expect(result?.block).toBeUndefined();
+  });
+});
+
+// ===========================================================================
 // PROPERTY 2 — NO PENDING ⇒ BLOCK
 // ===========================================================================
 
@@ -207,6 +262,8 @@ describe("guardBeforeToolCall — replay is blocked", () => {
       previewArgs: { calories: 340 },
       editableFields: [{ name: "calories", type: "number" }],
     });
+    // Confirm-as-previewed (stages {}), so the guard has a completed confirm.
+    store.stage("user_A", pending.pendingId, {});
 
     const first = gov.guardBeforeToolCall(
       { toolName: "syntropy_log_food", params: { pending_id: pending.pendingId } },
@@ -237,6 +294,8 @@ describe("guardBeforeToolCall — cross-user isolation", () => {
       previewArgs: { calories: 340 },
       editableFields: [{ name: "calories", type: "number" }],
     });
+    // Confirm-as-previewed (stages {}), so the rightful owner has a completed confirm.
+    store.stage("user_A", pending.pendingId, {});
 
     const attacker = gov.guardBeforeToolCall(
       { toolName: "syntropy_log_food", params: { pending_id: pending.pendingId } },
@@ -496,6 +555,33 @@ describe("preview — mint + stamp", () => {
     expect(out).toBeNull();
   });
 
+  it("does NOT round-trip a cross-server pending (server binding)", () => {
+    // A pending minted on server "kg" must not be spent against the same-named
+    // commit tool the catalog surfaced (prefixed) on server "sj".
+    const store = makeStore();
+    const gov = new ConfirmGovernor(store, {
+      commitToolsByServer: new Map([
+        ["kg", new Set(["syntropy_log_food"])],
+        ["sj", new Set(["syntropy_log_food"])],
+      ]),
+      now,
+    });
+    const pending = store.mint({
+      externalId: "user_A",
+      sessionKey: "sess_A",
+      serverId: "kg",
+      commitTool: "syntropy_log_food",
+      previewArgs: { calories: 340 },
+      editableFields: [],
+    });
+    store.stage("user_A", pending.pendingId, {});
+    const result = gov.guardBeforeToolCall(
+      { toolName: "sj:syntropy_log_food", params: { pending_id: pending.pendingId } },
+      "user_A",
+    );
+    expect(result?.block).toBe(true);
+  });
+
   it("the minted pending drives a full preview→confirm→commit round-trip", () => {
     const store = makeStore();
     const gov = makeGovernor(store);
@@ -518,5 +604,266 @@ describe("preview — mint + stamp", () => {
       "user_A",
     );
     expect(commit).toEqual({ params: { food_name: "salmon", calories: 355 } });
+  });
+});
+
+// ===========================================================================
+// TEST-CONSTRAINTS — validateFieldValue per constraint (via parseConfirmTurn)
+// ===========================================================================
+
+describe("validateFieldValue — per-constraint accept/reject", () => {
+  // Confirm a single field=value edit and report the staged result.
+  function confirm(field: unknown, value: unknown) {
+    const store = makeStore();
+    const gov = makeGovernor(store);
+    const p = store.mint({
+      externalId: "user_A",
+      sessionKey: "s",
+      commitTool: "syntropy_log_food",
+      previewArgs: {},
+      editableFields: [field as never],
+    });
+    const name = (field as { name: string }).name;
+    const res = gov.parseConfirmTurn(
+      `<CONFIRM pending_id=${p.pendingId} fields=${JSON.stringify({ [name]: value })}>`,
+      "user_A",
+    );
+    const staged = store.peek("user_A", p.pendingId)?.confirmedFields;
+    return { res, staged };
+  }
+  const rejected = (r: { res: { error?: string }; staged?: unknown }) => {
+    expect(r.res.error).toBeTruthy();
+    expect(r.staged).toBeUndefined();
+  };
+  const accepted = (r: { res: { error?: string }; staged?: unknown }, expected: unknown) => {
+    expect(r.res.error).toBeUndefined();
+    expect(r.staged).toEqual(expected);
+  };
+
+  it("number min", () => {
+    rejected(confirm({ name: "n", type: "number", constraints: { min: 0 } }, -1));
+    accepted(confirm({ name: "n", type: "number", constraints: { min: 0 } }, 0), { n: 0 });
+  });
+  it("number max", () => {
+    rejected(confirm({ name: "n", type: "number", constraints: { max: 10 } }, 11));
+    accepted(confirm({ name: "n", type: "number", constraints: { max: 10 } }, 10), { n: 10 });
+  });
+  it("number step", () => {
+    rejected(confirm({ name: "n", type: "number", constraints: { step: 5 } }, 7));
+    accepted(confirm({ name: "n", type: "number", constraints: { step: 5 } }, 10), { n: 10 });
+  });
+  it("string maxLength", () => {
+    rejected(confirm({ name: "s", type: "string", constraints: { maxLength: 3 } }, "abcd"));
+    accepted(confirm({ name: "s", type: "string", constraints: { maxLength: 3 } }, "abc"), {
+      s: "abc",
+    });
+  });
+  it("string pattern", () => {
+    rejected(confirm({ name: "s", type: "string", constraints: { pattern: "^a+$" } }, "b"));
+    accepted(confirm({ name: "s", type: "string", constraints: { pattern: "^a+$" } }, "aaa"), {
+      s: "aaa",
+    });
+  });
+  it("options (string)", () => {
+    rejected(confirm({ name: "s", type: "string", constraints: { options: ["x", "y"] } }, "z"));
+    accepted(confirm({ name: "s", type: "string", constraints: { options: ["x", "y"] } }, "x"), {
+      s: "x",
+    });
+  });
+  it("integer", () => {
+    rejected(confirm({ name: "n", type: "integer" }, 1.5));
+    accepted(confirm({ name: "n", type: "integer" }, 2), { n: 2 });
+  });
+  it("boolean type guard", () => {
+    rejected(confirm({ name: "b", type: "boolean" }, "true"));
+    accepted(confirm({ name: "b", type: "boolean" }, true), { b: true });
+  });
+  it("enum options", () => {
+    rejected(confirm({ name: "e", type: "enum", constraints: { options: ["a", "b"] } }, "c"));
+    accepted(confirm({ name: "e", type: "enum", constraints: { options: ["a", "b"] } }, "a"), {
+      e: "a",
+    });
+  });
+  it("photo cannot be edited", () => {
+    rejected(confirm({ name: "p", type: "photo" }, "data:image/png;base64,AAAA"));
+  });
+});
+
+// ===========================================================================
+// SEC-REDOS (#4) — backend-controlled pattern is bounded before compile/test
+// ===========================================================================
+
+describe("validateFieldValue — ReDoS caps", () => {
+  function confirmString(constraints: Record<string, unknown>, value: string) {
+    const store = makeStore();
+    const gov = makeGovernor(store);
+    const p = store.mint({
+      externalId: "user_A",
+      sessionKey: "s",
+      commitTool: "syntropy_log_food",
+      previewArgs: {},
+      editableFields: [{ name: "note", type: "string", constraints } as never],
+    });
+    const res = gov.parseConfirmTurn(
+      `<CONFIRM pending_id=${p.pendingId} fields=${JSON.stringify({ note: value })}>`,
+      "user_A",
+    );
+    return { res, staged: store.peek("user_A", p.pendingId)?.confirmedFields };
+  }
+
+  it("rejects an over-long pattern (>512) as a validation error", () => {
+    const r = confirmString({ pattern: "a".repeat(600) }, "aaa");
+    expect(r.res.error).toBeTruthy();
+    expect(r.staged).toBeUndefined();
+  });
+
+  it("rejects an over-long value (>4096) before testing the pattern", () => {
+    const r = confirmString({ pattern: "^a+$" }, "a".repeat(5000));
+    expect(r.res.error).toBeTruthy();
+    expect(r.staged).toBeUndefined();
+  });
+});
+
+// ===========================================================================
+// TEST-PROTO — prototype-pollution keys are not editable, nothing staged
+// ===========================================================================
+
+describe("parseConfirmTurn — prototype-pollution keys rejected", () => {
+  it("rejects __proto__ and constructor edits; Object.prototype unpolluted", () => {
+    const store = makeStore();
+    const gov = makeGovernor(store);
+    const p = store.mint({
+      externalId: "user_A",
+      sessionKey: "s",
+      commitTool: "syntropy_log_food",
+      previewArgs: {},
+      editableFields: [{ name: "calories", type: "number" }],
+    });
+    const proto = gov.parseConfirmTurn(
+      `<CONFIRM pending_id=${p.pendingId} fields={"__proto__":{"polluted":true}}>`,
+      "user_A",
+    );
+    expect(proto.error).toBeTruthy();
+    const ctor = gov.parseConfirmTurn(
+      `<CONFIRM pending_id=${p.pendingId} fields={"constructor":{"x":1}}>`,
+      "user_A",
+    );
+    expect(ctor.error).toBeTruthy();
+    expect(({} as Record<string, unknown>).polluted).toBeUndefined();
+    expect(store.peek("user_A", p.pendingId)?.confirmedFields).toBeUndefined();
+  });
+});
+
+// ===========================================================================
+// TEST-EXPIRY-GUARD — a commit past expiry is blocked
+// ===========================================================================
+
+describe("guardBeforeToolCall — expiry", () => {
+  it("blocks a commit whose pending has expired", () => {
+    const store = makeStore();
+    const gov = makeGovernor(store);
+    const p = store.mint({
+      externalId: "user_A",
+      sessionKey: "s",
+      commitTool: "syntropy_log_food",
+      previewArgs: { calories: 1 },
+      editableFields: [],
+    });
+    store.stage("user_A", p.pendingId, {});
+    nowMs = p.expiresAtMs + 1; // advance past expiry
+    const result = gov.guardBeforeToolCall(
+      { toolName: "syntropy_log_food", params: { pending_id: p.pendingId } },
+      "user_A",
+    );
+    expect(result?.block).toBe(true);
+  });
+});
+
+// ===========================================================================
+// TEST-NOEXTID-PARSE / TEST-XUSER-PARSE — confirm-parse identity failures
+// ===========================================================================
+
+describe("parseConfirmTurn — identity failures", () => {
+  it("TEST-NOEXTID-PARSE: undefined externalId ⇒ handled + error, store unchanged", () => {
+    const store = makeStore();
+    const gov = makeGovernor(store);
+    const before = store.size();
+    const res = gov.parseConfirmTurn(
+      `<CONFIRM pending_id=cnf_0000000000000000000000 fields={}>`,
+      undefined,
+    );
+    expect(res.handled).toBe(true);
+    expect(res.error).toBeTruthy();
+    expect(store.size()).toBe(before);
+  });
+
+  it("TEST-XUSER-PARSE: userB cannot stage onto userA's pending", () => {
+    const store = makeStore();
+    const gov = makeGovernor(store);
+    const p = store.mint({
+      externalId: "userA",
+      sessionKey: "s",
+      commitTool: "syntropy_log_food",
+      previewArgs: {},
+      editableFields: [{ name: "calories", type: "number" }],
+    });
+    const res = gov.parseConfirmTurn(
+      `<CONFIRM pending_id=${p.pendingId} fields={"calories":10}>`,
+      "userB",
+    );
+    expect(res.handled).toBe(true);
+    expect(res.note).toBeTruthy();
+    // userA's pending was never staged.
+    expect(store.consume("userA", p.pendingId)?.confirmedFields).toBeUndefined();
+  });
+});
+
+// ===========================================================================
+// TEST-BLOCKREASON — block results carry a non-empty, non-leaking reason
+// ===========================================================================
+
+describe("guardBeforeToolCall — block reason", () => {
+  it("a block carries a non-empty reason that does not leak the pending id", () => {
+    const store = makeStore();
+    const gov = makeGovernor(store);
+    const p = store.mint({
+      externalId: "user_A",
+      sessionKey: "s",
+      commitTool: "syntropy_log_food",
+      previewArgs: {},
+      editableFields: [],
+    });
+    const result = gov.guardBeforeToolCall(
+      { toolName: "syntropy_log_food", params: { pending_id: p.pendingId } },
+      "user_B", // wrong owner ⇒ block
+    );
+    expect(result?.block).toBe(true);
+    expect(typeof result?.blockReason).toBe("string");
+    expect(result?.blockReason?.length).toBeGreaterThan(0);
+    expect(result?.blockReason).not.toContain(p.pendingId);
+  });
+});
+
+// ===========================================================================
+// CODE-FIRSTLINE — the directive is matched on the first NON-EMPTY line
+// ===========================================================================
+
+describe("parseConfirmTurn — first non-empty line", () => {
+  it("recognises a confirm after leading blank lines", () => {
+    const store = makeStore();
+    const gov = makeGovernor(store);
+    const p = store.mint({
+      externalId: "user_A",
+      sessionKey: "s",
+      commitTool: "syntropy_log_food",
+      previewArgs: {},
+      editableFields: [{ name: "calories", type: "number" }],
+    });
+    const res = gov.parseConfirmTurn(
+      `\n   \n<CONFIRM pending_id=${p.pendingId} fields={"calories":12}>`,
+      "user_A",
+    );
+    expect(res).toEqual({ handled: true });
+    expect(store.consume("user_A", p.pendingId)?.confirmedFields).toEqual({ calories: 12 });
   });
 });

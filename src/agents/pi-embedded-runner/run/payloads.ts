@@ -4,6 +4,7 @@ import type { ReasoningLevel, VerboseLevel } from "../../../auto-reply/thinking.
 import { isSilentReplyText, SILENT_REPLY_TOKEN } from "../../../auto-reply/tokens.js";
 import { formatToolAggregate } from "../../../auto-reply/tool-meta.js";
 import type { OpenClawConfig } from "../../../config/config.js";
+import { parseComponentDescriptor } from "../../../gateway/component-descriptor.schema.js";
 import {
   BILLING_ERROR_USER_MESSAGE,
   formatAssistantErrorText,
@@ -33,15 +34,15 @@ import { isLikelyMutatingToolName } from "../../tool-mutation.js";
  * BEHAVIOR-PRESERVING: with no marked tool result the lift returns undefined and
  * no `channelData` is attached — payloads are byte-identical to before.
  */
-const OPENCLAW_COMPONENT_MARKER = "__openclaw_component";
-
-/** Mirrors the gateway consumer's SEC-1 per-turn cap (openresponses-http.ts). */
-const MAX_COMPONENTS_PER_TURN = 8;
+export const OPENCLAW_COMPONENT_MARKER = "__openclaw_component";
 
 /**
  * Scan the run's tool-result messages for the reserved component marker and
- * return the channelData carrier to attach (last-wins, capped). Returns
- * undefined when no valid marker is present.
+ * return the channelData carrier to attach. LAST-WINS: the ACTUAL last valid
+ * marker of the turn is surfaced (we iterate to the end rather than stopping at
+ * an arbitrary count). Only ONE component is ever surfaced here; the gateway
+ * consumer (openresponses-http.ts, SEC-1) enforces the per-turn component cap.
+ * Returns undefined when no valid marker is present.
  */
 export function extractComponentChannelData(
   messages: ReadonlyArray<{ role?: string; details?: unknown }> | undefined,
@@ -50,7 +51,6 @@ export function extractComponentChannelData(
     return undefined;
   }
   let carrier: Record<string, unknown> | undefined;
-  let seen = 0;
   for (const message of messages) {
     if (!message || message.role !== "toolResult") {
       continue;
@@ -67,14 +67,30 @@ export function extractComponentChannelData(
     if (shape.type !== "component" || !shape.component || typeof shape.component !== "object") {
       continue;
     }
-    if (seen >= MAX_COMPONENTS_PER_TURN) {
-      break;
+    // Defense-in-depth: re-validate the descriptor on the channel path (the
+    // gateway re-validates too, but this path may not). A forged/invalid
+    // descriptor is dropped rather than surfaced.
+    if (!parseComponentDescriptor(shape.component)) {
+      continue;
     }
-    seen++;
     // Last-wins: the most recent valid component of the turn is surfaced.
     carrier = { type: "component", component: shape.component };
   }
   return carrier;
+}
+
+/** The `ui.summary` of a channelData carrier, if present as a non-empty string. */
+function carrierSummaryText(carrier: Record<string, unknown>): string | undefined {
+  const component = carrier.component;
+  if (!component || typeof component !== "object") {
+    return undefined;
+  }
+  const ui = (component as Record<string, unknown>).ui;
+  if (!ui || typeof ui !== "object") {
+    return undefined;
+  }
+  const summary = (ui as Record<string, unknown>).summary;
+  return typeof summary === "string" && summary.trim() ? summary : undefined;
 }
 
 type ToolMetaEntry = { toolName: string; meta?: string };
@@ -384,10 +400,22 @@ export function buildEmbeddedRunPayloads(params: {
   // the confirmation UI accompanies. No marker ⇒ nothing attached.
   const channelData = extractComponentChannelData(params.toolResultMessages);
   if (channelData) {
+    let attached = false;
     for (let i = built.length - 1; i >= 0; i--) {
       if (built[i].text && !built[i].isError) {
         built[i].channelData = channelData;
+        attached = true;
         break;
+      }
+    }
+    // CODE-SILENT-DROP: a pending was already minted, but this turn produced no
+    // eligible text payload (silent-LLM / media-only / error-only). Synthesize a
+    // minimal reply seeded from the component's ui.summary so the confirmation
+    // still egresses — the user must always receive the pending_id.
+    if (!attached) {
+      const summary = carrierSummaryText(channelData);
+      if (summary) {
+        built.push({ text: summary, channelData });
       }
     }
   }

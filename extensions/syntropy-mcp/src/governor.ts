@@ -55,6 +55,10 @@ const CONFIRM_RE = /^<CONFIRM pending_id=(\S+) fields=(\{.*\})>$/;
 /** `<CANCEL pending_id=<id>>`. */
 const CANCEL_RE = /^<CANCEL pending_id=(\S+)>$/;
 
+/** ReDoS caps (CWE-1333) for a backend-controlled `pattern` constraint. */
+const MAX_PATTERN_LENGTH = 512;
+const MAX_PATTERN_TEST_LENGTH = 4096;
+
 /** User-facing block reason — never leaks pending internals. */
 const BLOCK_REASON =
   "This action needs confirmation. Preview it first, then send the confirmation " +
@@ -124,6 +128,7 @@ export class ConfirmGovernor {
     const pending = this.store.mint({
       externalId: params.externalId,
       sessionKey: params.sessionKey,
+      serverId: params.serverId,
       commitTool,
       previewArgs,
       editableFields,
@@ -226,7 +231,13 @@ export class ConfirmGovernor {
     event: PluginHookBeforeToolCallEvent,
     externalId: string | undefined,
   ): PluginHookBeforeToolCallResult | undefined {
-    if (!this.isCommitTool(event.toolName)) return undefined;
+    // Resolve the SURFACED tool name (the catalog prefixes cross-server name
+    // collisions as "<serverId>:<wireName>") back to (serverId, wireName). A
+    // non-commit tool resolves to null and passes through untouched. Keying on
+    // the raw config name here would fail OPEN for a collision-prefixed commit
+    // tool — the whole point of this gate.
+    const resolved = this.resolveCommitTool(event.toolName);
+    if (!resolved) return undefined;
 
     const pendingId = extractPendingId(event.params);
     if (!externalId || !pendingId) {
@@ -242,8 +253,25 @@ export class ConfirmGovernor {
     }
 
     // The pending must belong to THIS commit tool — a pending minted for tool A
-    // may not be spent binding a call to tool B.
-    if (pending.commitTool !== event.toolName) {
+    // may not be spent binding a call to tool B. Compare against the resolved
+    // WIRE name so a collision-prefixed surfaced name still matches its pending.
+    if (pending.commitTool !== resolved.wireName) {
+      return { block: true, blockReason: BLOCK_REASON };
+    }
+
+    // Server binding: a pending minted on server A must not be spent against a
+    // same-named commit tool the catalog surfaced (prefixed) on server B — that
+    // would route the reviewed PHI write to the wrong backend. Enforced only when
+    // the pending recorded its origin server (the preview path always does).
+    if (pending.serverId !== undefined && pending.serverId !== resolved.serverId) {
+      return { block: true, blockReason: BLOCK_REASON };
+    }
+
+    // Fail-closed: a commit requires a completed confirm turn. `stage` records
+    // confirmedFields (at least `{}` for confirm-as-previewed); an UNDEFINED set
+    // means no valid confirm was parsed (e.g. an invalid edit staged nothing) —
+    // never silently commit the un-edited preview values in that case.
+    if (pending.confirmedFields === undefined) {
       return { block: true, blockReason: BLOCK_REASON };
     }
 
@@ -262,11 +290,36 @@ export class ConfirmGovernor {
     return { params: reconstructed };
   }
 
-  private isCommitTool(toolName: string): boolean {
-    for (const set of this.commitToolsByServer.values()) {
-      if (set.has(toolName)) return true;
+  /**
+   * True when `toolName` (a SURFACED name) resolves to a gated commit tool.
+   * Shared with the plugin's fail-closed catch so both key on the surfaced name.
+   */
+  isGatedCommitTool(toolName: string): boolean {
+    return this.resolveCommitTool(toolName) !== null;
+  }
+
+  /**
+   * Map a SURFACED tool name back to its owning (serverId, wireName). The catalog
+   * surfaces a cross-server name collision as `${serverId}:${wireName}`; an
+   * uncollided tool surfaces under its bare wire name. Resolution tries the
+   * prefixed interpretation first (a registered serverId whose allowlist holds
+   * the suffix), then the bare interpretation (the first server whose allowlist
+   * holds the whole name — which mirrors the catalog's first-server-wins surface
+   * for the unprefixed variant). Returns null for a non-commit tool.
+   */
+  private resolveCommitTool(toolName: string): { serverId: string; wireName: string } | null {
+    const sep = toolName.indexOf(":");
+    if (sep > 0) {
+      const serverId = toolName.slice(0, sep);
+      const wireName = toolName.slice(sep + 1);
+      if (this.commitToolsByServer.get(serverId)?.has(wireName)) {
+        return { serverId, wireName };
+      }
     }
-    return false;
+    for (const [serverId, set] of this.commitToolsByServer) {
+      if (set.has(toolName)) return { serverId, wireName: toolName };
+    }
+    return null;
   }
 }
 
@@ -295,10 +348,17 @@ function previewArgsFromFields(fields: ComponentFieldDescriptor[]): Record<strin
   return out;
 }
 
+/**
+ * The first NON-EMPTY line (trimmed). Leading blank lines are skipped so a
+ * confirm directive preceded by whitespace-only lines is still recognised; only
+ * that single line is ever parsed (the directive grammar is one-line).
+ */
 function firstLine(prompt: string): string {
-  const idx = prompt.search(/\r?\n/);
-  const head = idx === -1 ? prompt : prompt.slice(0, idx);
-  return head.trim();
+  for (const raw of prompt.split(/\r?\n/)) {
+    const trimmed = raw.trim();
+    if (trimmed) return trimmed;
+  }
+  return "";
 }
 
 function extractPendingId(params: Record<string, unknown> | undefined): string | undefined {
@@ -349,6 +409,17 @@ function validateFieldValue(field: ComponentFieldDescriptor, value: unknown): st
         return `field "${field.name}" exceeds maxLength ${c.maxLength}`;
       }
       if (c?.pattern !== undefined) {
+        // ReDoS guard (CWE-1333): the pattern is BACKEND-controlled and could be
+        // catastrophic-backtracking. Cap the pattern source AND the tested value
+        // length UNCONDITIONALLY — independent of whether the backend set
+        // maxLength — before compiling or testing, so a malicious pattern/value
+        // can never stall the event loop.
+        if (c.pattern.length > MAX_PATTERN_LENGTH) {
+          return `field "${field.name}" has an invalid pattern constraint`;
+        }
+        if (value.length > MAX_PATTERN_TEST_LENGTH) {
+          return `field "${field.name}" is too long to validate against the pattern`;
+        }
         let re: RegExp;
         try {
           re = new RegExp(c.pattern);

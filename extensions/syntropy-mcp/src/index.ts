@@ -306,6 +306,13 @@ function buildAgentTool(params: {
       }
 
       const agentResult = toAgentResult(result);
+      // Defense-in-depth (SEC-FORGE-MARKER): the component marker is a
+      // GATEWAY-ONLY channel. Strip any pre-existing marker a backend smuggled
+      // into the tool-result details BEFORE preview, so only a marker the
+      // Governor itself stamps can ever reach the producer bridge.
+      if (agentResult.details && typeof agentResult.details === "object") {
+        delete (agentResult.details as Record<string, unknown>)[OPENCLAW_COMPONENT_MARKER];
+      }
       if (result.ok) {
         // T4.2 PREVIEW: if this initiate result carries an allowlisted confirm
         // descriptor, the Governor mints a pending + stamps pending_id/expiry.
@@ -573,21 +580,34 @@ export function createSyntropyMcpPlugin(overrides: SyntropyMcpOverrides = {}) {
           try {
             // Cache the verified caller identity for this session so the sync
             // tool factory (preview) and the before_tool_call guard can resolve
-            // it (their contexts carry sessionKey only).
+            // it (their contexts carry sessionKey only). On an identity DOWNGRADE
+            // (same session, no verified externalId this turn) DELETE the cached
+            // identity — fail-closed, so a stale identity can never authorize a
+            // replayed pending_id on an unverified turn.
             const sessionKey = ctx?.sessionKey ?? "";
-            if (sessionKey && ctx?.externalId) {
-              externalIdBySession.set(sessionKey, ctx.externalId);
+            if (sessionKey) {
+              if (ctx?.externalId) externalIdBySession.set(sessionKey, ctx.externalId);
+              else externalIdBySession.delete(sessionKey);
             }
 
             // T4.3 CONFIRM PARSE: if this raw turn is a CONFIRM/CANCEL directive,
             // validate + stage (or cancel) as a side effect. The staging result
-            // does not change the returned context — the guard does the binding.
+            // does not change the binding (the guard does that) but its soft
+            // note / hard error is surfaced so the user gets a re-prompt.
+            let confirmNote: string | undefined;
             if (typeof event?.prompt === "string") {
-              governor.parseConfirmTurn(event.prompt, ctx?.externalId ?? undefined);
+              const parsed = governor.parseConfirmTurn(event.prompt, ctx?.externalId ?? undefined);
+              if (parsed.error) {
+                confirmNote = `[SYNTROPY_MCP] Your confirmation was not applied: ${parsed.error}. Re-send the confirmation with valid values.`;
+              } else if (parsed.note) {
+                confirmNote = `[SYNTROPY_MCP] ${parsed.note}`;
+              }
             }
 
             const names = catalog.getToolDescriptors().map((entry) => entry.descriptor.name);
-            if (names.length === 0) return {};
+            if (names.length === 0) {
+              return confirmNote ? { prependContext: confirmNote } : {};
+            }
             let prependContext = `[SYNTROPY_MCP] Discovered MCP tools available: ${names.join(", ")}`;
             // Advertise the confirm protocol ONLY when a commit tool is gated, so
             // a plain discovery config keeps its single-line context.
@@ -596,6 +616,7 @@ export function createSyntropyMcpPlugin(overrides: SyntropyMcpOverrides = {}) {
                 "\n[SYNTROPY_MCP] When the user sends a `<CONFIRM pending_id=… fields={…}>` turn, " +
                 "call the named commit tool passing that pending_id — the gateway binds the reviewed values.";
             }
+            if (confirmNote) prependContext += `\n${confirmNote}`;
             return { prependContext };
           } catch (err) {
             api.logger.error(`syntropy-mcp: before_agent_start error: ${err}`);
@@ -617,10 +638,10 @@ export function createSyntropyMcpPlugin(overrides: SyntropyMcpOverrides = {}) {
           } catch (err) {
             api.logger.error(`syntropy-mcp: before_tool_call guard error: ${err}`);
             // Fail-closed: if the guard itself throws on a commit tool, block it.
-            for (const set of commitToolsByServer.values()) {
-              if (set.has(event.toolName)) {
-                return { block: true, blockReason: "Confirmation guard error — action blocked." };
-              }
+            // Key on the SURFACED name (via the governor's resolver) so a
+            // collision-prefixed commit tool is still caught here.
+            if (governor.isGatedCommitTool(event.toolName)) {
+              return { block: true, blockReason: "Confirmation guard error — action blocked." };
             }
             return undefined;
           }

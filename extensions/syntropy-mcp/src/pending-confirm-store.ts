@@ -38,6 +38,13 @@ export type PendingConfirm = {
   externalId: string;
   /** Retained for UX routing only, NOT an authorization input. */
   sessionKey: string;
+  /**
+   * The owning server id the commit tool is discovered on. Bound at mint so the
+   * guard can reject a pending being spent against a same-named commit tool that
+   * the catalog surfaced (collision-prefixed) on a DIFFERENT server. Optional so
+   * direct-mint unit tests need not set it; the preview path always does.
+   */
+  serverId?: string;
   /** Canonical syntropy_* tool name the confirm will invoke. */
   commitTool: string;
   /** analyze/initiate args the Governor reconstructs the commit from. */
@@ -57,6 +64,8 @@ export type PendingConfirm = {
 export type MintInput = {
   externalId: string;
   sessionKey: string;
+  /** Owning server id (see {@link PendingConfirm.serverId}). */
+  serverId?: string;
   commitTool: string;
   previewArgs: Record<string, unknown>;
   editableFields: ComponentFieldDescriptor[];
@@ -113,6 +122,7 @@ export class PendingConfirmStore {
       pendingId,
       externalId: input.externalId,
       sessionKey: input.sessionKey,
+      serverId: input.serverId,
       commitTool: input.commitTool,
       previewArgs: input.previewArgs,
       editableFields: input.editableFields,

@@ -117,3 +117,27 @@ describe("buildEmbeddedRunPayloads — component channelData lift", () => {
     expect(withMessages).toEqual(withoutMessages);
   });
 });
+
+describe("buildEmbeddedRunPayloads — CODE-SILENT-DROP synthesis", () => {
+  it("synthesizes a payload from ui.summary when there is no eligible text payload", () => {
+    // Silent-LLM turn: pending already minted, but no assistant text exists —
+    // the confirmation must still egress so the user gets the pending_id.
+    const payloads = build({ assistantTexts: [], toolResultMessages: [markedToolResult()] });
+    expect(payloads).toHaveLength(1);
+    expect(payloads[0]?.text).toBe(COMPONENT.ui.summary);
+    expect(payloads[0]?.channelData).toEqual({ type: "component", component: COMPONENT });
+  });
+
+  it("synthesizes even when the only payload is an error", () => {
+    const payloads = build({
+      assistantTexts: [],
+      toolResultMessages: [markedToolResult()],
+      lastToolError: { toolName: "syntropy_log_food", error: "boom", mutatingAction: true },
+    });
+    const synthesized = payloads.find((p) => p.channelData);
+    expect(synthesized?.text).toBe(COMPONENT.ui.summary);
+    expect(synthesized?.channelData).toEqual({ type: "component", component: COMPONENT });
+    // The error payload itself carries no channelData.
+    expect(payloads.find((p) => p.isError)?.channelData).toBeUndefined();
+  });
+});
