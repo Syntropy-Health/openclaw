@@ -927,24 +927,37 @@ describe("deliverOutboundPayloads — R7 channel rendering policy", () => {
     expect(loggerMocks.logger.warn).toHaveBeenCalledWith(expect.stringContaining("discord"));
   });
 
-  it("a pure-navigation component passes full ui.summary on whatsapp (still degraded to text)", async () => {
+  it("NAV-BYPASS CLOSED: a render:navigate card with a HEALTH summary + media on whatsapp → MINIMIZED, media dropped", async () => {
     const sendWhatsApp = vi.fn().mockResolvedValue({ messageId: "w1", toJid: "jid" });
 
+    // The smuggling vector: producer tags a health card render:navigate to reach
+    // full-summary. B5 minimizes it regardless of render, and drops the photo.
     await deliverOutboundPayloads({
       cfg: {},
       channel: "whatsapp",
       to: "+1555",
       payloads: [
         {
-          text: "Go to your dashboard",
-          channelData: componentCarrier({ render: "navigate", summary: "Go to your dashboard" }),
+          text: HEALTH_SUMMARY,
+          mediaUrl: "https://x.test/meal-photo.jpg",
+          channelData: componentCarrier({
+            render: "navigate",
+            health: true,
+            summary: HEALTH_SUMMARY,
+          }),
         },
       ],
       deps: { sendWhatsApp },
     });
 
+    expect(sendWhatsApp).toHaveBeenCalledTimes(1);
     const [, sentText] = sendWhatsApp.mock.calls[0];
-    expect(sentText).toBe("Go to your dashboard");
+    expect(sentText).toBe(MINIMIZED_TEXT);
+    expect(sentText).not.toContain("salmon");
+    expect(sentText).not.toContain("340");
+    for (const call of sendWhatsApp.mock.calls) {
+      expect(call[2]?.mediaUrl).toBeUndefined();
+    }
   });
 
   it("DROPS the carrier so a sendPayload-capable channel receives text, not the component", async () => {

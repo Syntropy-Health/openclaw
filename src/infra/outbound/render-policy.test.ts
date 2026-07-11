@@ -91,22 +91,38 @@ describe("planChannelRender — channel-keyed, fail-safe minimization", () => {
     }
   });
 
-  it("render:navigate card on whatsapp → passes full ui.summary (positively non-health routing text)", () => {
+  it("NAV-BYPASS CLOSED: render:navigate card on whatsapp → MINIMIZED (no producer-controlled full-summary path)", () => {
+    // render is producer-controlled: a mismarked/compromised backend could tag a
+    // health card render:navigate to smuggle the summary. The ONLY full-summary
+    // path is an explicitly-phiApproved channel — never a descriptor field.
     const descriptor = makeDescriptor({ render: "navigate", summary: "Go to your dashboard" });
     const plan = planChannelRender(descriptor, "whatsapp");
-    expect(plan).toEqual({ kind: "text", text: "Go to your dashboard", minimized: false });
+    expect(plan).toEqual({ kind: "text", text: MINIMIZED_HEALTH_CONFIRM_TEXT, minimized: true });
   });
 
-  it("render:url card on whatsapp → passes full ui.summary", () => {
+  it("NAV-BYPASS CLOSED: render:url card on whatsapp → MINIMIZED", () => {
     const descriptor = makeDescriptor({ render: "url", summary: "Open the link" });
     const plan = planChannelRender(descriptor, "whatsapp");
-    expect(plan).toEqual({ kind: "text", text: "Open the link", minimized: false });
+    expect(plan).toEqual({ kind: "text", text: MINIMIZED_HEALTH_CONFIRM_TEXT, minimized: true });
   });
 
-  it("render:navigate on an UNKNOWN channel → still passes summary (positively non-health is channel-independent)", () => {
+  it("NAV-BYPASS CLOSED: a render:navigate descriptor with a HEALTH summary + health field on whatsapp → MINIMIZED (the smuggling vector)", () => {
+    const descriptor = makeDescriptor({
+      render: "navigate",
+      summary: HEALTH_SUMMARY,
+      fields: HEALTH_FIELDS,
+    });
+    const plan = planChannelRender(descriptor, "whatsapp");
+    expect(plan).toEqual({ kind: "text", text: MINIMIZED_HEALTH_CONFIRM_TEXT, minimized: true });
+    if (plan.kind === "text") {
+      assertNoHealthLeak(plan.text);
+    }
+  });
+
+  it("NAV-BYPASS CLOSED: render:navigate on an UNKNOWN channel → MINIMIZED", () => {
     const descriptor = makeDescriptor({ render: "navigate", summary: "Go to your dashboard" });
     const plan = planChannelRender(descriptor, "some_future_channel");
-    expect(plan).toEqual({ kind: "text", text: "Go to your dashboard", minimized: false });
+    expect(plan).toEqual({ kind: "text", text: MINIMIZED_HEALTH_CONFIRM_TEXT, minimized: true });
   });
 
   it("phiApproved (non-third-party) channel + health content → full ui.summary", () => {
@@ -166,6 +182,17 @@ describe("sanitizePhiApprovedChannels / isThirdPartyChannel (SEC-4 counsel-gate)
   it("undefined config → empty approved (default: nothing approved)", () => {
     expect(sanitizePhiApprovedChannels(undefined)).toEqual({ approved: [], ignored: [] });
   });
+  it("normalizes case + whitespace so a mixed-case/padded denylisted entry is still stripped", () => {
+    expect(isThirdPartyChannel("WhatsApp")).toBe(true);
+    expect(isThirdPartyChannel(" whatsapp ")).toBe(true);
+    const { approved, ignored } = sanitizePhiApprovedChannels([
+      "WhatsApp",
+      " Slack ",
+      "shrinemobile",
+    ]);
+    expect(approved).toEqual(["shrinemobile"]);
+    expect(ignored).toEqual(["WhatsApp", " Slack "]);
+  });
 });
 
 describe("planChannelDataRender — fail-safe carrier decision", () => {
@@ -219,14 +246,14 @@ describe("planChannelDataRender — fail-safe carrier decision", () => {
     }
   });
 
-  it("nav component on whatsapp → scrub with full summary, not minimized", () => {
+  it("NAV-BYPASS CLOSED: nav component on whatsapp → scrub MINIMIZED (not full summary)", () => {
     const carrier = componentCarrier(
       makeDescriptor({ render: "navigate", summary: "Go to your dashboard" }),
     );
     expect(planChannelDataRender(carrier, "whatsapp")).toEqual({
       action: "scrub",
-      text: "Go to your dashboard",
-      minimized: false,
+      text: MINIMIZED_HEALTH_CONFIRM_TEXT,
+      minimized: true,
     });
   });
 });

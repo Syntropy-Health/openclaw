@@ -6,18 +6,21 @@
  * render surface, so a ComponentDescriptor that rides in a reply payload's
  * `channelData` MUST degrade to plain text before it leaves the gateway.
  *
- * PHI boundary (ratified A&D R7 + Q6) — the minimization gate is CHANNEL-KEYED,
- * fail-safe, NOT per-field detection:
- *   - phiApproved channel                 → full `ui.summary` (health permitted).
- *   - NON-phiApproved channel             → MINIMIZE BY DEFAULT (generic confirm
- *     + optional deep-link, NEVER `ui.summary`) UNLESS the descriptor is
- *     POSITIVELY non-health. The only positively-safe signal is a pure-navigation
- *     descriptor (`render` ∈ {navigate,url}), whose summary is routing text
- *     ("Go to your dashboard"), inherently non-PHI.
+ * PHI boundary (ratified A&D R7 + Q6) — the minimization gate is CHANNEL-KEYED
+ * and fully fail-closed, NOT per-field and NOT per-descriptor-field:
+ *   - phiApproved (non-denylisted) channel → full `ui.summary` (health permitted).
+ *   - EVERY other case                     → MINIMIZE (generic confirm + optional
+ *     deep-link, NEVER `ui.summary`).
+ * There is NO descriptor escape hatch. `render` is producer-controlled, so a
+ * nav/url pass-through would be a smuggling vector — a mismarked/compromised
+ * backend could tag a food-log card render:"navigate" to leak the summary. The
+ * ONLY full-summary path is an explicitly-phiApproved channel. Nav rendering (and
+ * its own non-PHI safety analysis for nav summaries) is deferred to the
+ * openclaw-channel-tool-hooks workstream, which owns that surface.
  * Rationale: `ui.summary` is contractually health-bearing (the canonical example
  * is "Log salmon meal — 340 cal, 34g protein") and field-level `sensitivity` is
  * OPTIONAL — a producer that omits it must NOT downgrade the boundary. So we
- * presume health unless the descriptor proves it is a navigation card.
+ * presume health on every non-approved channel.
  *
  * This is the messaging-channel counterpart to the HTTP presentation path
  * (shrinemobile/webchat), where a component egresses as a first-class output
@@ -66,14 +69,20 @@ export const KNOWN_THIRD_PARTY_CHANNELS: readonly string[] = [
   "googlechat",
 ];
 
+/** Normalize a channel name for denylist comparison — case- and whitespace-insensitive. */
+function normalizeChannelName(channel: string): string {
+  return channel.trim().toLowerCase();
+}
+
 export function isThirdPartyChannel(channel: string): boolean {
-  return KNOWN_THIRD_PARTY_CHANNELS.includes(channel);
+  return KNOWN_THIRD_PARTY_CHANNELS.includes(normalizeChannelName(channel));
 }
 
 /**
  * Strip denylisted third-party channels from a configured phiApproved list.
  * Returns the honored `approved` list and the `ignored` (denylisted) entries so
- * the caller can emit a one-time warning.
+ * the caller can emit a one-time warning. Comparison is normalized (case +
+ * whitespace) so `'WhatsApp'` / `' whatsapp '` are still recognized and stripped.
  */
 export function sanitizePhiApprovedChannels(configured: readonly string[] | undefined): {
   approved: string[];
@@ -98,17 +107,16 @@ export function descriptorHasHealthContent(descriptor: ComponentDescriptor): boo
 }
 
 /**
- * A descriptor is POSITIVELY non-health only when it is a pure navigation card
- * (`render` ∈ {navigate,url}). Everything else (component/confirm/form/food-log,
- * or `render` undefined) is presumed health-bearing and minimized off-approval.
- */
-function isPositivelyNonHealth(descriptor: ComponentDescriptor): boolean {
-  return descriptor.render === "navigate" || descriptor.render === "url";
-}
-
-/**
  * Decide how `descriptor` renders on the outbound messaging `channel`.
  * v1: always "text" (messaging channels can't render components).
+ *
+ * Fully fail-closed: the ONLY full-summary path is an explicitly-phiApproved,
+ * non-denylisted channel. There is NO descriptor-field escape hatch — `render`
+ * is producer-controlled, so a nav/url pass-through would let a mismarked or
+ * compromised backend smuggle a health summary (e.g. tagging a food-log card
+ * render:"navigate"). Nav rendering + its own non-PHI safety analysis for nav
+ * summaries are deferred to the openclaw-channel-tool-hooks workstream, which
+ * owns that surface.
  */
 export function planChannelRender(
   descriptor: ComponentDescriptor,
@@ -122,12 +130,8 @@ export function planChannelRender(
     return { kind: "text", text: descriptor.ui.summary, minimized: false };
   }
 
-  if (isPositivelyNonHealth(descriptor)) {
-    // Pure navigation card: summary is routing text, inherently non-PHI.
-    return { kind: "text", text: descriptor.ui.summary, minimized: false };
-  }
-
-  // Fail-safe default: presume health-bearing → minimize.
+  // Everything else — ANY descriptor on a non-phiApproved channel, including
+  // render:navigate|url — is minimized. Presume health-bearing.
   return { kind: "text", text: minimizedText(descriptor, opts), minimized: true };
 }
 
