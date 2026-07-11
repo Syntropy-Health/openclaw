@@ -587,7 +587,11 @@ describe("syntropy-mcp fail-closed isolation", () => {
     expect(ctx.allLogs().join("\n")).not.toContain("kg_secret");
   });
 
-  it("registers m2m-exchange servers fail-closed (zero tools, one structured plugin log, no throw)", async () => {
+  // B2 (was the B1 placeholder test): the m2m-exchange path is now REAL, but
+  // absent a machine secret AND with no injected actor provider, discovery's
+  // actor token throws (fail-closed) so the server still yields zero tools —
+  // and never lists tools without a credential, exactly like before.
+  it("m2m-exchange with no machine secret fails closed (zero tools, no unauthenticated discovery, no throw)", async () => {
     const listTools = vi.fn(async (baseUrl: string): Promise<McpToolListResult> => {
       if (baseUrl === "http://kg.local") return okList([descriptor("kg_search")]);
       throw new Error("m2m server must never be listed without a token");
@@ -595,19 +599,238 @@ describe("syntropy-mcp fail-closed isolation", () => {
     const ctx = setup({
       pluginConfig: baseConfig({ servers: [kgServer, sjM2mServer] }),
       listTools,
+      env: { KG_MCP_API_KEY: "kg_secret" }, // no CLERK_MACHINE_SECRET_KEY
     });
     await flush();
 
+    // Only the healthy static-key server contributes tools; sj is fail-closed.
     const tools = factoryTools(ctx) as Array<{ name: string }>;
     expect(tools.map((t) => t.name)).toEqual(["kg_search"]);
+    // Discovery for the m2m server never reached listTools (actor token threw).
+    for (const call of listTools.mock.calls) expect(call[0]).toBe("http://kg.local");
+    // One structured plugin log marking the m2m server enabled-but-fail-closed.
+    const m2mLogs = ctx.allLogs().filter((l) => l.includes("m2m-exchange") && l.includes('"sj"'));
+    expect(m2mLogs.length).toBeGreaterThanOrEqual(1);
+    expect(m2mLogs.some((l) => l.includes("fail-closed"))).toBe(true);
+  });
+});
 
-    // Exactly ONE plugin-level structured log for the placeholder.
-    const placeholderLogs = ctx
-      .allLogs()
-      .filter((l) => l.includes("token exchange not implemented"));
-    expect(placeholderLogs).toHaveLength(1);
-    expect(placeholderLogs[0]).toContain('"sj"');
-    expect(placeholderLogs[0]).toContain("B2");
+// ---------------------------------------------------------------------------
+// B2 — m2m-exchange token-exchange wiring
+// ---------------------------------------------------------------------------
+
+/** An actor-token provider stub (mirrors the ServiceAuthProvider surface). */
+function fakeActorProvider(token = "actor.m2m.jwt") {
+  return {
+    getToken: vi.fn(async () => token),
+    get secretMissing() {
+      return false;
+    },
+  };
+}
+
+function b64url(obj: unknown): string {
+  return Buffer.from(JSON.stringify(obj)).toString("base64url");
+}
+
+/** Decode a fake minted JWT's payload — the injectable verify seam for tests. */
+const decodeMinted = async (jwt: string): Promise<Record<string, unknown>> =>
+  JSON.parse(Buffer.from(jwt.split(".")[1]!, "base64url").toString("utf8"));
+
+/** Build a minted-token exchange Response bound to the (composed) subject `sub`. */
+function mintedExchangeResponse(sub: string): Response {
+  const iat = Math.floor(nowMs / 1000);
+  const claims = {
+    sub,
+    act: { sub: "machine_openclaw" },
+    aud: "http://sj.local/mcp",
+    iss: "http://sj.local",
+    iat,
+    exp: iat + 1800,
+    tier: 2,
+  };
+  return {
+    ok: true,
+    status: 200,
+    json: async () => ({
+      access_token: `${b64url({ alg: "RS256", kid: "sj-1" })}.${b64url(claims)}.sig`,
+      issued_token_type: "urn:ietf:params:oauth:token-type:jwt",
+      token_type: "Bearer",
+      expires_in: 1800,
+    }),
+    text: async () => "",
+  } as unknown as Response;
+}
+
+const sjExchangeServer = {
+  id: "sj",
+  baseUrl: "http://sj.local",
+  auth: "m2m-exchange",
+  resource: "http://sj.local/mcp",
+  exchangePath: "/api/tokens/exchange",
+  machineSub: "machine_openclaw",
+  issuer: "http://sj.local",
+  label: "sj-mcp",
+};
+
+function setupExchange(opts: {
+  actorProvider?: ReturnType<typeof fakeActorProvider> | null;
+  exchangeFetch?: typeof fetch;
+  listTools?: SyntropyMcpOverrides["listTools"];
+  callTool?: SyntropyMcpOverrides["callTool"];
+  env?: NodeJS.ProcessEnv;
+}) {
+  const timers = new FakeTimers();
+  const listTools =
+    opts.listTools ??
+    vi.fn(async (): Promise<McpToolListResult> => okList([descriptor("sj_search")]));
+  const callTool =
+    opts.callTool ?? vi.fn(async (): Promise<McpToolResult> => ({ data: { ok: 1 }, ok: true }));
+  const plugin = createSyntropyMcpPlugin({
+    listTools,
+    callTool,
+    env: opts.env ?? {},
+    now,
+    setIntervalFn: timers.setIntervalFn,
+    clearIntervalFn: timers.clearIntervalFn,
+    setTimeoutFn: timers.setTimeoutFn,
+    clearTimeoutFn: timers.clearTimeoutFn,
+    serviceAuthProvider: opts.actorProvider,
+    exchangeFetch: opts.exchangeFetch,
+    verifyMintedToken: decodeMinted,
+  });
+  const fake = createFakeApi(baseConfig({ servers: [sjExchangeServer] }));
+  plugin.register(fake.api);
+  return { ...fake, plugin, timers, listTools, callTool };
+}
+
+describe("syntropy-mcp m2m-exchange wiring (B2)", () => {
+  it("a valid mocked exchange yields a working getToken — execute calls with the exchanged user token", async () => {
+    const actor = fakeActorProvider();
+    const exchangeFetch = vi.fn(async (_url: string, init?: RequestInit) => {
+      const sub = new URLSearchParams(init!.body as string).get("requested_subject")!;
+      return mintedExchangeResponse(sub);
+    }) as unknown as typeof fetch;
+    const callTool = vi.fn(async (): Promise<McpToolResult> => ({ data: { hits: [] }, ok: true }));
+
+    const ctx = setupExchange({ actorProvider: actor, exchangeFetch, callTool });
+    await flush();
+
+    // Discovery used the ACTOR token (machine op, no user in scope).
+    expect(actor.getToken).toHaveBeenCalled();
+
+    // A verified user runs a tool → the exchanged user token is used on the wire.
+    const hook = ctx.hooks.get("before_agent_start")![0]!;
+    await hook.handler({ prompt: "search" }, { sessionKey: "s1", externalId: "user_A" });
+    // The tool ctx carries the message channel → Tier-2 channel-scoped subject.
+    const tools = ctx.toolFactories[0]!({ sessionKey: "s1", messageChannel: "telegram" }) as Array<{
+      name: string;
+      execute: (id: string, args: unknown) => Promise<unknown>;
+    }>;
+    const tool = tools.find((t) => t.name === "sj_search")!;
+    await tool.execute("c1", { q: "x" });
+
+    // The exchange endpoint was hit with a channel-scoped requested_subject and
+    // the token handed to callTool is the minted (3-segment) JWT — NOT the actor.
+    const exchangeCalls = (exchangeFetch as unknown as ReturnType<typeof vi.fn>).mock.calls;
+    expect(exchangeCalls.length).toBeGreaterThanOrEqual(1);
+    expect(exchangeCalls[0]![0]).toBe("http://sj.local/api/tokens/exchange");
+    const sentSubject = new URLSearchParams(
+      (exchangeCalls[0]![1] as RequestInit).body as string,
+    ).get("requested_subject");
+    expect(sentSubject).toBe("telegram:user_A");
+    const bearer = (callTool.mock.calls.at(-1) as unknown as unknown[])[1] as string;
+    expect(bearer.split(".")).toHaveLength(3);
+    expect(bearer).not.toBe("actor.m2m.jwt");
+  });
+
+  it("no externalId → fail-closed (getToken rejects, no exchange, no transport call)", async () => {
+    const actor = fakeActorProvider();
+    const exchangeFetch = vi.fn(async () =>
+      mintedExchangeResponse("nobody"),
+    ) as unknown as typeof fetch;
+    const callTool = vi.fn(async (): Promise<McpToolResult> => ({ data: {}, ok: true }));
+
+    const ctx = setupExchange({ actorProvider: actor, exchangeFetch, callTool });
+    await flush();
+
+    // No before_agent_start identity cached → the tool factory sees no externalId.
+    const tools = ctx.toolFactories[0]!({ sessionKey: "s1" }) as Array<{
+      name: string;
+      execute: (id: string, args: unknown) => Promise<{ content: Array<{ text?: string }> }>;
+    }>;
+    const tool = tools.find((t) => t.name === "sj_search")!;
+    const result = await tool.execute("c1", {});
+
+    // Fail-closed: exchange never attempted, transport never called, auth-failed surfaced.
+    expect(exchangeFetch as unknown as ReturnType<typeof vi.fn>).not.toHaveBeenCalled();
+    expect(callTool).not.toHaveBeenCalled();
+    expect(result.content[0]?.text ?? "").toMatch(/auth failed/);
+  });
+
+  it("missing machine secret (no injected provider) → fail-closed, zero tools", async () => {
+    const listTools = vi.fn(async (): Promise<McpToolListResult> => {
+      throw new Error("must never list without a credential");
+    });
+    // serviceAuthProvider omitted → default provider built from env; no secret present.
+    const ctx = setupExchange({ listTools, env: {} });
+    await flush();
+
+    const entries = ctx.toolFactories[0]!({ sessionKey: "s1" });
+    expect(entries).toBeNull();
+    // The default provider's getToken threw (secretMissing) before any listTools.
+    expect(listTools).not.toHaveBeenCalled();
+  });
+
+  it("Tier 2 request shape: requested_subject='<channel>:<externalId>', no subject_token", async () => {
+    const actor = fakeActorProvider();
+    const exchangeFetch = vi.fn(async (_url: string, init?: RequestInit) => {
+      const sub = new URLSearchParams(init!.body as string).get("requested_subject")!;
+      return mintedExchangeResponse(sub);
+    }) as unknown as typeof fetch;
+
+    const ctx = setupExchange({ actorProvider: actor, exchangeFetch });
+    await flush();
+    const hook = ctx.hooks.get("before_agent_start")![0]!;
+    await hook.handler({ prompt: "search" }, { sessionKey: "s1", externalId: "user_A" });
+    const tools = ctx.toolFactories[0]!({ sessionKey: "s1", messageChannel: "telegram" }) as Array<{
+      name: string;
+      execute: (id: string, args: unknown) => Promise<unknown>;
+    }>;
+    await tools.find((t) => t.name === "sj_search")!.execute("c1", {});
+
+    const init = (exchangeFetch as unknown as ReturnType<typeof vi.fn>).mock
+      .calls[0]![1] as RequestInit;
+    const p = new URLSearchParams(init.body as string);
+    expect(p.get("grant_type")).toBe("urn:ietf:params:oauth:grant-type:token-exchange");
+    expect(p.get("actor_token")).toBe("actor.m2m.jwt");
+    expect(p.get("resource")).toBe("http://sj.local/mcp");
+    // Channel-scoped subject (SJ removed the bare-externalId path).
+    expect(p.get("requested_subject")).toBe("telegram:user_A");
+    expect(p.has("subject_token")).toBe(false);
+  });
+
+  it("Tier 2 with NO channel → fail-closed (no exchange, no transport call)", async () => {
+    const actor = fakeActorProvider();
+    const exchangeFetch = vi.fn(async () =>
+      mintedExchangeResponse("nobody"),
+    ) as unknown as typeof fetch;
+    const callTool = vi.fn(async (): Promise<McpToolResult> => ({ data: {}, ok: true }));
+
+    const ctx = setupExchange({ actorProvider: actor, exchangeFetch, callTool });
+    await flush();
+    const hook = ctx.hooks.get("before_agent_start")![0]!;
+    await hook.handler({ prompt: "search" }, { sessionKey: "s1", externalId: "user_A" });
+    // Factory ctx WITHOUT messageChannel → Tier-2 cannot compose a subject.
+    const tools = ctx.toolFactories[0]!({ sessionKey: "s1" }) as Array<{
+      name: string;
+      execute: (id: string, args: unknown) => Promise<{ content: Array<{ text?: string }> }>;
+    }>;
+    const result = await tools.find((t) => t.name === "sj_search")!.execute("c1", {});
+
+    expect(exchangeFetch as unknown as ReturnType<typeof vi.fn>).not.toHaveBeenCalled();
+    expect(callTool).not.toHaveBeenCalled();
+    expect(result.content[0]?.text ?? "").toMatch(/auth failed/);
   });
 });
 

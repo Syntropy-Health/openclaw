@@ -1,0 +1,490 @@
+/**
+ * TokenExchangeClient — the RFC 8693 client half of per-user auth (B2).
+ *
+ * openclaw's `m2m-exchange` MCP servers need a **user-scoped** token to call a
+ * backend on behalf of the current human. This client performs the OAuth 2.0
+ * Token Exchange (RFC 8693) against the backend's exchange endpoint, using the
+ * gateway's own M2M JWT (from {@link ServiceAuthProvider}) as the `actor_token`
+ * and EITHER the user's live Clerk JWT (Tier 1, `subject_token`) OR a
+ * channel-scoped subject (Tier 2, `requested_subject` = `"<channel>:<externalId>"`).
+ * SJ's security QG removed the bare-`externalId` Tier-2 path (no consent artifact
+ * = impersonation surface), so a Tier-2 subject is always channel-scoped.
+ *
+ * The response is an **SJ-minted RS256 JWT** (CTO-ruled Option B, #2924): SJ
+ * signs it with its own key and serves its own JWKS at `{baseUrl}{jwksPath}`.
+ * This client:
+ *   - VALIDATES the minted token BEFORE caching — RS256 signature against SJ's
+ *     JWKS (via {@link createJwksVerifier}: alg-pinned RS256, 300s keyset cache,
+ *     unknown-kid fail-closed) AND the binding claims (`sub`=={@link subjectId},
+ *     `act.sub`==machineSub, `aud`==resource, `iss`==issuer, `exp` future, `nbf`
+ *     not-future). A token failing ANY check is NEVER cached and NEVER returned —
+ *     the call throws a structured {@link TokenExchangeError}.
+ *   - CACHES per {@link subjectId} (Tier-2 channel-scoped, so the same externalId
+ *     on two channels never shares a token), with a refresh skew, TTL driven
+ *     DYNAMICALLY by the response `expires_in` (SJ ≤900s — never hardcoded).
+ *   - SINGLE-FLIGHTS concurrent exchanges for the same subject key.
+ *   - {@link invalidate}s a subject's cache on a downstream 401 so the next call
+ *     re-exchanges (the retry itself lives in the tool execute path).
+ *
+ * **Token / PII hygiene:** no `access_token`, `actor_token`, `subject_token`,
+ * or raw `externalId` (a Clerk user id = PII) ever appears in a thrown error —
+ * the externalId is redacted to a short non-reversible hash for correlation only.
+ */
+
+import { createHash, createPublicKey, verify as cryptoVerify } from "node:crypto";
+
+// ---------------------------------------------------------------------------
+// Public types
+// ---------------------------------------------------------------------------
+
+export type TokenExchangeConfig = {
+  serverId: string;
+  baseUrl: string;
+  /** Exchange endpoint path; default "/api/tokens/exchange". */
+  exchangePath: string;
+  /** Canonical /mcp URI == expected `aud` on the minted token. */
+  resource: string;
+  /** JWKS path; default "/api/mcp/.well-known/jwks.json". */
+  jwksPath?: string;
+  /** Expected `act.sub` on the minted token (the gateway machine sub). */
+  machineSub: string;
+  /**
+   * Expected `iss` on the minted token (SJ base / issuer URL). Required —
+   * fail-closed if the token's `iss` is missing or mismatched. Trailing-slash
+   * tolerant (compared after stripping a single trailing "/").
+   */
+  issuer: string;
+};
+
+export type ExchangeSubject =
+  | { tier: 1; externalId: string; userJwt: string } // subject_token (Clerk JWT / HTTP)
+  | { tier: 2; externalId: string; channel: string }; // requested_subject = "<channel>:<externalId>"
+
+/**
+ * The identity the minted token's `sub` is bound to (and the Tier-2 wire
+ * `requested_subject`). SJ's security QG removed the bare-`externalId` Tier-2
+ * path (no consent artifact = impersonation surface), so a Tier-2 subject is
+ * scoped by channel: `"<channel>:<externalId>"` (e.g. `"telegram:12345"`).
+ * Tier-1 stays the bare `externalId` (the Clerk-JWT/HTTP path).
+ */
+export function subjectId(subject: ExchangeSubject): string {
+  return subject.tier === 2 ? `${subject.channel}:${subject.externalId}` : subject.externalId;
+}
+
+/**
+ * Verify a minted RS256 JWT against the JWKS at `jwksUrl`, returning its claims.
+ * Injectable so tests decode a fake JWT and production verifies the signature.
+ * MUST throw (reject) on any signature/parse failure — the client treats a
+ * resolved value as an authentic token whose claims it then binds-checks.
+ */
+export type VerifyMintedTokenFn = (
+  jwt: string,
+  jwksUrl: string,
+) => Promise<Record<string, unknown>>;
+
+export type TokenExchangeOptions = {
+  /** The gateway M2M JWT (the `actor_token`), from a ServiceAuthProvider. */
+  getActorToken: () => Promise<string>;
+  /** Injectable transport (tests); defaults to global `fetch`. */
+  fetchFn?: typeof fetch;
+  /** Injectable JWKS verify seam; defaults to an RS256/`node:crypto` verifier. */
+  verifyMintedToken?: VerifyMintedTokenFn;
+  /** Injectable clock (epoch ms); defaults to `Date.now`. */
+  now?: () => number;
+};
+
+/** A structured, hygiene-safe error. `code` classifies the failure. */
+export class TokenExchangeError extends Error {
+  readonly code: string;
+  constructor(code: string, message: string) {
+    super(message);
+    this.name = "TokenExchangeError";
+    this.code = code;
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Constants
+// ---------------------------------------------------------------------------
+
+const DEFAULT_JWKS_PATH = "/api/mcp/.well-known/jwks.json";
+const REFRESH_SKEW_MS = 60_000;
+const GRANT_TYPE = "urn:ietf:params:oauth:grant-type:token-exchange";
+const TOKEN_TYPE_JWT = "urn:ietf:params:oauth:token-type:jwt";
+const EXCHANGE_TIMEOUT_MS = 15_000;
+/** JWKS keyset cache max-age. Rotation safety = SJ serving old+new kids across
+ *  this window + natural expiry pickup (devex: NO cache-bypassing kid refetch). */
+const JWKS_MAX_AGE_MS = 300_000;
+
+/** RFC 6749 error codes we surface unchanged; anything else → "invalid_grant". */
+const RFC6749_ERRORS = new Set(["invalid_grant", "invalid_request", "unauthorized_client"]);
+
+// ---------------------------------------------------------------------------
+// Redaction — never leak the raw Clerk user id (PII) or any token value.
+// ---------------------------------------------------------------------------
+
+/** Short, stable, non-reversible tag for an externalId (correlation only). */
+function redactId(externalId: string): string {
+  return `uid#${createHash("sha256").update(externalId).digest("hex").slice(0, 8)}`;
+}
+
+// ---------------------------------------------------------------------------
+// Default verify seam — RS256 against SJ's JWKS, zero external deps.
+// ---------------------------------------------------------------------------
+
+type Jwks = { keys?: JsonWebKey[] };
+
+/** Injectable JWKS source; default fetches + parses over `fetch`. */
+export type JwksFetchFn = (url: string) => Promise<Jwks>;
+
+export type JwksVerifierOptions = {
+  /** Injectable JWKS fetcher (tests). Default: real `fetch` → JSON. */
+  fetchJwks?: JwksFetchFn;
+  /** Injectable clock (epoch ms) — drives the JWKS cache max-age. Default `Date.now`. */
+  now?: () => number;
+  /** Keyset cache max-age (ms). Default 300s. */
+  maxAgeMs?: number;
+};
+
+function decodeSegment(segment: string): Record<string, unknown> {
+  return JSON.parse(Buffer.from(segment, "base64url").toString("utf8")) as Record<string, unknown>;
+}
+
+/** Default real JWKS fetcher — fail-closed (throws) on any non-2xx / parse error. */
+const defaultFetchJwks: JwksFetchFn = async (url) => {
+  const res = await fetch(url, {
+    method: "GET",
+    headers: { Accept: "application/json" },
+    signal: AbortSignal.timeout(10_000),
+  });
+  if (!res.ok) {
+    throw new TokenExchangeError("invalid_token", `JWKS fetch failed (${res.status})`);
+  }
+  return (await res.json()) as Jwks;
+};
+
+/**
+ * Build the DEFAULT minted-token verifier — the security kernel of the exchange
+ * (devex condition-of-approval). Verifies an RS256 signature against SJ's JWKS
+ * with `node:crypto` and returns the raw claims (binding claims — sub/act.sub/
+ * aud/exp/iss/nbf — are the client's job). Throws on ANY failure so the client's
+ * fail-closed contract holds. Non-obvious, deliberate security properties:
+ *
+ *  - **ALG hard-pin (anti algorithm-confusion):** `alg` MUST be `RS256`. `none`
+ *    and `HS256` (the HMAC-with-the-public-key attack) are rejected on the header
+ *    BEFORE any JWKS fetch or key work — the fetcher is never invoked for them.
+ *  - **JWKS cache (max-age 300s, injectable clock):** the keyset is fetched at
+ *    most once per `maxAgeMs`; verifies inside the window reuse the cached keys.
+ *  - **Unknown-kid FAIL-CLOSED (NO fetch-and-trust):** a `kid` absent from the
+ *    currently-cached keyset is rejected. We do NOT trigger a cache-bypassing
+ *    refetch to "find" an arbitrary kid — rotation safety is SJ serving old+new
+ *    kids during the overlap window + the natural 300s expiry. (This is distinct
+ *    from the CLIENT's invalidate + re-exchange on a tool-call 401, which stays.)
+ */
+export function createJwksVerifier(opts: JwksVerifierOptions = {}): VerifyMintedTokenFn {
+  const fetchJwks = opts.fetchJwks ?? defaultFetchJwks;
+  const now = opts.now ?? Date.now;
+  const maxAgeMs = opts.maxAgeMs ?? JWKS_MAX_AGE_MS;
+  // Per-verifier keyset cache, keyed by jwksUrl.
+  const cache = new Map<string, { keys: JsonWebKey[]; fetchedAt: number }>();
+
+  const resolveKeys = async (jwksUrl: string): Promise<JsonWebKey[]> => {
+    const entry = cache.get(jwksUrl);
+    if (entry && now() - entry.fetchedAt < maxAgeMs) return entry.keys;
+    let jwks: Jwks;
+    try {
+      jwks = await fetchJwks(jwksUrl);
+    } catch (err) {
+      // Fail-closed: any JWKS fetch failure → no keys accepted. Never echo the
+      // underlying cause (could carry a URL/credential); re-wrap structurally.
+      if (err instanceof TokenExchangeError) throw err;
+      throw new TokenExchangeError("invalid_token", "JWKS fetch failed");
+    }
+    const keys = Array.isArray(jwks?.keys) ? jwks.keys : [];
+    cache.set(jwksUrl, { keys, fetchedAt: now() });
+    return keys;
+  };
+
+  return async (jwt, jwksUrl) => {
+    const parts = jwt.split(".");
+    if (parts.length !== 3 || !parts[0] || !parts[1] || !parts[2]) {
+      throw new TokenExchangeError("invalid_token", "minted token is not a well-formed JWS");
+    }
+    const header = decodeSegment(parts[0]) as { alg?: string; kid?: string };
+    // ALG hard-pin FIRST — before any fetch/key work (anti algorithm-confusion).
+    if (header.alg !== "RS256") {
+      throw new TokenExchangeError("invalid_token", "minted token alg is not RS256");
+    }
+    if (typeof header.kid !== "string" || header.kid.length === 0) {
+      throw new TokenExchangeError("invalid_token", "minted token has no kid");
+    }
+
+    // Only NOW may we touch the JWKS (cache-first).
+    const keys = await resolveKeys(jwksUrl);
+    const jwk = keys.find((k) => (k as { kid?: string }).kid === header.kid);
+    if (!jwk) {
+      // Unknown kid → FAIL CLOSED. No cache-bypassing refetch (devex).
+      throw new TokenExchangeError("invalid_token", "minted token kid not in the cached JWKS");
+    }
+
+    const publicKey = createPublicKey({ key: jwk, format: "jwk" });
+    const signingInput = Buffer.from(`${parts[0]}.${parts[1]}`);
+    const signature = Buffer.from(parts[2], "base64url");
+    if (signature.length === 0 || !cryptoVerify("RSA-SHA256", signingInput, publicKey, signature)) {
+      throw new TokenExchangeError("invalid_token", "minted token signature is invalid");
+    }
+    return decodeSegment(parts[1]);
+  };
+}
+
+// ---------------------------------------------------------------------------
+// Client
+// ---------------------------------------------------------------------------
+
+type CachedToken = { token: string; expiresAtMs: number };
+
+export class TokenExchangeClient {
+  private readonly cfg: TokenExchangeConfig;
+  private readonly getActorToken: () => Promise<string>;
+  private readonly fetchFn: typeof fetch;
+  private readonly verifyMintedToken: VerifyMintedTokenFn;
+  private readonly now: () => number;
+  private readonly jwksUrl: string;
+
+  private readonly cache = new Map<string, CachedToken>();
+  private readonly inFlight = new Map<string, Promise<string>>();
+
+  constructor(cfg: TokenExchangeConfig, opts: TokenExchangeOptions) {
+    this.cfg = cfg;
+    this.getActorToken = opts.getActorToken;
+    this.fetchFn = opts.fetchFn ?? fetch;
+    this.now = opts.now ?? Date.now;
+    // The default verifier shares the client's clock so its JWKS cache max-age
+    // is driven by the same (injectable) time source.
+    this.verifyMintedToken = opts.verifyMintedToken ?? createJwksVerifier({ now: this.now });
+    const jwksPath = cfg.jwksPath ?? DEFAULT_JWKS_PATH;
+    this.jwksUrl = `${cfg.baseUrl}${jwksPath}`;
+  }
+
+  /**
+   * Exchange for a user-scoped token, caching per {@link subjectId} (Tier-2 is
+   * channel-scoped `"<channel>:<externalId>"`, so the same externalId on two
+   * channels never shares a token). Returns the validated `access_token`.
+   * Single-flighted per subject key.
+   */
+  async getUserToken(subject: ExchangeSubject): Promise<string> {
+    const key = subjectId(subject);
+
+    const cached = this.cache.get(key);
+    if (cached && this.now() < cached.expiresAtMs - REFRESH_SKEW_MS) {
+      return cached.token;
+    }
+
+    const existing = this.inFlight.get(key);
+    if (existing) return existing;
+
+    const flight = this.exchange(subject)
+      .then((minted) => {
+        // Cache ONLY after validation succeeded (exchange() throws otherwise).
+        this.cache.set(key, minted);
+        return minted.token;
+      })
+      .finally(() => {
+        this.inFlight.delete(key);
+      });
+    this.inFlight.set(key, flight);
+    return flight;
+  }
+
+  /**
+   * Drop a cached token (call on a downstream 401). `key` is the {@link subjectId}
+   * — for Tier-2 the channel-scoped `"<channel>:<externalId>"`, for Tier-1 the
+   * bare externalId.
+   */
+  invalidate(key: string): void {
+    this.cache.delete(key);
+  }
+
+  // -------------------------------------------------------------------------
+  // Internals
+  // -------------------------------------------------------------------------
+
+  private async exchange(subject: ExchangeSubject): Promise<CachedToken> {
+    const idTag = redactId(subject.externalId);
+
+    let actorToken: string;
+    try {
+      actorToken = await this.getActorToken();
+    } catch (err) {
+      // Never interpolate the underlying provider message (may carry secrets).
+      throw new TokenExchangeError(
+        "actor_token",
+        `${this.cfg.serverId}: could not obtain actor token for ${idTag} — ${errKind(err)}`,
+      );
+    }
+
+    const body = new URLSearchParams();
+    body.set("grant_type", GRANT_TYPE);
+    body.set("actor_token", actorToken);
+    body.set("actor_token_type", TOKEN_TYPE_JWT);
+    body.set("resource", this.cfg.resource);
+    if (subject.tier === 1) {
+      body.set("subject_token", subject.userJwt);
+      body.set("subject_token_type", TOKEN_TYPE_JWT);
+    } else {
+      // Tier-2 is channel-scoped: "<channel>:<externalId>" (SJ security QG).
+      body.set("requested_subject", subjectId(subject));
+    }
+
+    const url = `${this.cfg.baseUrl}${this.cfg.exchangePath}`;
+    let resp: Response;
+    try {
+      resp = await this.fetchFn(url, {
+        method: "POST",
+        headers: { "Content-Type": "application/x-www-form-urlencoded" },
+        body: body.toString(),
+        signal: AbortSignal.timeout(EXCHANGE_TIMEOUT_MS),
+      });
+    } catch {
+      // Swallow the raw cause — a network error message can echo the request
+      // (and thus the actor/subject token). Surface a generic, safe message.
+      throw new TokenExchangeError(
+        "network",
+        `${this.cfg.serverId}: token exchange request failed for ${idTag}`,
+      );
+    }
+
+    if (!resp.ok) {
+      const code = await readRfcErrorCode(resp);
+      throw new TokenExchangeError(
+        code,
+        `${this.cfg.serverId}: token exchange rejected (${resp.status}/${code}) for ${idTag}`,
+      );
+    }
+
+    let json: Record<string, unknown>;
+    try {
+      json = (await resp.json()) as Record<string, unknown>;
+    } catch {
+      throw new TokenExchangeError(
+        "invalid_response",
+        `${this.cfg.serverId}: token exchange returned a non-JSON body for ${idTag}`,
+      );
+    }
+
+    const accessToken = json.access_token;
+    if (typeof accessToken !== "string" || accessToken.length === 0) {
+      throw new TokenExchangeError(
+        "invalid_response",
+        `${this.cfg.serverId}: token exchange response had no access_token for ${idTag}`,
+      );
+    }
+
+    // --- VALIDATE BEFORE CACHE: signature (Option B RS256/JWKS) then claims. ---
+    let claims: Record<string, unknown>;
+    try {
+      claims = await this.verifyMintedToken(accessToken, this.jwksUrl);
+    } catch {
+      // Never echo the token or the verifier's raw message.
+      throw new TokenExchangeError(
+        "invalid_token",
+        `${this.cfg.serverId}: minted token failed signature verification for ${idTag}`,
+      );
+    }
+
+    // Expected `sub` is the composed subject identity: Tier-2 channel-scoped
+    // ("<channel>:<externalId>"), Tier-1 the bare externalId.
+    this.checkClaims(claims, subjectId(subject), idTag);
+
+    const expiresAtMs = this.deriveExpiry(claims, json.expires_in);
+    return { token: accessToken, expiresAtMs };
+  }
+
+  /**
+   * Enforce the binding claims. Throws a hygiene-safe {@link TokenExchangeError}
+   * (never the token, the claim values, or the raw externalId) on any mismatch.
+   * `expectedSub` is the composed {@link subjectId} the minted `sub` must equal.
+   */
+  private checkClaims(claims: Record<string, unknown>, expectedSub: string, idTag: string): void {
+    const fail = (detail: string): never => {
+      throw new TokenExchangeError(
+        "claim_mismatch",
+        `${this.cfg.serverId}: minted token ${detail} for ${idTag}`,
+      );
+    };
+
+    if (claims.sub !== expectedSub) fail("sub does not match the requested subject");
+
+    const act = claims.act;
+    const actSub =
+      act && typeof act === "object" ? (act as Record<string, unknown>).sub : undefined;
+    if (actSub !== this.cfg.machineSub) fail("act.sub does not match the gateway machine sub");
+
+    const aud = claims.aud;
+    const audOk = Array.isArray(aud) ? aud.includes(this.cfg.resource) : aud === this.cfg.resource;
+    if (!audOk) fail("aud does not match the server resource");
+
+    // iss MUST match (fail-closed if missing/mismatched); trailing-slash tolerant.
+    const iss = claims.iss;
+    if (typeof iss !== "string" || stripSlash(iss) !== stripSlash(this.cfg.issuer)) {
+      fail("iss is missing or does not match the expected issuer");
+    }
+
+    const exp = claims.exp;
+    if (typeof exp !== "number" || !(exp * 1000 > this.now())) {
+      fail("exp is missing or in the past");
+    }
+
+    // nbf, when present, must be <= now (reject a not-yet-valid token). Absent OK.
+    const nbf = claims.nbf;
+    if (nbf !== undefined && (typeof nbf !== "number" || nbf * 1000 > this.now())) {
+      fail("nbf is in the future (token not yet valid)");
+    }
+  }
+
+  /**
+   * Absolute expiry (epoch ms), driven DYNAMICALLY by the response's `expires_in`
+   * (SJ now issues ≤900s — never a hardcoded lifetime here). The cache-freshness
+   * check applies the −60s skew. When `expires_in` is absent/invalid, fall back
+   * to the token's own `exp` claim (guaranteed a valid future number by
+   * {@link checkClaims}, which runs first).
+   */
+  private deriveExpiry(claims: Record<string, unknown>, expiresInRaw: unknown): number {
+    if (typeof expiresInRaw === "number" && expiresInRaw > 0) {
+      return this.now() + expiresInRaw * 1000;
+    }
+    const exp = claims.exp;
+    if (typeof exp === "number" && Number.isFinite(exp)) return exp * 1000;
+    // Unreachable: checkClaims enforces a valid future exp before we get here.
+    return this.now();
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Helpers
+// ---------------------------------------------------------------------------
+
+/** Coarse error kind for logging — never the message (may carry a token). */
+function errKind(err: unknown): string {
+  return err instanceof Error ? err.name : "error";
+}
+
+/** Strip a single trailing "/" for trailing-slash-tolerant issuer comparison. */
+function stripSlash(s: string): string {
+  return s.endsWith("/") ? s.slice(0, -1) : s;
+}
+
+/**
+ * Extract the RFC 6749 `error` code from a rejection body, mapping unknown /
+ * absent codes to `invalid_grant`. Never returns free-form body text (which
+ * could echo a token) — only a fixed vocabulary code.
+ */
+async function readRfcErrorCode(resp: Response): Promise<string> {
+  try {
+    const body = (await resp.json()) as { error?: unknown };
+    if (typeof body.error === "string" && RFC6749_ERRORS.has(body.error)) return body.error;
+  } catch {
+    // fall through
+  }
+  return "invalid_grant";
+}

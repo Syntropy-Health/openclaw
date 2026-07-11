@@ -1,0 +1,649 @@
+import { createSign, generateKeyPairSync } from "node:crypto";
+import { beforeEach, describe, expect, it, vi } from "vitest";
+import {
+  createJwksVerifier,
+  type ExchangeSubject,
+  subjectId,
+  TokenExchangeClient,
+  type TokenExchangeConfig,
+  TokenExchangeError,
+} from "./token-exchange.js";
+
+// ---------------------------------------------------------------------------
+// Helpers — build fake minted JWTs + canned exchange responses (NO network).
+// ---------------------------------------------------------------------------
+
+function b64url(obj: unknown): string {
+  return Buffer.from(JSON.stringify(obj)).toString("base64url");
+}
+
+/** A structurally-valid JWS string whose payload the mock verifier decodes. */
+function fakeJwt(claims: Record<string, unknown>, kid = "sj-1"): string {
+  return `${b64url({ alg: "RS256", kid })}.${b64url(claims)}.sig`;
+}
+
+/** The default mock verifier: decode the payload segment, return the claims. */
+const decodeVerify = vi.fn(
+  async (jwt: string, _jwksUrl: string): Promise<Record<string, unknown>> =>
+    JSON.parse(Buffer.from(jwt.split(".")[1]!, "base64url").toString("utf8")),
+);
+
+function jsonResponse(status: number, body: unknown): Response {
+  return {
+    ok: status >= 200 && status < 300,
+    status,
+    json: async () => body,
+    text: async () => JSON.stringify(body),
+  } as unknown as Response;
+}
+
+const BASE_URL = "http://sj.local";
+const RESOURCE = "http://sj.local/mcp";
+const ISSUER = "http://sj.local";
+const MACHINE_SUB = "machine_openclaw";
+const EXTERNAL_ID = "user_2abcDEF";
+const CHANNEL = "telegram";
+// Tier-2 subject is channel-scoped (SJ security QG): "<channel>:<externalId>".
+const COMPOSED_SUB = `${CHANNEL}:${EXTERNAL_ID}`;
+const USER_JWT = "clerk.live.jwt";
+const ACTOR_TOKEN = "gateway.m2m.jwt";
+
+const cfg: TokenExchangeConfig = {
+  serverId: "sj",
+  baseUrl: BASE_URL,
+  exchangePath: "/api/tokens/exchange",
+  resource: RESOURCE,
+  jwksPath: "/api/mcp/.well-known/jwks.json",
+  machineSub: MACHINE_SUB,
+  issuer: ISSUER,
+};
+
+let nowMs: number;
+const now = () => nowMs;
+const nowSec = () => Math.floor(nowMs / 1000);
+
+/**
+ * Build a minted-token response with sane claims (overridable per-test).
+ * Defaults to the Tier-2 channel-scoped `sub` (most tests exercise Tier 2);
+ * Tier-1 tests override `sub` to the bare externalId. `expiresIn` is separate
+ * from the `exp` claim so a test can prove the cache TTL is driven by the
+ * response field, not the claim.
+ */
+function mintedResponse(overrides: Record<string, unknown> = {}, expiresIn = 900): Response {
+  const iat = nowSec();
+  const claims = {
+    sub: COMPOSED_SUB,
+    act: { sub: MACHINE_SUB },
+    aud: RESOURCE,
+    iss: BASE_URL,
+    iat,
+    exp: iat + 1800,
+    tier: 2,
+    ...overrides,
+  };
+  return jsonResponse(200, {
+    access_token: fakeJwt(claims),
+    issued_token_type: "urn:ietf:params:oauth:token-type:jwt",
+    token_type: "Bearer",
+    expires_in: expiresIn,
+  });
+}
+
+function makeClient(opts: {
+  fetchFn: typeof fetch;
+  getActorToken?: () => Promise<string>;
+  verifyMintedToken?: (jwt: string, jwksUrl: string) => Promise<Record<string, unknown>>;
+}) {
+  return new TokenExchangeClient(cfg, {
+    getActorToken: opts.getActorToken ?? (async () => ACTOR_TOKEN),
+    fetchFn: opts.fetchFn,
+    verifyMintedToken: opts.verifyMintedToken ?? decodeVerify,
+    now,
+  });
+}
+
+/** The (url, init) tuple fetch was called with on call #i. */
+function fetchCall(fetchFn: ReturnType<typeof vi.fn>, i = 0): [string, RequestInit] {
+  return fetchFn.mock.calls[i] as unknown as [string, RequestInit];
+}
+
+/** Parse the form-encoded body handed to fetch on call #i. */
+function bodyParams(fetchFn: ReturnType<typeof vi.fn>, i = 0): URLSearchParams {
+  return new URLSearchParams(fetchCall(fetchFn, i)[1].body as string);
+}
+
+const tier1: ExchangeSubject = { tier: 1, externalId: EXTERNAL_ID, userJwt: USER_JWT };
+const tier2: ExchangeSubject = { tier: 2, externalId: EXTERNAL_ID, channel: CHANNEL };
+
+beforeEach(() => {
+  nowMs = 1_700_000_000_000;
+  decodeVerify.mockClear();
+});
+
+// ---------------------------------------------------------------------------
+// 1 + 2 — request shapes
+// ---------------------------------------------------------------------------
+
+describe("TokenExchangeClient request shape", () => {
+  it("Tier 1: form-encoded body carries subject_token (+type) and NO requested_subject", async () => {
+    // Tier-1 minted sub is the bare externalId (Clerk-JWT/HTTP path).
+    const fetchFn = vi.fn(async () => mintedResponse({ tier: 1, sub: EXTERNAL_ID }));
+    const client = makeClient({ fetchFn });
+    await client.getUserToken(tier1);
+
+    // Endpoint + content type.
+    const [url, init] = fetchCall(fetchFn);
+    expect(url).toBe(`${BASE_URL}/api/tokens/exchange`);
+    expect(init.method).toBe("POST");
+    expect((init.headers as Record<string, string>)["Content-Type"]).toBe(
+      "application/x-www-form-urlencoded",
+    );
+
+    const p = bodyParams(fetchFn);
+    expect(p.get("grant_type")).toBe("urn:ietf:params:oauth:grant-type:token-exchange");
+    expect(p.get("actor_token")).toBe(ACTOR_TOKEN);
+    expect(p.get("actor_token_type")).toBe("urn:ietf:params:oauth:token-type:jwt");
+    expect(p.get("resource")).toBe(RESOURCE);
+    expect(p.get("subject_token")).toBe(USER_JWT);
+    expect(p.get("subject_token_type")).toBe("urn:ietf:params:oauth:token-type:jwt");
+    expect(p.has("requested_subject")).toBe(false);
+    // Exact param set (no extras).
+    expect([...p.keys()].sort()).toEqual(
+      [
+        "actor_token",
+        "actor_token_type",
+        "grant_type",
+        "resource",
+        "subject_token",
+        "subject_token_type",
+      ].sort(),
+    );
+  });
+
+  it("Tier 2: requested_subject is the channel-scoped '<channel>:<externalId>' and NO subject_token", async () => {
+    const fetchFn = vi.fn(async () => mintedResponse());
+    const client = makeClient({ fetchFn });
+    await client.getUserToken(tier2);
+
+    const p = bodyParams(fetchFn);
+    expect(p.get("grant_type")).toBe("urn:ietf:params:oauth:grant-type:token-exchange");
+    expect(p.get("actor_token")).toBe(ACTOR_TOKEN);
+    expect(p.get("actor_token_type")).toBe("urn:ietf:params:oauth:token-type:jwt");
+    expect(p.get("resource")).toBe(RESOURCE);
+    // Channel-scoped subject — NOT a bare externalId (impersonation surface removed).
+    expect(p.get("requested_subject")).toBe(`${CHANNEL}:${EXTERNAL_ID}`);
+    expect(p.get("requested_subject")).toBe("telegram:user_2abcDEF");
+    expect(p.has("subject_token")).toBe(false);
+    expect(p.has("subject_token_type")).toBe(false);
+    expect([...p.keys()].sort()).toEqual(
+      ["actor_token", "actor_token_type", "grant_type", "requested_subject", "resource"].sort(),
+    );
+  });
+
+  it("returns the minted access_token on success", async () => {
+    const fetchFn = vi.fn(async () => mintedResponse());
+    const client = makeClient({ fetchFn });
+    const token = await client.getUserToken(tier2);
+    expect(typeof token).toBe("string");
+    expect(token.split(".")).toHaveLength(3);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// 3 — validate BEFORE cache
+// ---------------------------------------------------------------------------
+
+describe("TokenExchangeClient validate-before-cache", () => {
+  it("verifies the minted token against {baseUrl}{jwksPath}", async () => {
+    const verify = vi.fn(decodeVerify);
+    const fetchFn = vi.fn(async () => mintedResponse());
+    const client = makeClient({ fetchFn, verifyMintedToken: verify });
+    await client.getUserToken(tier2);
+    expect(verify).toHaveBeenCalledTimes(1);
+    expect(verify.mock.calls[0]![1]).toBe(`${BASE_URL}/api/mcp/.well-known/jwks.json`);
+  });
+
+  it.each([
+    ["wrong sub", { sub: "user_someone_else" }],
+    ["wrong act.sub", { act: { sub: "attacker_machine" } }],
+    ["wrong aud", { aud: "http://sj.local/other" }],
+  ])("rejects a %s claim and caches nothing", async (_label, override) => {
+    const fetchFn = vi.fn(async () => mintedResponse(override));
+    const client = makeClient({ fetchFn });
+    await expect(client.getUserToken(tier2)).rejects.toBeInstanceOf(TokenExchangeError);
+    // Nothing cached — a second attempt re-hits the exchange.
+    await expect(client.getUserToken(tier2)).rejects.toBeInstanceOf(TokenExchangeError);
+    expect(fetchFn).toHaveBeenCalledTimes(2);
+  });
+
+  it("Tier 2: binds sub to '<channel>:<externalId>' — a bare-externalId sub is rejected", async () => {
+    // A minted token whose sub is the BARE externalId (missing the channel scope)
+    // must NOT be accepted for a Tier-2 exchange.
+    const fetchFn = vi.fn(async () => mintedResponse({ sub: EXTERNAL_ID }));
+    const client = makeClient({ fetchFn });
+    await expect(client.getUserToken(tier2)).rejects.toBeInstanceOf(TokenExchangeError);
+    // And the composed sub is accepted.
+    const okFetch = vi.fn(async () => mintedResponse({ sub: COMPOSED_SUB }));
+    await expect(makeClient({ fetchFn: okFetch }).getUserToken(tier2)).resolves.toBeTypeOf(
+      "string",
+    );
+  });
+
+  it("rejects an already-expired minted token and caches nothing", async () => {
+    const iat = nowSec() - 4000;
+    const fetchFn = vi.fn(async () => mintedResponse({ iat, exp: iat + 1800 }));
+    const client = makeClient({ fetchFn });
+    await expect(client.getUserToken(tier2)).rejects.toBeInstanceOf(TokenExchangeError);
+    await expect(client.getUserToken(tier2)).rejects.toBeInstanceOf(TokenExchangeError);
+    expect(fetchFn).toHaveBeenCalledTimes(2);
+  });
+
+  it("rejects when the signature verify seam throws (never caches)", async () => {
+    const fetchFn = vi.fn(async () => mintedResponse());
+    const verify = vi.fn(async () => {
+      throw new Error("bad signature");
+    });
+    const client = makeClient({ fetchFn, verifyMintedToken: verify });
+    await expect(client.getUserToken(tier2)).rejects.toBeInstanceOf(TokenExchangeError);
+    expect(fetchFn).toHaveBeenCalledTimes(1);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// 3b — iss + nbf claim checks (devex condition-of-approval)
+// ---------------------------------------------------------------------------
+
+describe("TokenExchangeClient iss + nbf validation", () => {
+  it("rejects a wrong issuer and caches nothing", async () => {
+    const fetchFn = vi.fn(async () => mintedResponse({ iss: "http://evil.example/mcp" }));
+    const client = makeClient({ fetchFn });
+    await expect(client.getUserToken(tier2)).rejects.toBeInstanceOf(TokenExchangeError);
+    await expect(client.getUserToken(tier2)).rejects.toBeInstanceOf(TokenExchangeError);
+    expect(fetchFn).toHaveBeenCalledTimes(2);
+  });
+
+  it("rejects a missing issuer and caches nothing", async () => {
+    const fetchFn = vi.fn(async () => mintedResponse({ iss: undefined }));
+    const client = makeClient({ fetchFn });
+    await expect(client.getUserToken(tier2)).rejects.toBeInstanceOf(TokenExchangeError);
+    expect(fetchFn).toHaveBeenCalledTimes(1);
+  });
+
+  it("tolerates an issuer differing only by a trailing slash", async () => {
+    const fetchFn = vi.fn(async () => mintedResponse({ iss: `${ISSUER}/` }));
+    const client = makeClient({ fetchFn });
+    await expect(client.getUserToken(tier2)).resolves.toBeTypeOf("string");
+  });
+
+  it("rejects a not-yet-valid token (nbf in the future) and caches nothing", async () => {
+    const fetchFn = vi.fn(async () => mintedResponse({ nbf: nowSec() + 120 }));
+    const client = makeClient({ fetchFn });
+    await expect(client.getUserToken(tier2)).rejects.toBeInstanceOf(TokenExchangeError);
+    await expect(client.getUserToken(tier2)).rejects.toBeInstanceOf(TokenExchangeError);
+    expect(fetchFn).toHaveBeenCalledTimes(2);
+  });
+
+  it("accepts a token whose nbf is in the past", async () => {
+    const fetchFn = vi.fn(async () => mintedResponse({ nbf: nowSec() - 120 }));
+    const client = makeClient({ fetchFn });
+    await expect(client.getUserToken(tier2)).resolves.toBeTypeOf("string");
+  });
+
+  it("accepts a token with no nbf claim", async () => {
+    const fetchFn = vi.fn(async () => mintedResponse()); // no nbf
+    const client = makeClient({ fetchFn });
+    await expect(client.getUserToken(tier2)).resolves.toBeTypeOf("string");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// 4 + 5 — cache hit / expiry
+// ---------------------------------------------------------------------------
+
+describe("TokenExchangeClient caching", () => {
+  it("returns the cached token within TTL without a second fetch", async () => {
+    const fetchFn = vi.fn(async () => mintedResponse());
+    const client = makeClient({ fetchFn });
+    const a = await client.getUserToken(tier2);
+    const b = await client.getUserToken(tier2);
+    expect(a).toBe(b);
+    expect(fetchFn).toHaveBeenCalledTimes(1);
+  });
+
+  it("re-exchanges once now passes (expires_in − 60s skew)", async () => {
+    // expires_in:900 (SJ ≤15min) drives the TTL; skew is 60s.
+    const fetchFn = vi.fn(async () => mintedResponse({}, 900));
+    const client = makeClient({ fetchFn });
+    await client.getUserToken(tier2);
+    expect(fetchFn).toHaveBeenCalledTimes(1);
+
+    // Still fresh just before the skew boundary (900 − 60 = 840s).
+    nowMs += (900 - 61) * 1000;
+    await client.getUserToken(tier2);
+    expect(fetchFn).toHaveBeenCalledTimes(1);
+
+    // Cross the skew boundary — must re-exchange.
+    nowMs += 2 * 1000;
+    await client.getUserToken(tier2);
+    expect(fetchFn).toHaveBeenCalledTimes(2);
+  });
+
+  it("caches per subject key (distinct channel-scoped subjects do not share a token)", async () => {
+    const fetchFn = vi.fn(async (_url: string, init?: RequestInit) => {
+      const sub = new URLSearchParams(init!.body as string).get("requested_subject")!;
+      const iat = nowSec();
+      return jsonResponse(200, {
+        access_token: fakeJwt({
+          sub, // == the composed "<channel>:<externalId>" the client sent
+          act: { sub: MACHINE_SUB },
+          aud: RESOURCE,
+          iss: BASE_URL,
+          iat,
+          exp: iat + 1800,
+          tier: 2,
+        }),
+        issued_token_type: "urn:ietf:params:oauth:token-type:jwt",
+        token_type: "Bearer",
+        expires_in: 900,
+      });
+    });
+    const client = makeClient({ fetchFn: fetchFn as unknown as typeof fetch });
+    await client.getUserToken({ tier: 2, externalId: "userX", channel: "telegram" });
+    await client.getUserToken({ tier: 2, externalId: "userX", channel: "whatsapp" }); // diff channel
+    await client.getUserToken({ tier: 2, externalId: "userX", channel: "telegram" }); // cached
+    // Same externalId on two channels are DISTINCT subjects → two fetches, third cached.
+    expect(fetchFn).toHaveBeenCalledTimes(2);
+  });
+
+  it("caches TTL driven by the response expires_in field (not the exp claim / a constant)", async () => {
+    // exp claim deliberately says +1800 but expires_in says 900 → TTL must follow 900.
+    const iat0 = nowSec();
+    const fetchFn = vi.fn(async () => mintedResponse({ iat: iat0, exp: iat0 + 1800 }, 900));
+    const client = makeClient({ fetchFn });
+    await client.getUserToken(tier2);
+    // Advance past 900−60 but well within the 1800 claim — proves 900 drove it.
+    nowMs += (900 - 59) * 1000;
+    await client.getUserToken(tier2);
+    expect(fetchFn).toHaveBeenCalledTimes(2);
+  });
+
+  it("a longer expires_in (1800) yields a correspondingly longer cache TTL", async () => {
+    const fetchFn = vi.fn(async () => mintedResponse({}, 1800));
+    const client = makeClient({ fetchFn });
+    await client.getUserToken(tier2);
+    // At 900−59 (which re-exchanged the 900s token) the 1800s token is still fresh.
+    nowMs += (900 - 59) * 1000;
+    await client.getUserToken(tier2);
+    expect(fetchFn).toHaveBeenCalledTimes(1);
+    // Cross the 1800−60 boundary → re-exchange.
+    nowMs += (1800 - 900) * 1000;
+    await client.getUserToken(tier2);
+    expect(fetchFn).toHaveBeenCalledTimes(2);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// 6 — single-flight
+// ---------------------------------------------------------------------------
+
+describe("TokenExchangeClient single-flight", () => {
+  it("collapses concurrent getUserToken for one externalId into ONE fetch", async () => {
+    let release!: (r: Response) => void;
+    const gate = new Promise<Response>((resolve) => {
+      release = resolve;
+    });
+    const fetchFn = vi.fn(() => gate);
+    const client = makeClient({ fetchFn: fetchFn as unknown as typeof fetch });
+
+    const p1 = client.getUserToken(tier2);
+    const p2 = client.getUserToken(tier2);
+    // Let the getActorToken microtask settle so the (single) fetch is dispatched.
+    await new Promise((r) => setImmediate(r));
+    expect(fetchFn).toHaveBeenCalledTimes(1);
+
+    release(mintedResponse());
+    const [t1, t2] = await Promise.all([p1, p2]);
+    expect(t1).toBe(t2);
+    expect(fetchFn).toHaveBeenCalledTimes(1);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// 7 — invalidate
+// ---------------------------------------------------------------------------
+
+describe("TokenExchangeClient invalidate", () => {
+  it("drops the cache (keyed by the composed subjectId) so the next call re-exchanges", async () => {
+    const fetchFn = vi.fn(async () => mintedResponse());
+    const client = makeClient({ fetchFn });
+    await client.getUserToken(tier2);
+    expect(fetchFn).toHaveBeenCalledTimes(1);
+
+    // The cache key is the composed subjectId (channel-scoped) — invalidate on it.
+    client.invalidate(subjectId(tier2));
+    await client.getUserToken(tier2);
+    expect(fetchFn).toHaveBeenCalledTimes(2);
+  });
+
+  it("invalidate of one subject leaves another's cache intact", async () => {
+    const fetchFn = vi.fn(async (_url: string, init?: RequestInit) => {
+      const sub = new URLSearchParams(init!.body as string).get("requested_subject")!;
+      const iat = nowSec();
+      return jsonResponse(200, {
+        access_token: fakeJwt({
+          sub,
+          act: { sub: MACHINE_SUB },
+          aud: RESOURCE,
+          iss: BASE_URL,
+          iat,
+          exp: iat + 1800,
+        }),
+        issued_token_type: "urn:ietf:params:oauth:token-type:jwt",
+        token_type: "Bearer",
+        expires_in: 900,
+      });
+    });
+    const a: ExchangeSubject = { tier: 2, externalId: "user_a", channel: "telegram" };
+    const b: ExchangeSubject = { tier: 2, externalId: "user_b", channel: "telegram" };
+    const client = makeClient({ fetchFn: fetchFn as unknown as typeof fetch });
+    await client.getUserToken(a);
+    await client.getUserToken(b);
+    client.invalidate(subjectId(a));
+    await client.getUserToken(b); // still cached
+    expect(fetchFn).toHaveBeenCalledTimes(2);
+    await client.getUserToken(a); // re-exchange
+    expect(fetchFn).toHaveBeenCalledTimes(3);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// 8 + 9 — error mapping + token/PII hygiene
+// ---------------------------------------------------------------------------
+
+describe("TokenExchangeClient error mapping + hygiene", () => {
+  it.each([
+    [400, "invalid_grant"],
+    [401, "invalid_request"],
+    [429, "unauthorized_client"],
+  ])("maps a %s error response to a structured error (no token)", async (status, errCode) => {
+    const fetchFn = vi.fn(async () => jsonResponse(status, { error: errCode }));
+    const client = makeClient({ fetchFn });
+    let thrown: unknown;
+    try {
+      await client.getUserToken(tier1);
+    } catch (e) {
+      thrown = e;
+    }
+    expect(thrown).toBeInstanceOf(TokenExchangeError);
+    const msg = (thrown as Error).message;
+    expect(msg).not.toContain(ACTOR_TOKEN);
+    expect(msg).not.toContain(USER_JWT);
+    expect(msg).not.toContain(EXTERNAL_ID);
+  });
+
+  it("maps a network failure to a structured error (no secrets leaked)", async () => {
+    const fetchFn = vi.fn(async () => {
+      throw new Error(`connect ECONNREFUSED ${ACTOR_TOKEN}`);
+    });
+    const client = makeClient({ fetchFn });
+    let thrown: unknown;
+    try {
+      await client.getUserToken(tier1);
+    } catch (e) {
+      thrown = e;
+    }
+    expect(thrown).toBeInstanceOf(TokenExchangeError);
+    expect((thrown as Error).message).not.toContain(ACTOR_TOKEN);
+  });
+
+  it("never leaks access_token / actor_token / subject_token / externalId in a claim-mismatch error", async () => {
+    const secretAccess = fakeJwt({
+      sub: "user_someone_else",
+      act: { sub: MACHINE_SUB },
+      aud: RESOURCE,
+      iat: nowSec(),
+      exp: nowSec() + 1800,
+    });
+    const fetchFn = vi.fn(async () =>
+      jsonResponse(200, {
+        access_token: secretAccess,
+        issued_token_type: "urn:ietf:params:oauth:token-type:jwt",
+        token_type: "Bearer",
+        expires_in: 1800,
+      }),
+    );
+    const client = makeClient({ fetchFn });
+    let thrown: unknown;
+    try {
+      await client.getUserToken(tier1);
+    } catch (e) {
+      thrown = e;
+    }
+    const msg = (thrown as Error).message;
+    expect(msg).not.toContain(secretAccess);
+    expect(msg).not.toContain(ACTOR_TOKEN);
+    expect(msg).not.toContain(USER_JWT);
+    expect(msg).not.toContain(EXTERNAL_ID);
+  });
+
+  it("surfaces a structured error (no token) when getActorToken fails", async () => {
+    const fetchFn = vi.fn(async () => mintedResponse());
+    const client = makeClient({
+      fetchFn,
+      getActorToken: async () => {
+        throw new Error("service-auth: secret missing");
+      },
+    });
+    await expect(client.getUserToken(tier2)).rejects.toBeInstanceOf(TokenExchangeError);
+    expect(fetchFn).not.toHaveBeenCalled();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// createJwksVerifier — the DEFAULT signature/JWKS kernel (devex conditions)
+// ---------------------------------------------------------------------------
+
+// One RSA keypair for the whole suite; the public JWK (with kid) is served via
+// the injectable fetchJwks so no network is touched.
+const { privateKey: RSA_PRIV, publicKey: RSA_PUB } = generateKeyPairSync("rsa", {
+  modulusLength: 2048,
+});
+const SIGNING_JWK: JsonWebKey & { kid: string } = {
+  ...(RSA_PUB.export({ format: "jwk" }) as JsonWebKey),
+  kid: "sj-1",
+};
+
+const JWKS_URL = "http://sj.local/api/mcp/.well-known/jwks.json";
+
+/** Sign an RS256 JWT with the suite keypair (real signature). */
+function signRs256(claims: Record<string, unknown>, kid = "sj-1"): string {
+  const header = b64url({ alg: "RS256", kid });
+  const payload = b64url(claims);
+  const sig = createSign("RSA-SHA256").update(`${header}.${payload}`).sign(RSA_PRIV);
+  return `${header}.${payload}.${sig.toString("base64url")}`;
+}
+
+/** A non-RS256 token with three non-empty segments (reaches the alg check). */
+function fakeAlgToken(alg: string): string {
+  return `${b64url({ alg, kid: "sj-1" })}.${b64url({ sub: "x" })}.c2ln`;
+}
+
+const sampleClaims = () => ({ sub: EXTERNAL_ID, aud: RESOURCE, iss: ISSUER, iat: nowSec() });
+
+describe("createJwksVerifier alg hard-pin (algorithm-confusion)", () => {
+  it("rejects alg=none BEFORE any JWKS fetch/key work", async () => {
+    const fetchJwks = vi.fn(async () => ({ keys: [SIGNING_JWK] }));
+    const verify = createJwksVerifier({ fetchJwks, now });
+    await expect(verify(fakeAlgToken("none"), JWKS_URL)).rejects.toBeInstanceOf(TokenExchangeError);
+    expect(fetchJwks).not.toHaveBeenCalled();
+  });
+
+  it("rejects alg=HS256 (HMAC over the JWKS public key) BEFORE any JWKS fetch/key work", async () => {
+    const fetchJwks = vi.fn(async () => ({ keys: [SIGNING_JWK] }));
+    const verify = createJwksVerifier({ fetchJwks, now });
+    await expect(verify(fakeAlgToken("HS256"), JWKS_URL)).rejects.toBeInstanceOf(
+      TokenExchangeError,
+    );
+    expect(fetchJwks).not.toHaveBeenCalled();
+  });
+});
+
+describe("createJwksVerifier JWKS caching + unknown-kid fail-closed", () => {
+  it("verifies a valid RS256 token and returns its claims", async () => {
+    const fetchJwks = vi.fn(async () => ({ keys: [SIGNING_JWK] }));
+    const verify = createJwksVerifier({ fetchJwks, now });
+    const claims = await verify(signRs256(sampleClaims()), JWKS_URL);
+    expect(claims.sub).toBe(EXTERNAL_ID);
+  });
+
+  it("fetches the JWKS ONCE across two verifies within the 300s max-age (cache hit)", async () => {
+    const fetchJwks = vi.fn(async () => ({ keys: [SIGNING_JWK] }));
+    const verify = createJwksVerifier({ fetchJwks, now });
+    await verify(signRs256(sampleClaims()), JWKS_URL);
+    nowMs += 299 * 1000; // still inside 300s
+    await verify(signRs256(sampleClaims()), JWKS_URL);
+    expect(fetchJwks).toHaveBeenCalledTimes(1);
+  });
+
+  it("refetches the JWKS after the 300s max-age expires", async () => {
+    const fetchJwks = vi.fn(async () => ({ keys: [SIGNING_JWK] }));
+    const verify = createJwksVerifier({ fetchJwks, now });
+    await verify(signRs256(sampleClaims()), JWKS_URL);
+    nowMs += 301 * 1000; // past 300s
+    await verify(signRs256(sampleClaims()), JWKS_URL);
+    expect(fetchJwks).toHaveBeenCalledTimes(2);
+  });
+
+  it("FAILS CLOSED on an unknown kid — NO extra fetch-and-trust refetch", async () => {
+    const fetchJwks = vi.fn(async () => ({ keys: [SIGNING_JWK] })); // only sj-1
+    const verify = createJwksVerifier({ fetchJwks, now });
+    // Token signed with a kid absent from the cached set.
+    await expect(verify(signRs256(sampleClaims(), "sj-99"), JWKS_URL)).rejects.toBeInstanceOf(
+      TokenExchangeError,
+    );
+    // Exactly one fetch (to populate) — NO second cache-bypassing refetch.
+    expect(fetchJwks).toHaveBeenCalledTimes(1);
+  });
+
+  it("fails closed when the JWKS fetch errors (no token accepted)", async () => {
+    const fetchJwks = vi.fn(async () => {
+      throw new Error("JWKS 503");
+    });
+    const verify = createJwksVerifier({ fetchJwks, now });
+    await expect(verify(signRs256(sampleClaims()), JWKS_URL)).rejects.toBeInstanceOf(
+      TokenExchangeError,
+    );
+  });
+
+  it("rejects a token whose signature does not match the JWKS key", async () => {
+    // Sign with a DIFFERENT key than the one served by fetchJwks.
+    const { privateKey: otherPriv } = generateKeyPairSync("rsa", { modulusLength: 2048 });
+    const header = b64url({ alg: "RS256", kid: "sj-1" });
+    const payload = b64url(sampleClaims());
+    const badSig = createSign("RSA-SHA256").update(`${header}.${payload}`).sign(otherPriv);
+    const forged = `${header}.${payload}.${badSig.toString("base64url")}`;
+    const fetchJwks = vi.fn(async () => ({ keys: [SIGNING_JWK] }));
+    const verify = createJwksVerifier({ fetchJwks, now });
+    await expect(verify(forged, JWKS_URL)).rejects.toBeInstanceOf(TokenExchangeError);
+  });
+});
