@@ -146,8 +146,23 @@ export type JwksVerifierOptions = {
   maxAgeMs?: number;
 };
 
+/**
+ * Base64url-decode a JWT segment to a JSON OBJECT. Fail-closed
+ * ({@link TokenExchangeError}) on a parse error OR a non-object payload
+ * (`null` / array / primitive) — so a malformed token can never reach the claim
+ * checks as a raw `TypeError` (CODE-DECODE-GUARD).
+ */
 function decodeSegment(segment: string): Record<string, unknown> {
-  return JSON.parse(Buffer.from(segment, "base64url").toString("utf8")) as Record<string, unknown>;
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(Buffer.from(segment, "base64url").toString("utf8"));
+  } catch {
+    throw new TokenExchangeError("invalid_token", "minted token segment is not valid JSON");
+  }
+  if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) {
+    throw new TokenExchangeError("invalid_token", "minted token segment is not a JSON object");
+  }
+  return parsed as Record<string, unknown>;
 }
 
 /** Default real JWKS fetcher — fail-closed (throws) on any non-2xx / parse error. */
@@ -187,22 +202,38 @@ export function createJwksVerifier(opts: JwksVerifierOptions = {}): VerifyMinted
   const maxAgeMs = opts.maxAgeMs ?? JWKS_MAX_AGE_MS;
   // Per-verifier keyset cache, keyed by jwksUrl.
   const cache = new Map<string, { keys: JsonWebKey[]; fetchedAt: number }>();
+  // In-flight JWKS fetches, keyed by jwksUrl — N cold concurrent verifies share
+  // ONE fetch rather than stampeding the JWKS endpoint (CODE-JWKS-SINGLEFLIGHT).
+  const inFlightJwks = new Map<string, Promise<JsonWebKey[]>>();
 
   const resolveKeys = async (jwksUrl: string): Promise<JsonWebKey[]> => {
     const entry = cache.get(jwksUrl);
     if (entry && now() - entry.fetchedAt < maxAgeMs) return entry.keys;
-    let jwks: Jwks;
-    try {
-      jwks = await fetchJwks(jwksUrl);
-    } catch (err) {
-      // Fail-closed: any JWKS fetch failure → no keys accepted. Never echo the
-      // underlying cause (could carry a URL/credential); re-wrap structurally.
-      if (err instanceof TokenExchangeError) throw err;
-      throw new TokenExchangeError("invalid_token", "JWKS fetch failed");
-    }
-    const keys = Array.isArray(jwks?.keys) ? jwks.keys : [];
-    cache.set(jwksUrl, { keys, fetchedAt: now() });
-    return keys;
+
+    const existing = inFlightJwks.get(jwksUrl);
+    if (existing) return existing;
+
+    const flight = (async (): Promise<JsonWebKey[]> => {
+      let jwks: Jwks;
+      try {
+        jwks = await fetchJwks(jwksUrl);
+      } catch (err) {
+        // Fail-closed: any JWKS fetch failure → no keys accepted. Never echo the
+        // underlying cause (could carry a URL/credential); re-wrap structurally.
+        if (err instanceof TokenExchangeError) throw err;
+        throw new TokenExchangeError("invalid_token", "JWKS fetch failed");
+      }
+      const keys = Array.isArray(jwks?.keys) ? jwks.keys : [];
+      // SEC-EMPTY-JWKS: never cache an empty keyset — a transient 200 {keys:[]}
+      // would 300s-self-DoS after SJ recovers. Return it (→ unknown-kid reject)
+      // but force the NEXT verify to refetch.
+      if (keys.length > 0) cache.set(jwksUrl, { keys, fetchedAt: now() });
+      return keys;
+    })().finally(() => {
+      inFlightJwks.delete(jwksUrl);
+    });
+    inFlightJwks.set(jwksUrl, flight);
+    return flight;
   };
 
   return async (jwt, jwksUrl) => {
@@ -253,6 +284,12 @@ export class TokenExchangeClient {
 
   private readonly cache = new Map<string, CachedToken>();
   private readonly inFlight = new Map<string, Promise<string>>();
+  // Per-key monotonic generation (mirrors ServiceAuthProvider): bumped by
+  // invalidate(); an exchange dispatched under an older generation must NOT
+  // repopulate the cache when it resolves (DESIGN-GENGUARD) — otherwise an
+  // invalidate() racing an in-flight exchange (the post-401 case) would
+  // resurrect the just-dropped token.
+  private readonly generations = new Map<string, number>();
 
   constructor(cfg: TokenExchangeConfig, opts: TokenExchangeOptions) {
     this.cfg = cfg;
@@ -283,10 +320,14 @@ export class TokenExchangeClient {
     const existing = this.inFlight.get(key);
     if (existing) return existing;
 
+    // Capture the generation at flight start; a racing invalidate() bumps it and
+    // this resolve must then NOT cache (DESIGN-GENGUARD).
+    const flightGen = this.generations.get(key) ?? 0;
     const flight = this.exchange(subject)
       .then((minted) => {
-        // Cache ONLY after validation succeeded (exchange() throws otherwise).
-        this.cache.set(key, minted);
+        // Cache ONLY after validation succeeded (exchange() throws otherwise)
+        // AND only if no invalidate() bumped the generation while in flight.
+        if ((this.generations.get(key) ?? 0) === flightGen) this.cache.set(key, minted);
         return minted.token;
       })
       .finally(() => {
@@ -299,10 +340,24 @@ export class TokenExchangeClient {
   /**
    * Drop a cached token (call on a downstream 401). `key` is the {@link subjectId}
    * — for Tier-2 the channel-scoped `"<channel>:<externalId>"`, for Tier-1 the
-   * bare externalId.
+   * bare externalId. Bumps the key's generation so an exchange already in flight
+   * cannot resurrect the dropped token when it resolves (DESIGN-GENGUARD).
    */
   invalidate(key: string): void {
     this.cache.delete(key);
+    this.generations.set(key, (this.generations.get(key) ?? 0) + 1);
+  }
+
+  /**
+   * Evict cached tokens whose absolute expiry has passed. The plugin calls this
+   * on its periodic refresh tick so the per-subject cache stays bounded (the
+   * client owns no timer — mirrors the catalog's "never self-schedule" rule).
+   */
+  sweepExpired(): void {
+    const nowMs = this.now();
+    for (const [key, entry] of this.cache) {
+      if (entry.expiresAtMs <= nowMs) this.cache.delete(key);
+    }
   }
 
   // -------------------------------------------------------------------------
@@ -443,20 +498,25 @@ export class TokenExchangeClient {
   }
 
   /**
-   * Absolute expiry (epoch ms), driven DYNAMICALLY by the response's `expires_in`
-   * (SJ now issues ≤900s — never a hardcoded lifetime here). The cache-freshness
-   * check applies the −60s skew. When `expires_in` is absent/invalid, fall back
-   * to the token's own `exp` claim (guaranteed a valid future number by
-   * {@link checkClaims}, which runs first).
+   * Absolute expiry (epoch ms). Driven by the response's `expires_in` (SJ issues
+   * ≤900s — never a hardcoded lifetime here) but CLAMPED to the token's signed
+   * `exp` claim: `min(now+expires_in, exp)` (SEC-EXPCLAMP). The unsigned
+   * `expires_in` transport field must never extend a token's cached lifetime
+   * beyond what the signature attests. When `expires_in` is absent/≤0, fall back
+   * to `exp` alone (guaranteed a valid future number by {@link checkClaims}).
    */
   private deriveExpiry(claims: Record<string, unknown>, expiresInRaw: unknown): number {
-    if (typeof expiresInRaw === "number" && expiresInRaw > 0) {
-      return this.now() + expiresInRaw * 1000;
-    }
     const exp = claims.exp;
-    if (typeof exp === "number" && Number.isFinite(exp)) return exp * 1000;
-    // Unreachable: checkClaims enforces a valid future exp before we get here.
-    return this.now();
+    const expClaimMs = typeof exp === "number" && Number.isFinite(exp) ? exp * 1000 : undefined;
+    const expiresInMs =
+      typeof expiresInRaw === "number" && expiresInRaw > 0
+        ? this.now() + expiresInRaw * 1000
+        : undefined;
+    if (expiresInMs !== undefined && expClaimMs !== undefined) {
+      return Math.min(expiresInMs, expClaimMs);
+    }
+    // Unreachable fallthrough to now(): checkClaims enforces a valid future exp.
+    return expiresInMs ?? expClaimMs ?? this.now();
   }
 }
 

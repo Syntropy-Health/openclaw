@@ -10,6 +10,7 @@ import {
 import type { ConfirmGovernor } from "./governor.js";
 import {
   createSyntropyMcpPlugin,
+  isUnauthorizedError,
   OPENCLAW_COMPONENT_MARKER,
   parseSyntropyMcpConfig,
   type SyntropyMcpOverrides,
@@ -124,9 +125,9 @@ const kgServer = {
 
 const sjM2mServer = {
   id: "sj",
-  baseUrl: "http://sj.local",
+  baseUrl: "https://sj.local",
   auth: "m2m-exchange",
-  resource: "http://sj.local/mcp",
+  resource: "https://sj.local/mcp",
   exchangePath: "/tokens/exchange",
 };
 
@@ -643,8 +644,8 @@ function mintedExchangeResponse(sub: string): Response {
   const claims = {
     sub,
     act: { sub: "machine_openclaw" },
-    aud: "http://sj.local/mcp",
-    iss: "http://sj.local",
+    aud: "https://sj.local/mcp",
+    iss: "https://sj.local",
     iat,
     exp: iat + 1800,
     tier: 2,
@@ -664,12 +665,12 @@ function mintedExchangeResponse(sub: string): Response {
 
 const sjExchangeServer = {
   id: "sj",
-  baseUrl: "http://sj.local",
+  baseUrl: "https://sj.local",
   auth: "m2m-exchange",
-  resource: "http://sj.local/mcp",
+  resource: "https://sj.local/mcp",
   exchangePath: "/api/tokens/exchange",
   machineSub: "machine_openclaw",
-  issuer: "http://sj.local",
+  issuer: "https://sj.local",
   label: "sj-mcp",
 };
 
@@ -679,6 +680,8 @@ function setupExchange(opts: {
   listTools?: SyntropyMcpOverrides["listTools"];
   callTool?: SyntropyMcpOverrides["callTool"];
   env?: NodeJS.ProcessEnv;
+  /** Override the m2m server spec (SEC-HTTPS / disable-path tests). */
+  server?: Record<string, unknown>;
 }) {
   const timers = new FakeTimers();
   const listTools =
@@ -699,7 +702,7 @@ function setupExchange(opts: {
     exchangeFetch: opts.exchangeFetch,
     verifyMintedToken: decodeMinted,
   });
-  const fake = createFakeApi(baseConfig({ servers: [sjExchangeServer] }));
+  const fake = createFakeApi(baseConfig({ servers: [opts.server ?? sjExchangeServer] }));
   plugin.register(fake.api);
   return { ...fake, plugin, timers, listTools, callTool };
 }
@@ -734,7 +737,7 @@ describe("syntropy-mcp m2m-exchange wiring (B2)", () => {
     // the token handed to callTool is the minted (3-segment) JWT — NOT the actor.
     const exchangeCalls = (exchangeFetch as unknown as ReturnType<typeof vi.fn>).mock.calls;
     expect(exchangeCalls.length).toBeGreaterThanOrEqual(1);
-    expect(exchangeCalls[0]![0]).toBe("http://sj.local/api/tokens/exchange");
+    expect(exchangeCalls[0]![0]).toBe("https://sj.local/api/tokens/exchange");
     const sentSubject = new URLSearchParams(
       (exchangeCalls[0]![1] as RequestInit).body as string,
     ).get("requested_subject");
@@ -804,7 +807,7 @@ describe("syntropy-mcp m2m-exchange wiring (B2)", () => {
     const p = new URLSearchParams(init.body as string);
     expect(p.get("grant_type")).toBe("urn:ietf:params:oauth:grant-type:token-exchange");
     expect(p.get("actor_token")).toBe("actor.m2m.jwt");
-    expect(p.get("resource")).toBe("http://sj.local/mcp");
+    expect(p.get("resource")).toBe("https://sj.local/mcp");
     // Channel-scoped subject (SJ removed the bare-externalId path).
     expect(p.get("requested_subject")).toBe("telegram:user_A");
     expect(p.has("subject_token")).toBe(false);
@@ -831,6 +834,162 @@ describe("syntropy-mcp m2m-exchange wiring (B2)", () => {
     expect(exchangeFetch as unknown as ReturnType<typeof vi.fn>).not.toHaveBeenCalled();
     expect(callTool).not.toHaveBeenCalled();
     expect(result.content[0]?.text ?? "").toMatch(/auth failed/);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// B2 QG hardening — SEC-HTTPS, DESIGN-MACHINESUB, disable paths, 401-retry
+// ---------------------------------------------------------------------------
+
+describe("syntropy-mcp m2m-exchange QG hardening (B2)", () => {
+  it("SEC-HTTPS: an http:// (non-local) baseUrl m2m server is disabled (zero tools, structured log)", async () => {
+    const listTools = vi.fn(async (): Promise<McpToolListResult> => {
+      throw new Error("must never list a cleartext m2m server");
+    });
+    const ctx = setupExchange({
+      actorProvider: fakeActorProvider(),
+      listTools,
+      server: { ...sjExchangeServer, baseUrl: "http://sj.local", resource: "http://sj.local/mcp" },
+    });
+    await flush();
+    expect(ctx.toolFactories[0]!({ sessionKey: "s1", messageChannel: "telegram" })).toBeNull();
+    expect(listTools).not.toHaveBeenCalled();
+    const log = ctx.allLogs().find((l) => l.includes('"sj"') && l.includes("https"));
+    expect(log).toBeTruthy();
+    expect(log).toContain("fail-closed");
+  });
+
+  it("SEC-HTTPS: an https:// baseUrl m2m server works", async () => {
+    const actor = fakeActorProvider();
+    const exchangeFetch = vi.fn(async (_url: string, init?: RequestInit) => {
+      const sub = new URLSearchParams(init!.body as string).get("requested_subject")!;
+      return mintedExchangeResponse(sub);
+    }) as unknown as typeof fetch;
+    const ctx = setupExchange({ actorProvider: actor, exchangeFetch });
+    await flush();
+    const tools = ctx.toolFactories[0]!({
+      sessionKey: "s1",
+      messageChannel: "telegram",
+    }) as unknown[];
+    expect(tools).not.toBeNull();
+    expect((tools as Array<{ name: string }>).some((t) => t.name === "sj_search")).toBe(true);
+  });
+
+  it("SEC-HTTPS: an http://localhost baseUrl is permitted (dev/tests)", async () => {
+    const ctx = setupExchange({
+      actorProvider: fakeActorProvider(),
+      server: {
+        ...sjExchangeServer,
+        baseUrl: "http://localhost",
+        resource: "http://localhost/mcp",
+        issuer: "http://localhost",
+      },
+    });
+    await flush();
+    const tools = ctx.toolFactories[0]!({
+      sessionKey: "s1",
+      messageChannel: "telegram",
+    }) as unknown[];
+    expect(tools).not.toBeNull();
+    expect((tools as Array<{ name: string }>).some((t) => t.name === "sj_search")).toBe(true);
+  });
+
+  it("DESIGN-MACHINESUB: no machineSub (config or env) → server disabled, zero tools", async () => {
+    const listTools = vi.fn(async (): Promise<McpToolListResult> => {
+      throw new Error("must never list without a machineSub binding");
+    });
+    const { machineSub: _drop, ...noMachineSub } = sjExchangeServer;
+    const ctx = setupExchange({
+      actorProvider: fakeActorProvider(),
+      listTools,
+      env: {}, // no SYNTROPY_MCP_MACHINE_SUB
+      server: noMachineSub,
+    });
+    await flush();
+    expect(ctx.toolFactories[0]!({ sessionKey: "s1", messageChannel: "telegram" })).toBeNull();
+    expect(listTools).not.toHaveBeenCalled();
+    expect(ctx.allLogs().some((l) => l.includes('"sj"') && l.includes("machineSub"))).toBe(true);
+  });
+
+  it("TEST-ISSUER-DISABLE: no issuer (config or env) → zero tools, listTools never called, disable log", async () => {
+    const listTools = vi.fn(async (): Promise<McpToolListResult> => {
+      throw new Error("must never list without an issuer binding");
+    });
+    const { issuer: _drop, ...noIssuer } = sjExchangeServer;
+    const ctx = setupExchange({
+      actorProvider: fakeActorProvider(),
+      listTools,
+      env: {}, // no SYNTROPY_MCP_TOKEN_ISS
+      server: noIssuer,
+    });
+    await flush();
+    expect(ctx.toolFactories[0]!({ sessionKey: "s1", messageChannel: "telegram" })).toBeNull();
+    expect(listTools).not.toHaveBeenCalled();
+    expect(ctx.allLogs().some((l) => l.includes('"sj"') && l.includes("issuer"))).toBe(true);
+  });
+
+  it("TEST-ACTOR-DISABLE: default provider path with a non-URL resource → server disabled, zero tools", async () => {
+    const listTools = vi.fn(async (): Promise<McpToolListResult> => {
+      throw new Error("must never list a server whose actor config is invalid");
+    });
+    // No injected serviceAuthProvider → default buildActorProvider path;
+    // a non-URL resource makes resolveServiceAuthConfig throw → null → disabled.
+    const ctx = setupExchange({
+      listTools,
+      env: { CLERK_MACHINE_SECRET_KEY: "ak_test" },
+      server: { ...sjExchangeServer, resource: "not-a-url" },
+    });
+    await flush();
+    expect(ctx.toolFactories[0]!({ sessionKey: "s1", messageChannel: "telegram" })).toBeNull();
+    expect(listTools).not.toHaveBeenCalled();
+    expect(ctx.allLogs().some((l) => l.includes('"sj"') && l.includes("actor-token"))).toBe(true);
+  });
+
+  it("TEST-401-RETRY: a 401 at tool call → invalidate + re-exchange + retry once (same channel key)", async () => {
+    const actor = fakeActorProvider();
+    const exchangeFetch = vi.fn(async (_url: string, init?: RequestInit) => {
+      const sub = new URLSearchParams(init!.body as string).get("requested_subject")!;
+      return mintedExchangeResponse(sub);
+    }) as unknown as typeof fetch;
+    // First tool call → 401-shaped; second → success.
+    const callTool = vi
+      .fn<NonNullable<SyntropyMcpOverrides["callTool"]>>()
+      .mockResolvedValueOnce({ data: null, ok: false, error: "HTTP 401 unauthorized" })
+      .mockResolvedValueOnce({ data: { hits: [] }, ok: true });
+
+    const ctx = setupExchange({ actorProvider: actor, exchangeFetch, callTool });
+    await flush();
+    const hook = ctx.hooks.get("before_agent_start")![0]!;
+    await hook.handler({ prompt: "search" }, { sessionKey: "s1", externalId: "user_A" });
+    const tools = ctx.toolFactories[0]!({ sessionKey: "s1", messageChannel: "telegram" }) as Array<{
+      name: string;
+      execute: (id: string, args: unknown) => Promise<{ content: Array<{ text?: string }> }>;
+    }>;
+    const result = await tools.find((t) => t.name === "sj_search")!.execute("c1", {});
+
+    // Bounded to exactly one retry: 2 tool calls, 2 exchanges (initial + re-exchange).
+    expect(callTool).toHaveBeenCalledTimes(2);
+    const exCalls = (exchangeFetch as unknown as ReturnType<typeof vi.fn>).mock.calls;
+    expect(exCalls.length).toBe(2);
+    // Both exchanges used the SAME channel-scoped subject (a slack 401 wouldn't
+    // drop a telegram entry — the invalidate is keyed on this subject).
+    for (const call of exCalls) {
+      const p = new URLSearchParams((call[1] as RequestInit).body as string);
+      expect(p.get("requested_subject")).toBe("telegram:user_A");
+    }
+    expect(result.content[0]?.text ?? "").not.toMatch(/auth failed/);
+  });
+});
+
+describe("isUnauthorizedError vocabulary", () => {
+  it.each(["HTTP 401", "kg unauthorized", "invalid_token", "invalid token", "token expired"])(
+    "treats %s as a re-exchange trigger",
+    (msg) => {
+      expect(isUnauthorizedError(msg)).toBe(true);
+    },
+  );
+  it.each(["kg returned 500", "", undefined])("does NOT trigger on %s", (msg) => {
+    expect(isUnauthorizedError(msg as string | undefined)).toBe(false);
   });
 });
 

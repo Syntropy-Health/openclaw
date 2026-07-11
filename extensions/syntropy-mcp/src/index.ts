@@ -254,6 +254,19 @@ export type ActorTokenProvider = {
  */
 export type RequestSubject = { externalId?: string; userJwt?: string; channel?: string };
 
+/**
+ * Read a live user Clerk JWT off the agent hook context (Tier-1 seam), or
+ * undefined. The current `PluginHookAgentContext` exposes only `externalId` (the
+ * host forwards the verified `sub`, not the JWT), so Tier 1 stays dormant — this
+ * typed accessor is the single seam that lights it up if/when the host surfaces
+ * a `userJwt`, replacing an untyped inline cast. Accepts `unknown` because the
+ * field is not (yet) on the published context type.
+ */
+function readUserJwt(ctx: unknown): string | undefined {
+  const raw = ctx && typeof ctx === "object" ? (ctx as { userJwt?: unknown }).userJwt : undefined;
+  return typeof raw === "string" && raw.length > 0 ? raw : undefined;
+}
+
 // ---------------------------------------------------------------------------
 // Descriptor → agent tool mapping
 // ---------------------------------------------------------------------------
@@ -320,9 +333,26 @@ type ServerRuntime = {
 };
 
 /** Server-side "expired/invalid credential" shapes that warrant a re-exchange. */
-function isUnauthorizedError(error: string | undefined): boolean {
+export function isUnauthorizedError(error: string | undefined): boolean {
   if (!error) return false;
   return /\b401\b|unauthorized|invalid[_ -]?token|token expired/i.test(error);
+}
+
+/**
+ * True when `baseUrl` is safe to carry the token-exchange POST (actor M2M JWT +
+ * Tier-1 Clerk JWT) and the JWKS trust-root fetch. HTTPS is required; plain HTTP
+ * is permitted ONLY on loopback (dev/tests) — a cleartext/MITM'd JWKS would let
+ * an attacker poison the keyset and forge a matching-kid RS256 token, defeating
+ * the verifier (SEC-HTTPS; mirrors service-auth-config's `asHttpsUrl`).
+ */
+export function isSecureBaseUrl(baseUrl: string): boolean {
+  try {
+    const u = new URL(baseUrl);
+    if (u.protocol === "https:") return true;
+    return u.protocol === "http:" && (u.hostname === "localhost" || u.hostname === "127.0.0.1");
+  } catch {
+    return false;
+  }
 }
 
 /** Marker key the producer bridge (A4) lifts into a reply payload's channelData. */
@@ -529,6 +559,9 @@ export function createSyntropyMcpPlugin(overrides: SyntropyMcpOverrides = {}) {
       // (catalog listTools, looked up by baseUrl — the only key the catalog
       // hands the transport) and tool execute (see buildAgentTool).
       const sessionsByBaseUrl = new Map<string, McpSession>();
+      // m2m-exchange clients whose per-subject token caches the plugin sweeps on
+      // its refresh tick (the clients own no timer — CODE-CACHE-EVICT).
+      const exchangeClients: TokenExchangeClient[] = [];
 
       for (const spec of config.servers) {
         const label = spec.label ?? spec.id;
@@ -564,6 +597,34 @@ export function createSyntropyMcpPlugin(overrides: SyntropyMcpOverrides = {}) {
         // listing a server's tools is a machine op with no user in scope.
         // TOOL EXECUTE (runtime getToken) exchanges that actor token for a
         // per-USER SJ-minted token, keyed on the current request's externalId.
+        //
+        // Every unmet precondition fails CLOSED the same way: register a rejecting
+        // getToken (discovery + execute) so the server contributes ZERO tools,
+        // with exactly one structured log line. Never throw (other servers stay up).
+        const disableM2mServer = (detail: string): void => {
+          api.logger.error(
+            `syntropy-mcp: server "${spec.id}" (m2m-exchange) disabled — ${detail} (fail-closed, zero tools)`,
+          );
+          const reject = (): Promise<string> =>
+            Promise.reject(new Error(`m2m disabled: ${detail}`));
+          runtimes.set(spec.id, {
+            id: spec.id,
+            baseUrl: spec.baseUrl,
+            label,
+            getToken: reject,
+            session,
+          });
+          catalogServers.push({ id: spec.id, baseUrl: spec.baseUrl, label, getToken: reject });
+          sessionsByBaseUrl.set(spec.baseUrl, session);
+        };
+
+        // SEC-HTTPS: the baseUrl carries the exchange POST (actor + Tier-1 JWTs)
+        // AND the JWKS trust-root fetch — refuse a cleartext/non-local baseUrl.
+        if (!isSecureBaseUrl(spec.baseUrl)) {
+          disableM2mServer("baseUrl is not https (or loopback http)");
+          continue;
+        }
+
         const resource = spec.resource as string; // validated by the parser
         // The actor-token provider (default: one ServiceAuthProvider per m2m
         // server, bound to that server's resource). Fail-CLOSED at call time when
@@ -574,52 +635,25 @@ export function createSyntropyMcpPlugin(overrides: SyntropyMcpOverrides = {}) {
             : buildActorProvider(resource, env, api.logger, spec.id);
 
         if (!actorProvider) {
-          // Config for the actor path is malformed (e.g. non-URL resource) —
-          // fail-closed with one structured log; the server serves zero tools.
-          api.logger.error(
-            `syntropy-mcp: server "${spec.id}" (m2m-exchange) disabled — actor-token config invalid (fail-closed, zero tools)`,
-          );
-          const reject = (): Promise<string> =>
-            Promise.reject(new Error("m2m actor-token config invalid"));
-          runtimes.set(spec.id, {
-            id: spec.id,
-            baseUrl: spec.baseUrl,
-            label,
-            getToken: reject,
-            session,
-          });
-          catalogServers.push({ id: spec.id, baseUrl: spec.baseUrl, label, getToken: reject });
-          sessionsByBaseUrl.set(spec.baseUrl, session);
+          // Config for the actor path is malformed (e.g. non-URL resource).
+          disableM2mServer("actor-token config invalid");
           continue;
         }
 
+        // DESIGN-MACHINESUB: a blank machineSub would let a token carrying
+        // act:{sub:""} PASS the act.sub binding — disable (like a blank issuer),
+        // do NOT merely warn.
         const machineSub = spec.machineSub ?? env.SYNTROPY_MCP_MACHINE_SUB ?? "";
         if (!machineSub) {
-          // Without the expected act.sub the minted-token binding check can never
-          // pass — surface it loudly (the server will still fail-closed at call).
-          api.logger.warn(
-            `syntropy-mcp: server "${spec.id}" (m2m-exchange) has no machineSub (config or SYNTROPY_MCP_MACHINE_SUB) — exchanged tokens will fail the act.sub binding check`,
-          );
+          disableM2mServer("no machineSub (config or SYNTROPY_MCP_MACHINE_SUB)");
+          continue;
         }
 
         // Expected `iss` on the minted token — fail-closed if unresolvable (the
         // iss binding is a devex condition-of-approval; a blank issuer is unsafe).
         const issuer = spec.issuer ?? env.SYNTROPY_MCP_TOKEN_ISS ?? "";
         if (!issuer) {
-          api.logger.error(
-            `syntropy-mcp: server "${spec.id}" (m2m-exchange) disabled — no issuer (config or SYNTROPY_MCP_TOKEN_ISS); refusing an unverifiable iss (fail-closed, zero tools)`,
-          );
-          const reject = (): Promise<string> =>
-            Promise.reject(new Error("m2m issuer unresolvable (fail-closed)"));
-          runtimes.set(spec.id, {
-            id: spec.id,
-            baseUrl: spec.baseUrl,
-            label,
-            getToken: reject,
-            session,
-          });
-          catalogServers.push({ id: spec.id, baseUrl: spec.baseUrl, label, getToken: reject });
-          sessionsByBaseUrl.set(spec.baseUrl, session);
+          disableM2mServer("no issuer (config or SYNTROPY_MCP_TOKEN_ISS)");
           continue;
         }
 
@@ -640,6 +674,7 @@ export function createSyntropyMcpPlugin(overrides: SyntropyMcpOverrides = {}) {
             now: overrides.now,
           },
         );
+        exchangeClients.push(exchangeClient);
 
         // Resolve the current request's identity to an ExchangeSubject, or null
         // (fail-closed): Tier 1 needs a userJwt; Tier 2 needs a channel (SJ's
@@ -799,6 +834,8 @@ export function createSyntropyMcpPlugin(overrides: SyntropyMcpOverrides = {}) {
         // The store owns no timer (mirrors the catalog's "never self-schedule"
         // rule); the plugin's tick reclaims expired pendings.
         pendingStore.sweepExpired();
+        // Same rule for the m2m per-subject token caches (CODE-CACHE-EVICT).
+        for (const client of exchangeClients) client.sweepExpired();
       }, config.refreshSeconds * 1000);
 
       // ------------------------------------------------------------------
@@ -858,8 +895,8 @@ export function createSyntropyMcpPlugin(overrides: SyntropyMcpOverrides = {}) {
               else externalIdBySession.delete(sessionKey);
               // Tier 1: cache the live user JWT if the host surfaces one; clear it
               // on any turn without one so a stale JWT can't be reused (fail-closed).
-              const userJwt = (ctx as { userJwt?: unknown } | undefined)?.userJwt;
-              if (ctx?.externalId && typeof userJwt === "string" && userJwt.length > 0) {
+              const userJwt = readUserJwt(ctx);
+              if (ctx?.externalId && userJwt) {
                 userJwtBySession.set(sessionKey, userJwt);
               } else {
                 userJwtBySession.delete(sessionKey);

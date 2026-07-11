@@ -647,3 +647,237 @@ describe("createJwksVerifier JWKS caching + unknown-kid fail-closed", () => {
     await expect(verify(forged, JWKS_URL)).rejects.toBeInstanceOf(TokenExchangeError);
   });
 });
+
+// ---------------------------------------------------------------------------
+// QG hardening — DESIGN-GENGUARD, SEC-EXPCLAMP, decode-guard, empty-JWKS,
+// jwks-singleflight, cache-evict, exp/expires_in branches, aud-array, no-kid.
+// ---------------------------------------------------------------------------
+
+/** Sign an RS256 JWT over an ARBITRARY (already-encoded) payload segment. */
+function signRaw(headerObj: Record<string, unknown>, payloadB64: string): string {
+  const header = b64url(headerObj);
+  const sig = createSign("RSA-SHA256").update(`${header}.${payloadB64}`).sign(RSA_PRIV);
+  return `${header}.${payloadB64}.${sig.toString("base64url")}`;
+}
+
+describe("TokenExchangeClient DESIGN-GENGUARD (invalidate races an in-flight exchange)", () => {
+  it("does NOT cache a token whose exchange resolves AFTER an invalidate()", async () => {
+    let release!: (r: Response) => void;
+    const gate = new Promise<Response>((resolve) => {
+      release = resolve;
+    });
+    let calls = 0;
+    const fetchFn = vi.fn(() => {
+      calls += 1;
+      return calls === 1 ? gate : Promise.resolve(mintedResponse());
+    });
+    const client = makeClient({ fetchFn: fetchFn as unknown as typeof fetch });
+
+    const p1 = client.getUserToken(tier2); // in flight, gated
+    await new Promise((r) => setImmediate(r));
+    client.invalidate(subjectId(tier2)); // bump generation mid-flight
+    release(mintedResponse());
+    await p1; // resolves, but must NOT populate the cache (stale generation)
+
+    // Next call sees an empty cache → a SECOND exchange.
+    await client.getUserToken(tier2);
+    expect(fetchFn).toHaveBeenCalledTimes(2);
+  });
+});
+
+describe("TokenExchangeClient SEC-EXPCLAMP (never trust expires_in past exp)", () => {
+  it("clamps the cache TTL to the signed exp when expires_in overshoots it", async () => {
+    // Signed exp is at now+900; the (untrusted) expires_in claims 100000s.
+    const iat = nowSec();
+    const fetchFn = vi.fn(async () => mintedResponse({ iat, exp: iat + 900 }, 100_000));
+    const client = makeClient({ fetchFn });
+    await client.getUserToken(tier2);
+    expect(fetchFn).toHaveBeenCalledTimes(1);
+
+    // Just past exp−skew (900−60) → must re-exchange (NOT held for +100000s).
+    nowMs += (900 - 59) * 1000;
+    await client.getUserToken(tier2);
+    expect(fetchFn).toHaveBeenCalledTimes(2);
+  });
+
+  it("uses expires_in when it is shorter than exp (min of the two)", async () => {
+    const iat = nowSec();
+    const fetchFn = vi.fn(async () => mintedResponse({ iat, exp: iat + 100_000 }, 900));
+    const client = makeClient({ fetchFn });
+    await client.getUserToken(tier2);
+    nowMs += (900 - 59) * 1000;
+    await client.getUserToken(tier2);
+    expect(fetchFn).toHaveBeenCalledTimes(2);
+  });
+});
+
+describe("TokenExchangeClient CODE-CACHE-EVICT (sweepExpired)", () => {
+  it("removes expired entries and keeps live ones", async () => {
+    const fetchFn = vi.fn(async (_url: string, init?: RequestInit) => {
+      const sub = new URLSearchParams(init!.body as string).get("requested_subject")!;
+      const iat = nowSec();
+      return jsonResponse(200, {
+        access_token: fakeJwt({
+          sub,
+          act: { sub: MACHINE_SUB },
+          aud: RESOURCE,
+          iss: BASE_URL,
+          iat,
+          exp: iat + 1800,
+        }),
+        issued_token_type: "urn:ietf:params:oauth:token-type:jwt",
+        token_type: "Bearer",
+        expires_in: 900,
+      });
+    });
+    const shortLived: ExchangeSubject = { tier: 2, externalId: "u_short", channel: "telegram" };
+    const client = makeClient({ fetchFn: fetchFn as unknown as typeof fetch });
+    await client.getUserToken(shortLived); // TTL ~900s
+    // A live entry minted later with a much longer clock offset stays cached.
+    nowMs += 1000 * 1000; // shortLived is now expired (900s < 1000s)
+    const longLived: ExchangeSubject = { tier: 2, externalId: "u_long", channel: "telegram" };
+    await client.getUserToken(longLived);
+    expect(fetchFn).toHaveBeenCalledTimes(2);
+
+    client.sweepExpired(); // evicts u_short (expired), keeps u_long
+
+    await client.getUserToken(longLived); // still cached → no fetch
+    expect(fetchFn).toHaveBeenCalledTimes(2);
+    await client.getUserToken(shortLived); // evicted → re-exchange
+    expect(fetchFn).toHaveBeenCalledTimes(3);
+  });
+});
+
+describe("TokenExchangeClient exp / expires_in branches", () => {
+  it("rejects a missing exp claim (uncached)", async () => {
+    const fetchFn = vi.fn(async () => mintedResponse({ exp: undefined }));
+    const client = makeClient({ fetchFn });
+    await expect(client.getUserToken(tier2)).rejects.toBeInstanceOf(TokenExchangeError);
+    await expect(client.getUserToken(tier2)).rejects.toBeInstanceOf(TokenExchangeError);
+    expect(fetchFn).toHaveBeenCalledTimes(2);
+  });
+
+  it("rejects a non-number exp claim (uncached)", async () => {
+    const fetchFn = vi.fn(async () => mintedResponse({ exp: "later" }));
+    const client = makeClient({ fetchFn });
+    await expect(client.getUserToken(tier2)).rejects.toBeInstanceOf(TokenExchangeError);
+    expect(fetchFn).toHaveBeenCalledTimes(1);
+  });
+
+  it.each([
+    ["absent", undefined],
+    ["zero", 0],
+    ["negative", -5],
+  ])("falls back to the exp claim TTL when expires_in is %s", async (_label, expiresIn) => {
+    const iat = nowSec();
+    const fetchFn = vi.fn(async () => mintedResponse({ iat, exp: iat + 900 }, expiresIn as number));
+    const client = makeClient({ fetchFn });
+    await client.getUserToken(tier2);
+    // Cache tracks exp−skew (900−60): still fresh just before, re-exchange after.
+    nowMs += (900 - 61) * 1000;
+    await client.getUserToken(tier2);
+    expect(fetchFn).toHaveBeenCalledTimes(1);
+    nowMs += 2 * 1000;
+    await client.getUserToken(tier2);
+    expect(fetchFn).toHaveBeenCalledTimes(2);
+  });
+});
+
+describe("TokenExchangeClient aud as an array", () => {
+  it("accepts aud:[resource] and rejects aud:[other]", async () => {
+    const ok = vi.fn(async () => mintedResponse({ aud: [RESOURCE] }));
+    await expect(makeClient({ fetchFn: ok }).getUserToken(tier2)).resolves.toBeTypeOf("string");
+    const bad = vi.fn(async () => mintedResponse({ aud: ["http://sj.local/other"] }));
+    await expect(makeClient({ fetchFn: bad }).getUserToken(tier2)).rejects.toBeInstanceOf(
+      TokenExchangeError,
+    );
+  });
+});
+
+describe("TokenExchangeClient TEST-SINGLEFLIGHT-FAIL", () => {
+  it("two concurrent exchanges that reject → both reject, ONE fetch, inFlight cleared", async () => {
+    let calls = 0;
+    const fetchFn = vi.fn(async () => {
+      calls += 1;
+      return jsonResponse(400, { error: "invalid_grant" });
+    });
+    const client = makeClient({ fetchFn });
+    const [r1, r2] = await Promise.allSettled([
+      client.getUserToken(tier2),
+      client.getUserToken(tier2),
+    ]);
+    expect(r1.status).toBe("rejected");
+    expect(r2.status).toBe("rejected");
+    expect(calls).toBe(1); // single-flighted
+    // inFlight cleared → a subsequent call re-exchanges.
+    await expect(client.getUserToken(tier2)).rejects.toBeInstanceOf(TokenExchangeError);
+    expect(calls).toBe(2);
+  });
+});
+
+describe("createJwksVerifier CODE-DECODE-GUARD", () => {
+  it.each([
+    ["null", "null"],
+    ["array", JSON.stringify([1, 2])],
+    ["primitive", JSON.stringify(42)],
+  ])("rejects a token whose payload decodes to %s with a structured error", async (_l, json) => {
+    const payloadB64 = Buffer.from(json, "utf8").toString("base64url");
+    const token = signRaw({ alg: "RS256", kid: "sj-1" }, payloadB64);
+    const fetchJwks = vi.fn(async () => ({ keys: [SIGNING_JWK] }));
+    const verify = createJwksVerifier({ fetchJwks, now });
+    await expect(verify(token, JWKS_URL)).rejects.toBeInstanceOf(TokenExchangeError);
+  });
+});
+
+describe("createJwksVerifier SEC-EMPTY-JWKS", () => {
+  it("does NOT cache an empty keyset — the next verify refetches", async () => {
+    let first = true;
+    const fetchJwks = vi.fn(async () => {
+      if (first) {
+        first = false;
+        return { keys: [] as JsonWebKey[] };
+      }
+      return { keys: [SIGNING_JWK] };
+    });
+    const verify = createJwksVerifier({ fetchJwks, now });
+    // First verify: empty keyset → unknown-kid reject, NOT cached.
+    await expect(verify(signRs256(sampleClaims()), JWKS_URL)).rejects.toBeInstanceOf(
+      TokenExchangeError,
+    );
+    // Second verify (same 300s window): refetches (empty was not cached) → OK.
+    await expect(verify(signRs256(sampleClaims()), JWKS_URL)).resolves.toBeTypeOf("object");
+    expect(fetchJwks).toHaveBeenCalledTimes(2);
+  });
+});
+
+describe("createJwksVerifier CODE-JWKS-SINGLEFLIGHT", () => {
+  it("two concurrent cold verifies share ONE JWKS fetch", async () => {
+    let release!: (v: { keys: JsonWebKey[] }) => void;
+    const gate = new Promise<{ keys: JsonWebKey[] }>((resolve) => {
+      release = resolve;
+    });
+    const fetchJwks = vi.fn(() => gate);
+    const verify = createJwksVerifier({ fetchJwks, now });
+    const p1 = verify(signRs256(sampleClaims()), JWKS_URL);
+    const p2 = verify(signRs256(sampleClaims()), JWKS_URL);
+    await new Promise((r) => setImmediate(r));
+    expect(fetchJwks).toHaveBeenCalledTimes(1);
+    release({ keys: [SIGNING_JWK] });
+    await Promise.all([p1, p2]);
+    expect(fetchJwks).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("createJwksVerifier TEST-NOKID", () => {
+  it.each([
+    ["missing", {}],
+    ["empty", { kid: "" }],
+  ])("rejects an RS256 header with a %s kid BEFORE any JWKS fetch", async (_l, kidPart) => {
+    const payloadB64 = b64url(sampleClaims());
+    const token = signRaw({ alg: "RS256", ...kidPart }, payloadB64);
+    const fetchJwks = vi.fn(async () => ({ keys: [SIGNING_JWK] }));
+    const verify = createJwksVerifier({ fetchJwks, now });
+    await expect(verify(token, JWKS_URL)).rejects.toBeInstanceOf(TokenExchangeError);
+    expect(fetchJwks).not.toHaveBeenCalled();
+  });
+});
