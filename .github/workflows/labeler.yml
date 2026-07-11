@@ -19,7 +19,32 @@ on:
 permissions: {}
 
 jobs:
+  # Gate the App-token jobs on the GH App private key being provisioned. The
+  # `secrets` context is NOT available in `if:` conditions (job or step), so we
+  # surface presence as a job output (`secrets` IS available in step `env`) and
+  # gate the real jobs via `needs` + a `needs`-context `if:`. Absent key => the
+  # labeler jobs SKIP cleanly (green) instead of failing red on every PR;
+  # auto-labeling resumes the moment GH_APP_PRIVATE_KEY (App 2729701) is set (#29).
+  gate:
+    runs-on: ubuntu-latest
+    outputs:
+      has_app_key: ${{ steps.check.outputs.has_app_key }}
+    steps:
+      - name: Check GH App key presence
+        id: check
+        env:
+          APP_KEY: ${{ secrets.GH_APP_PRIVATE_KEY }}
+        run: |
+          if [ -n "$APP_KEY" ]; then
+            echo "has_app_key=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "has_app_key=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::GH_APP_PRIVATE_KEY (App 2729701) not provisioned — skipping labeler jobs. Auto-labeling resumes when the .pem is set (#29)."
+          fi
+
   label:
+    needs: [gate]
+    if: needs.gate.outputs.has_app_key == 'true'
     permissions:
       contents: read
       pull-requests: write
@@ -196,7 +221,8 @@ jobs:
             }
 
   backfill-pr-labels:
-    if: github.event_name == 'workflow_dispatch'
+    needs: [gate]
+    if: github.event_name == 'workflow_dispatch' && needs.gate.outputs.has_app_key == 'true'
     permissions:
       contents: read
       pull-requests: write
@@ -438,6 +464,8 @@ jobs:
             core.info(`Processed ${processed} pull requests.`);
 
   label-issues:
+    needs: [gate]
+    if: needs.gate.outputs.has_app_key == 'true'
     permissions:
       issues: write
     runs-on: ubuntu-latest
