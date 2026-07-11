@@ -66,6 +66,12 @@ export type ExchangeSubject =
  * path (no consent artifact = impersonation surface), so a Tier-2 subject is
  * scoped by channel: `"<channel>:<externalId>"` (e.g. `"telegram:12345"`).
  * Tier-1 stays the bare `externalId` (the Clerk-JWT/HTTP path).
+ *
+ * SECURITY INVARIANT: this value is the per-user cache key AND — for Tier-2,
+ * where the minted `sub` is NOT bound — the ONLY thing (with SJ's server-side
+ * resolution + the RS256 signature + the `channel` claim) that scopes a token
+ * to the right user. It MUST always include `externalId`; dropping it would
+ * weaken the Tier-2 per-user binding to channel-only.
  */
 export function subjectId(subject: ExchangeSubject): string {
   return subject.tier === 2 ? `${subject.channel}:${subject.externalId}` : subject.externalId;
@@ -489,7 +495,7 @@ export class TokenExchangeClient {
       // Tier-1 path. Tier-1 mints carry NO `channel` claim (do not assert one).
       if (claims.sub !== subject.externalId) fail("sub does not match the requested subject");
       if (claims.tier !== 1) fail("tier is not 1 for a Tier-1 request");
-    } else {
+    } else if (subject.tier === 2) {
       // Tier 2: `sub` is the SJ-resolved Clerk user_id (unpredictable) — require
       // it present, but bind integrity via `channel` + `tier` instead. `tier` is
       // a JSON NUMBER (=== 2, NOT "2"); `channel` is a top-level string == the
@@ -499,6 +505,12 @@ export class TokenExchangeClient {
       }
       if (claims.channel !== subject.channel) fail("channel does not match the requested channel");
       if (claims.tier !== 2) fail("tier is not 2 for a Tier-2 request");
+    } else {
+      // Unreachable: ExchangeSubject is a discriminated union of tier 1|2, and
+      // the sole constructor (index.ts toExchangeSubject) never yields another
+      // tier. Fail-closed defense-in-depth so a malformed subject can never skip
+      // the tier guards above.
+      fail("unsupported request tier");
     }
 
     const act = claims.act;
