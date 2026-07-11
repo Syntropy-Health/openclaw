@@ -18,8 +18,8 @@ import {
   resolveMirroredTranscriptText,
 } from "../../config/sessions.js";
 import type { sendMessageDiscord } from "../../discord/send.js";
-import { parseComponentDescriptor } from "../../gateway/component-descriptor.schema.js";
 import type { sendMessageIMessage } from "../../imessage/send.js";
+import { getLogger } from "../../logging.js";
 import { getAgentScopedMediaLocalRoots } from "../../media/local-roots.js";
 import { getGlobalHookRunner } from "../../plugins/hook-runner-global.js";
 import { markdownToSignalTextChunks, type SignalTextStyleRange } from "../../signal/format.js";
@@ -32,11 +32,33 @@ import { ackDelivery, enqueueDelivery, failDelivery } from "./delivery-queue.js"
 import type { OutboundIdentity } from "./identity.js";
 import type { NormalizedOutboundPayload } from "./payloads.js";
 import { normalizeReplyPayloadsForDelivery } from "./payloads.js";
-import { type ChannelRenderingOptions, planChannelRender } from "./render-policy.js";
+import {
+  type ChannelRenderingOptions,
+  planChannelDataRender,
+  sanitizePhiApprovedChannels,
+} from "./render-policy.js";
 import type { OutboundChannel } from "./targets.js";
 
 export type { NormalizedOutboundPayload } from "./payloads.js";
 export { normalizeOutboundPayloads } from "./payloads.js";
+
+/**
+ * SEC-4: warn ONCE (per channel) that a denylisted third-party channel in
+ * `phiApprovedChannels` was ignored. The policy already enforces the counsel
+ * gate (the channel still minimizes); this is the loud, deduplicated signal.
+ */
+const warnedThirdPartyPhiApproved = new Set<string>();
+function warnIgnoredThirdPartyPhiApproved(ignored: readonly string[]): void {
+  for (const channel of ignored) {
+    if (warnedThirdPartyPhiApproved.has(channel)) {
+      continue;
+    }
+    warnedThirdPartyPhiApproved.add(channel);
+    getLogger().warn(
+      `phiApprovedChannels contains third-party channel "${channel}" — ignored; requires counsel override`,
+    );
+  }
+}
 
 type SendMatrixMessage = (
   to: string,
@@ -416,9 +438,14 @@ async function deliverOutboundPayloadsCore(
   });
   const hookRunner = getGlobalHookRunner();
   // R7 channel-rendering policy: default phiApprovedChannels=[] (Q6 — nothing
-  // approved unless explicitly configured). Sourced once per delivery.
+  // approved unless explicitly configured). Sourced once per delivery. SEC-4:
+  // third-party channels are stripped from the honored list (counsel-gate) and
+  // warned about once.
+  const { approved: phiApprovedChannels, ignored: ignoredPhiApproved } =
+    sanitizePhiApprovedChannels(cfg.gateway?.outboundRendering?.phiApprovedChannels);
+  warnIgnoredThirdPartyPhiApproved(ignoredPhiApproved);
   const renderingOptions: ChannelRenderingOptions = {
-    phiApprovedChannels: cfg.gateway?.outboundRendering?.phiApprovedChannels ?? [],
+    phiApprovedChannels,
     ...(cfg.gateway?.outboundRendering?.deepLinkBase
       ? { deepLinkBase: cfg.gateway.outboundRendering.deepLinkBase }
       : {}),
@@ -451,8 +478,37 @@ async function deliverOutboundPayloadsCore(
     try {
       throwIfAborted(abortSignal);
 
-      // Run message_sending plugin hook (may modify content or cancel)
       let effectivePayload = payload;
+
+      // R7 ChannelRenderingPolicy (PHI boundary) — runs BEFORE the message_sending
+      // hook (SEC-5) so a logging/persisting hook only ever observes minimized
+      // content. A component ComponentDescriptor riding in channelData (wire shape
+      // `{ type: "component", component }`) has no native render on a messaging
+      // channel, so degrade it to PHI-aware text and DROP channelData (falls
+      // through to sendTextChunks). Fail-safe (SEC-2): an unparseable component is
+      // scrubbed to the minimized confirm text and dropped. On the minimized path
+      // media is also dropped (SEC-3) — a co-carried meal photo must not egress.
+      // Non-component channelData and channelData-less payloads are byte-identical.
+      const renderDecision = planChannelDataRender(
+        effectivePayload.channelData,
+        channel,
+        renderingOptions,
+      );
+      if (renderDecision.action === "scrub") {
+        effectivePayload = {
+          ...effectivePayload,
+          text: renderDecision.text,
+          channelData: undefined,
+          ...(renderDecision.minimized ? { mediaUrl: undefined, mediaUrls: undefined } : {}),
+        };
+        payloadSummary.text = renderDecision.text;
+        payloadSummary.channelData = undefined;
+        if (renderDecision.minimized) {
+          payloadSummary.mediaUrls = [];
+        }
+      }
+
+      // Run message_sending plugin hook (may modify content or cancel)
       if (hookRunner?.hasHooks("message_sending")) {
         try {
           const sendingResult = await hookRunner.runMessageSending(
@@ -470,29 +526,11 @@ async function deliverOutboundPayloadsCore(
             continue;
           }
           if (sendingResult?.content != null) {
-            effectivePayload = { ...payload, text: sendingResult.content };
+            effectivePayload = { ...effectivePayload, text: sendingResult.content };
             payloadSummary.text = sendingResult.content;
           }
         } catch {
           // Don't block delivery on hook failure
-        }
-      }
-
-      // R7 ChannelRenderingPolicy: a component ComponentDescriptor riding in
-      // channelData (wire shape `{ type: "component", component }`) has no native
-      // render on a messaging channel, so degrade it to PHI-aware text and DROP
-      // channelData (falls through to sendTextChunks). Non-component channelData
-      // and channelData-less payloads are left byte-identical.
-      const componentCarrier =
-        effectivePayload.channelData?.type === "component"
-          ? parseComponentDescriptor(effectivePayload.channelData.component)
-          : null;
-      if (componentCarrier) {
-        const plan = planChannelRender(componentCarrier, channel, renderingOptions);
-        if (plan.kind === "text") {
-          effectivePayload = { ...effectivePayload, text: plan.text, channelData: undefined };
-          payloadSummary.text = plan.text;
-          payloadSummary.channelData = undefined;
         }
       }
 
