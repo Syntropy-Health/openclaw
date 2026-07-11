@@ -447,20 +447,35 @@ export class TokenExchangeClient {
       );
     }
 
-    // Expected `sub` is the composed subject identity: Tier-2 channel-scoped
-    // ("<channel>:<externalId>"), Tier-1 the bare externalId.
-    this.checkClaims(claims, subjectId(subject), idTag);
+    this.checkClaims(claims, subject, idTag);
 
     const expiresAtMs = this.deriveExpiry(claims, json.expires_in);
     return { token: accessToken, expiresAtMs };
   }
 
   /**
-   * Enforce the binding claims. Throws a hygiene-safe {@link TokenExchangeError}
-   * (never the token, the claim values, or the raw externalId) on any mismatch.
-   * `expectedSub` is the composed {@link subjectId} the minted `sub` must equal.
+   * Enforce the request↔token binding claims — the credential-binding integrity
+   * point. Throws a hygiene-safe {@link TokenExchangeError} (never the token, the
+   * claim values, or the raw externalId) on any mismatch. The `sub` binding
+   * DIFFERS by tier (SJ mint contract, #2951):
+   *
+   *  - **Tier 1** (subject_token = Clerk JWT): `sub` == the request `externalId`
+   *    (the bare Clerk `sub` rides straight through the exchange).
+   *  - **Tier 2** (requested_subject = "<channel>:<externalId>"): SJ RESOLVES the
+   *    composed request through the passcode linkage to the real Clerk user, so
+   *    the minted `sub` is that resolved Clerk user_id — NOT the composed value,
+   *    and NOT predictable by this client. We therefore require `sub` be a
+   *    non-empty string (the downstream user_scope) but do NOT bind it; the
+   *    request↔token integrity binding is `channel` == the requested channel,
+   *    plus `tier` == 2 (a Tier-1 token can't satisfy a Tier-2 request path).
+   *    Cross-user isolation is preserved by the cache key ({@link subjectId} =
+   *    "<channel>:<externalId>"), which is unchanged.
    */
-  private checkClaims(claims: Record<string, unknown>, expectedSub: string, idTag: string): void {
+  private checkClaims(
+    claims: Record<string, unknown>,
+    subject: ExchangeSubject,
+    idTag: string,
+  ): void {
     const fail = (detail: string): never => {
       throw new TokenExchangeError(
         "claim_mismatch",
@@ -468,7 +483,23 @@ export class TokenExchangeClient {
       );
     };
 
-    if (claims.sub !== expectedSub) fail("sub does not match the requested subject");
+    if (subject.tier === 1) {
+      // The bare externalId IS the Clerk `sub` on the JWT path. `tier` is a JSON
+      // NUMBER (not "1") — also assert it so a Tier-2 token can't satisfy the
+      // Tier-1 path. Tier-1 mints carry NO `channel` claim (do not assert one).
+      if (claims.sub !== subject.externalId) fail("sub does not match the requested subject");
+      if (claims.tier !== 1) fail("tier is not 1 for a Tier-1 request");
+    } else {
+      // Tier 2: `sub` is the SJ-resolved Clerk user_id (unpredictable) — require
+      // it present, but bind integrity via `channel` + `tier` instead. `tier` is
+      // a JSON NUMBER (=== 2, NOT "2"); `channel` is a top-level string == the
+      // requested channel (the bare channel, e.g. "whatsapp").
+      if (typeof claims.sub !== "string" || claims.sub.length === 0) {
+        fail("sub is missing or empty");
+      }
+      if (claims.channel !== subject.channel) fail("channel does not match the requested channel");
+      if (claims.tier !== 2) fail("tier is not 2 for a Tier-2 request");
+    }
 
     const act = claims.act;
     const actSub =

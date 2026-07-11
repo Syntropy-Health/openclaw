@@ -638,12 +638,21 @@ function b64url(obj: unknown): string {
 const decodeMinted = async (jwt: string): Promise<Record<string, unknown>> =>
   JSON.parse(Buffer.from(jwt.split(".")[1]!, "base64url").toString("utf8"));
 
-/** Build a minted-token exchange Response bound to the (composed) subject `sub`. */
-function mintedExchangeResponse(sub: string): Response {
+/**
+ * Build a Tier-2 minted-token exchange Response for a `requestedSubject`
+ * ("<channel>:<externalId>"). SJ mints `sub` = the RESOLVED Clerk id and echoes
+ * the requested `channel` in a separate claim (#2951); the client binds on
+ * channel + tier, not on sub.
+ */
+function mintedExchangeResponse(requestedSubject: string): Response {
   const iat = Math.floor(nowMs / 1000);
+  const channel = requestedSubject.includes(":")
+    ? requestedSubject.split(":")[0]!
+    : requestedSubject;
   const claims = {
-    sub,
+    sub: `clerk_${requestedSubject}`, // resolved Clerk id (not the composed request)
     act: { sub: "machine_openclaw" },
+    channel,
     aud: "https://sj.local/mcp",
     iss: "https://sj.local",
     iat,

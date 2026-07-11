@@ -43,8 +43,12 @@ const ISSUER = "http://sj.local";
 const MACHINE_SUB = "machine_openclaw";
 const EXTERNAL_ID = "user_2abcDEF";
 const CHANNEL = "telegram";
-// Tier-2 subject is channel-scoped (SJ security QG): "<channel>:<externalId>".
+// The Tier-2 REQUEST subject is channel-scoped: "<channel>:<externalId>" (this is
+// the requested_subject on the wire AND the cache key). But SJ RESOLVES it through
+// the passcode linkage, so the MINTED token's `sub` is the real Clerk user_id
+// (unpredictable a priori), with the channel in a SEPARATE `channel` claim (#2951).
 const COMPOSED_SUB = `${CHANNEL}:${EXTERNAL_ID}`;
+const RESOLVED_CLERK_ID = "user_resolvedClerk"; // what SJ actually mints as sub (Tier 2)
 const USER_JWT = "clerk.live.jwt";
 const ACTOR_TOKEN = "gateway.m2m.jwt";
 
@@ -64,16 +68,18 @@ const nowSec = () => Math.floor(nowMs / 1000);
 
 /**
  * Build a minted-token response with sane claims (overridable per-test).
- * Defaults to the Tier-2 channel-scoped `sub` (most tests exercise Tier 2);
- * Tier-1 tests override `sub` to the bare externalId. `expiresIn` is separate
+ * Defaults to a Tier-2 SJ mint: `sub` = the RESOLVED Clerk user_id, `channel` =
+ * the requested channel, `tier` = 2 (most tests exercise Tier 2). Tier-1 tests
+ * override `sub` to the bare externalId and `tier` to 1. `expiresIn` is separate
  * from the `exp` claim so a test can prove the cache TTL is driven by the
  * response field, not the claim.
  */
 function mintedResponse(overrides: Record<string, unknown> = {}, expiresIn = 900): Response {
   const iat = nowSec();
   const claims = {
-    sub: COMPOSED_SUB,
+    sub: RESOLVED_CLERK_ID,
     act: { sub: MACHINE_SUB },
+    channel: CHANNEL,
     aud: RESOURCE,
     iss: BASE_URL,
     iat,
@@ -203,11 +209,17 @@ describe("TokenExchangeClient validate-before-cache", () => {
     expect(verify.mock.calls[0]![1]).toBe(`${BASE_URL}/api/mcp/.well-known/jwks.json`);
   });
 
+  // Tier-2 binding integrity: `sub` is NOT bound (SJ resolves it to a Clerk id
+  // this client can't predict); the request↔token binding is `channel` + `tier`.
   it.each([
-    ["wrong sub", { sub: "user_someone_else" }],
     ["wrong act.sub", { act: { sub: "attacker_machine" } }],
     ["wrong aud", { aud: "http://sj.local/other" }],
-  ])("rejects a %s claim and caches nothing", async (_label, override) => {
+    ["wrong channel", { channel: "slack" }],
+    ["missing channel", { channel: undefined }],
+    ["wrong tier (1)", { tier: 1 }],
+    ["empty sub", { sub: "" }],
+    ["missing sub", { sub: undefined }],
+  ])("rejects a %s claim and caches nothing (Tier 2)", async (_label, override) => {
     const fetchFn = vi.fn(async () => mintedResponse(override));
     const client = makeClient({ fetchFn });
     await expect(client.getUserToken(tier2)).rejects.toBeInstanceOf(TokenExchangeError);
@@ -216,17 +228,66 @@ describe("TokenExchangeClient validate-before-cache", () => {
     expect(fetchFn).toHaveBeenCalledTimes(2);
   });
 
-  it("Tier 2: binds sub to '<channel>:<externalId>' — a bare-externalId sub is rejected", async () => {
-    // A minted token whose sub is the BARE externalId (missing the channel scope)
-    // must NOT be accepted for a Tier-2 exchange.
-    const fetchFn = vi.fn(async () => mintedResponse({ sub: EXTERNAL_ID }));
-    const client = makeClient({ fetchFn });
-    await expect(client.getUserToken(tier2)).rejects.toBeInstanceOf(TokenExchangeError);
-    // And the composed sub is accepted.
-    const okFetch = vi.fn(async () => mintedResponse({ sub: COMPOSED_SUB }));
-    await expect(makeClient({ fetchFn: okFetch }).getUserToken(tier2)).resolves.toBeTypeOf(
-      "string",
+  it("Tier 2 happy path: accepts a RESOLVED Clerk sub (not the composed request subject)", async () => {
+    // SJ mints sub=<resolved clerk id> + channel=<requested channel> + tier=2.
+    // The client must NOT reject on sub (it can't predict the resolved id); it
+    // binds on channel + tier and returns the token, cached under the REQUEST key.
+    const fetchFn = vi.fn(async () =>
+      mintedResponse({ sub: RESOLVED_CLERK_ID, channel: CHANNEL, tier: 2 }),
     );
+    const client = makeClient({ fetchFn });
+    await expect(client.getUserToken(tier2)).resolves.toBeTypeOf("string");
+    // Cached under the composed REQUEST identity — a second call hits the cache.
+    await client.getUserToken(tier2);
+    expect(fetchFn).toHaveBeenCalledTimes(1);
+  });
+
+  it("Tier 1: STILL binds sub === externalId (a mismatched sub is rejected)", async () => {
+    // Tier-1 rides the Clerk JWT straight through, so the minted sub IS the
+    // externalId — this binding is unchanged.
+    const bad = vi.fn(async () => mintedResponse({ tier: 1, sub: "user_someone_else" }));
+    await expect(makeClient({ fetchFn: bad }).getUserToken(tier1)).rejects.toBeInstanceOf(
+      TokenExchangeError,
+    );
+    const ok = vi.fn(async () => mintedResponse({ tier: 1, sub: EXTERNAL_ID }));
+    await expect(makeClient({ fetchFn: ok }).getUserToken(tier1)).resolves.toBeTypeOf("string");
+  });
+
+  it("Tier 2 cross-user isolation: A's resolved token is never served for B's request", async () => {
+    // Two DIFFERENT external ids on the SAME channel resolve to two DIFFERENT
+    // Clerk subs; the cache keys on the REQUEST subject "<channel>:<externalId>",
+    // so B never receives A's token.
+    const fetchFn = vi.fn(async (_url: string, init?: RequestInit) => {
+      const requested = new URLSearchParams(init!.body as string).get("requested_subject")!;
+      const iat = nowSec();
+      // SJ resolves each composed request to a distinct Clerk id.
+      const resolvedSub = requested === "telegram:usr_A" ? "clerk_A" : "clerk_B";
+      return jsonResponse(200, {
+        access_token: fakeJwt({
+          sub: resolvedSub,
+          act: { sub: MACHINE_SUB },
+          channel: "telegram",
+          aud: RESOURCE,
+          iss: BASE_URL,
+          iat,
+          exp: iat + 1800,
+          tier: 2,
+        }),
+        issued_token_type: "urn:ietf:params:oauth:token-type:jwt",
+        token_type: "Bearer",
+        expires_in: 900,
+      });
+    });
+    const client = makeClient({ fetchFn: fetchFn as unknown as typeof fetch });
+    const a: ExchangeSubject = { tier: 2, externalId: "usr_A", channel: "telegram" };
+    const b: ExchangeSubject = { tier: 2, externalId: "usr_B", channel: "telegram" };
+    const tokenA = await client.getUserToken(a);
+    const tokenB = await client.getUserToken(b);
+    expect(tokenA).not.toBe(tokenB); // distinct exchanges, distinct minted subs
+    expect(fetchFn).toHaveBeenCalledTimes(2);
+    // A re-request hits A's cache (not B's).
+    expect(await client.getUserToken(a)).toBe(tokenA);
+    expect(fetchFn).toHaveBeenCalledTimes(2);
   });
 
   it("rejects an already-expired minted token and caches nothing", async () => {
@@ -246,6 +307,70 @@ describe("TokenExchangeClient validate-before-cache", () => {
     const client = makeClient({ fetchFn, verifyMintedToken: verify });
     await expect(client.getUserToken(tier2)).rejects.toBeInstanceOf(TokenExchangeError);
     expect(fetchFn).toHaveBeenCalledTimes(1);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Tier binding — EXACT types against SJ's verbatim mint payload (#2951)
+//   Tier-2: {sub:"user_2xyz", act:{sub}, aud, iss, iat, exp, jti, tier:2, channel:"whatsapp"}
+//   Tier-1: {sub:"user_1abc", act:{sub}, aud, iss, iat, exp, jti, tier:1}  ← NO channel
+//   `tier` is a JSON NUMBER; `channel` is a top-level string (bare channel).
+// ---------------------------------------------------------------------------
+
+describe("TokenExchangeClient tier binding — exact types (SJ verbatim)", () => {
+  const waSubject: ExchangeSubject = { tier: 2, externalId: "usr_2abc", channel: "whatsapp" };
+
+  it("Tier-2 verbatim: tier:2 (number) + top-level channel:'whatsapp' + resolved sub → ACCEPTED", async () => {
+    const fetchFn = vi.fn(async () =>
+      mintedResponse({
+        sub: "user_2xyz", // bare resolved Clerk id — NOT the composed request
+        channel: "whatsapp", // top-level string, VALUE is the bare channel
+        tier: 2, // JSON number
+        jti: "jti_abc123", // present in the real mint; ignored by the client
+      }),
+    );
+    await expect(makeClient({ fetchFn }).getUserToken(waSubject)).resolves.toBeTypeOf("string");
+  });
+
+  it("Tier-2: tier as the STRING '2' → REJECTED (number-type binding)", async () => {
+    const fetchFn = vi.fn(async () => mintedResponse({ channel: "whatsapp", tier: "2" }));
+    await expect(makeClient({ fetchFn }).getUserToken(waSubject)).rejects.toBeInstanceOf(
+      TokenExchangeError,
+    );
+  });
+
+  it("Tier-2: tier:1 for a Tier-2 request → REJECTED (tier confusion)", async () => {
+    const fetchFn = vi.fn(async () => mintedResponse({ channel: "whatsapp", tier: 1 }));
+    await expect(makeClient({ fetchFn }).getUserToken(waSubject)).rejects.toBeInstanceOf(
+      TokenExchangeError,
+    );
+  });
+
+  it("Tier-1 verbatim: tier:1 (number) + NO channel key → ACCEPTED", async () => {
+    // channel:undefined drops the key from the JSON payload (matches the real
+    // Tier-1 mint, which carries no channel claim).
+    const fetchFn = vi.fn(async () =>
+      mintedResponse({ tier: 1, sub: EXTERNAL_ID, channel: undefined, jti: "jti_t1" }),
+    );
+    await expect(makeClient({ fetchFn }).getUserToken(tier1)).resolves.toBeTypeOf("string");
+  });
+
+  it("Tier-1: tier as the STRING '1' → REJECTED (number-type binding)", async () => {
+    const fetchFn = vi.fn(async () =>
+      mintedResponse({ tier: "1", sub: EXTERNAL_ID, channel: undefined }),
+    );
+    await expect(makeClient({ fetchFn }).getUserToken(tier1)).rejects.toBeInstanceOf(
+      TokenExchangeError,
+    );
+  });
+
+  it("Tier-1: tier:2 for a Tier-1 request → REJECTED (tier===1 defense)", async () => {
+    const fetchFn = vi.fn(async () =>
+      mintedResponse({ tier: 2, sub: EXTERNAL_ID, channel: undefined }),
+    );
+    await expect(makeClient({ fetchFn }).getUserToken(tier1)).rejects.toBeInstanceOf(
+      TokenExchangeError,
+    );
   });
 });
 
@@ -330,12 +455,14 @@ describe("TokenExchangeClient caching", () => {
 
   it("caches per subject key (distinct channel-scoped subjects do not share a token)", async () => {
     const fetchFn = vi.fn(async (_url: string, init?: RequestInit) => {
-      const sub = new URLSearchParams(init!.body as string).get("requested_subject")!;
+      const requested = new URLSearchParams(init!.body as string).get("requested_subject")!;
+      const channel = requested.split(":")[0]!; // SJ echoes the requested channel
       const iat = nowSec();
       return jsonResponse(200, {
         access_token: fakeJwt({
-          sub, // == the composed "<channel>:<externalId>" the client sent
+          sub: `clerk_${requested}`, // resolved Clerk id (not the composed request)
           act: { sub: MACHINE_SUB },
+          channel,
           aud: RESOURCE,
           iss: BASE_URL,
           iat,
@@ -427,16 +554,19 @@ describe("TokenExchangeClient invalidate", () => {
 
   it("invalidate of one subject leaves another's cache intact", async () => {
     const fetchFn = vi.fn(async (_url: string, init?: RequestInit) => {
-      const sub = new URLSearchParams(init!.body as string).get("requested_subject")!;
+      const requested = new URLSearchParams(init!.body as string).get("requested_subject")!;
+      const channel = requested.split(":")[0]!;
       const iat = nowSec();
       return jsonResponse(200, {
         access_token: fakeJwt({
-          sub,
+          sub: `clerk_${requested}`,
           act: { sub: MACHINE_SUB },
+          channel,
           aud: RESOURCE,
           iss: BASE_URL,
           iat,
           exp: iat + 1800,
+          tier: 2,
         }),
         issued_token_type: "urn:ietf:params:oauth:token-type:jwt",
         token_type: "Bearer",
@@ -714,16 +844,19 @@ describe("TokenExchangeClient SEC-EXPCLAMP (never trust expires_in past exp)", (
 describe("TokenExchangeClient CODE-CACHE-EVICT (sweepExpired)", () => {
   it("removes expired entries and keeps live ones", async () => {
     const fetchFn = vi.fn(async (_url: string, init?: RequestInit) => {
-      const sub = new URLSearchParams(init!.body as string).get("requested_subject")!;
+      const requested = new URLSearchParams(init!.body as string).get("requested_subject")!;
+      const channel = requested.split(":")[0]!;
       const iat = nowSec();
       return jsonResponse(200, {
         access_token: fakeJwt({
-          sub,
+          sub: `clerk_${requested}`,
           act: { sub: MACHINE_SUB },
+          channel,
           aud: RESOURCE,
           iss: BASE_URL,
           iat,
           exp: iat + 1800,
+          tier: 2,
         }),
         issued_token_type: "urn:ietf:params:oauth:token-type:jwt",
         token_type: "Bearer",
