@@ -18,6 +18,7 @@ import {
   resolveMirroredTranscriptText,
 } from "../../config/sessions.js";
 import type { sendMessageDiscord } from "../../discord/send.js";
+import { parseComponentDescriptor } from "../../gateway/component-descriptor.schema.js";
 import type { sendMessageIMessage } from "../../imessage/send.js";
 import { getAgentScopedMediaLocalRoots } from "../../media/local-roots.js";
 import { getGlobalHookRunner } from "../../plugins/hook-runner-global.js";
@@ -31,6 +32,7 @@ import { ackDelivery, enqueueDelivery, failDelivery } from "./delivery-queue.js"
 import type { OutboundIdentity } from "./identity.js";
 import type { NormalizedOutboundPayload } from "./payloads.js";
 import { normalizeReplyPayloadsForDelivery } from "./payloads.js";
+import { type ChannelRenderingOptions, planChannelRender } from "./render-policy.js";
 import type { OutboundChannel } from "./targets.js";
 
 export type { NormalizedOutboundPayload } from "./payloads.js";
@@ -413,6 +415,14 @@ async function deliverOutboundPayloadsCore(
     return normalized ? [normalized] : [];
   });
   const hookRunner = getGlobalHookRunner();
+  // R7 channel-rendering policy: default phiApprovedChannels=[] (Q6 — nothing
+  // approved unless explicitly configured). Sourced once per delivery.
+  const renderingOptions: ChannelRenderingOptions = {
+    phiApprovedChannels: cfg.gateway?.outboundRendering?.phiApprovedChannels ?? [],
+    ...(cfg.gateway?.outboundRendering?.deepLinkBase
+      ? { deepLinkBase: cfg.gateway.outboundRendering.deepLinkBase }
+      : {}),
+  };
   for (const payload of normalizedPayloads) {
     const payloadSummary: NormalizedOutboundPayload = {
       text: payload.text ?? "",
@@ -465,6 +475,24 @@ async function deliverOutboundPayloadsCore(
           }
         } catch {
           // Don't block delivery on hook failure
+        }
+      }
+
+      // R7 ChannelRenderingPolicy: a component ComponentDescriptor riding in
+      // channelData (wire shape `{ type: "component", component }`) has no native
+      // render on a messaging channel, so degrade it to PHI-aware text and DROP
+      // channelData (falls through to sendTextChunks). Non-component channelData
+      // and channelData-less payloads are left byte-identical.
+      const componentCarrier =
+        effectivePayload.channelData?.type === "component"
+          ? parseComponentDescriptor(effectivePayload.channelData.component)
+          : null;
+      if (componentCarrier) {
+        const plan = planChannelRender(componentCarrier, channel, renderingOptions);
+        if (plan.kind === "text") {
+          effectivePayload = { ...effectivePayload, text: plan.text, channelData: undefined };
+          payloadSummary.text = plan.text;
+          payloadSummary.channelData = undefined;
         }
       }
 

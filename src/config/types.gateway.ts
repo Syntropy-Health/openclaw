@@ -398,4 +398,19 @@ export type GatewayConfig = {
    * Set to 0 to disable. Default: 5.
    */
   channelHealthCheckMinutes?: number;
+  /** Outbound component→text rendering / PHI-egress policy (R7 channel degradation). */
+  outboundRendering?: GatewayOutboundRenderingConfig;
+};
+
+/**
+ * ChannelRenderingPolicy config (R7). Messaging channels have no native
+ * component render, so a ComponentDescriptor riding in a payload's channelData
+ * degrades to text before delivery. Health-marked content is minimized on any
+ * channel NOT listed in `phiApprovedChannels` (Q6 default: none approved).
+ */
+export type GatewayOutboundRenderingConfig = {
+  /** Channels allowed to receive health-specific component content. Default: [] (nothing approved). */
+  phiApprovedChannels?: string[];
+  /** Deep-link base appended with pending_id when minimizing health content on a non-approved channel. */
+  deepLinkBase?: string;
 };

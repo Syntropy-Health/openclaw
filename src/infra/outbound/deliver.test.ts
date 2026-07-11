@@ -597,6 +597,169 @@ describe("deliverOutboundPayloads", () => {
   });
 });
 
+// R7 ChannelRenderingPolicy — component→text PHI-aware degradation.
+const HEALTH_SUMMARY = "Log salmon meal — 340 cal, 34g protein";
+const MINIMIZED_TEXT = "You have a pending action to confirm. Open the app to review and confirm.";
+
+function componentCarrier(opts?: { health?: boolean; summary?: string; pendingId?: string }) {
+  return {
+    type: "component",
+    component: {
+      type: "component",
+      key: "food_log_card",
+      props: {},
+      ui: {
+        summary: opts?.summary ?? HEALTH_SUMMARY,
+        ...(opts?.health
+          ? { fields: [{ name: "calories", type: "number", sensitivity: "health" }] }
+          : { fields: [{ name: "note", type: "string", sensitivity: "none" }] }),
+        // pending_id requires expires_at (schema refine) — the Governor stamps both.
+        ...(opts?.pendingId
+          ? { pending_id: opts.pendingId, expires_at: "2030-01-01T00:00:00Z" }
+          : {}),
+      },
+    },
+  };
+}
+
+describe("deliverOutboundPayloads — R7 channel rendering policy", () => {
+  beforeEach(() => {
+    setActivePluginRegistry(defaultRegistry);
+    hookMocks.runner.hasHooks.mockReset();
+    hookMocks.runner.hasHooks.mockReturnValue(false);
+    queueMocks.enqueueDelivery.mockReset();
+    queueMocks.enqueueDelivery.mockResolvedValue("mock-queue-id");
+    queueMocks.ackDelivery.mockReset();
+    queueMocks.failDelivery.mockReset();
+  });
+  afterEach(() => setActivePluginRegistry(emptyRegistry));
+
+  it("degrades a health component carrier to MINIMIZED text on a non-phiApproved channel (channelData dropped → text path)", async () => {
+    const sendWhatsApp = vi.fn().mockResolvedValue({ messageId: "w1", toJid: "jid" });
+
+    // Worst case: B4 seeded the assistant text with the health summary itself —
+    // B5 must SCRUB it (replace, not append) before it reaches WhatsApp/Meta.
+    await deliverOutboundPayloads({
+      cfg: {},
+      channel: "whatsapp",
+      to: "+1555",
+      payloads: [{ text: HEALTH_SUMMARY, channelData: componentCarrier({ health: true }) }],
+      deps: { sendWhatsApp },
+    });
+
+    expect(sendWhatsApp).toHaveBeenCalledTimes(1);
+    const [, sentText] = sendWhatsApp.mock.calls[0];
+    expect(sentText).toBe(MINIMIZED_TEXT);
+    // No health specifics leaked to the channel provider.
+    expect(sentText).not.toContain(HEALTH_SUMMARY);
+    expect(sentText).not.toContain("340");
+    expect(sentText).not.toContain("protein");
+  });
+
+  it("appends a deep-link when configured with a pending_id", async () => {
+    const sendWhatsApp = vi.fn().mockResolvedValue({ messageId: "w1", toJid: "jid" });
+
+    await deliverOutboundPayloads({
+      cfg: { gateway: { outboundRendering: { deepLinkBase: "https://app.shrine.test/confirm/" } } },
+      channel: "whatsapp",
+      to: "+1555",
+      payloads: [
+        {
+          text: HEALTH_SUMMARY,
+          channelData: componentCarrier({
+            health: true,
+            pendingId: "cnf_abcdefghijklmnopqrstuvwx",
+          }),
+        },
+      ],
+      deps: { sendWhatsApp },
+    });
+
+    const [, sentText] = sendWhatsApp.mock.calls[0];
+    expect(sentText).toContain("https://app.shrine.test/confirm/cnf_abcdefghijklmnopqrstuvwx");
+    expect(sentText).not.toContain(HEALTH_SUMMARY);
+  });
+
+  it("sends full ui.summary on a phiApproved channel", async () => {
+    const sendWhatsApp = vi.fn().mockResolvedValue({ messageId: "w1", toJid: "jid" });
+
+    await deliverOutboundPayloads({
+      cfg: { gateway: { outboundRendering: { phiApprovedChannels: ["whatsapp"] } } },
+      channel: "whatsapp",
+      to: "+1555",
+      payloads: [{ text: "narration", channelData: componentCarrier({ health: true }) }],
+      deps: { sendWhatsApp },
+    });
+
+    const [, sentText] = sendWhatsApp.mock.calls[0];
+    expect(sentText).toBe(HEALTH_SUMMARY);
+  });
+
+  it("DROPS the carrier so a sendPayload-capable channel receives text, not the component", async () => {
+    const sendPayload = vi.fn().mockResolvedValue({ channel: "matrix", messageId: "mx-1" });
+    const sendText = vi.fn().mockResolvedValue({ channel: "matrix", messageId: "mx-text" });
+    const sendMedia = vi.fn();
+    setActivePluginRegistry(
+      createTestRegistry([
+        {
+          pluginId: "matrix",
+          source: "test",
+          plugin: createOutboundTestPlugin({
+            id: "matrix",
+            outbound: { deliveryMode: "direct", sendPayload, sendText, sendMedia },
+          }),
+        },
+      ]),
+    );
+
+    await deliverOutboundPayloads({
+      cfg: {},
+      channel: "matrix",
+      to: "!room:1",
+      payloads: [{ text: HEALTH_SUMMARY, channelData: componentCarrier({ health: true }) }],
+    });
+
+    // Component carrier degraded to text → sendPayload NOT used, sendText used.
+    expect(sendPayload).not.toHaveBeenCalled();
+    expect(sendText).toHaveBeenCalledTimes(1);
+    expect(sendText).toHaveBeenCalledWith(expect.objectContaining({ text: MINIMIZED_TEXT }));
+  });
+
+  it("leaves a NON-component channelData carrier untouched (behavior-preserving)", async () => {
+    const sendPayload = vi.fn().mockResolvedValue({ channel: "matrix", messageId: "mx-1" });
+    const sendText = vi.fn();
+    const sendMedia = vi.fn();
+    setActivePluginRegistry(
+      createTestRegistry([
+        {
+          pluginId: "matrix",
+          source: "test",
+          plugin: createOutboundTestPlugin({
+            id: "matrix",
+            outbound: { deliveryMode: "direct", sendPayload, sendText, sendMedia },
+          }),
+        },
+      ]),
+    );
+
+    await deliverOutboundPayloads({
+      cfg: {},
+      channel: "matrix",
+      to: "!room:1",
+      payloads: [{ text: "payload text", channelData: { mode: "custom" } }],
+    });
+
+    // Non-component envelope is untouched → sendPayload receives it verbatim.
+    expect(sendPayload).toHaveBeenCalledTimes(1);
+    expect(sendPayload).toHaveBeenCalledWith(
+      expect.objectContaining({
+        payload: expect.objectContaining({ channelData: { mode: "custom" }, text: "payload text" }),
+      }),
+    );
+    expect(sendText).not.toHaveBeenCalled();
+  });
+});
+
 const emptyRegistry = createTestRegistry([]);
 const defaultRegistry = createTestRegistry([
   {
