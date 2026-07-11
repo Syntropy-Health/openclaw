@@ -438,6 +438,13 @@ export const OpenClawSchema = z
           .optional(),
         trustedProxies: z.array(z.string()).optional(),
         channelHealthCheckMinutes: z.number().int().nonnegative().optional(),
+        outboundRendering: z
+          .object({
+            phiApprovedChannels: z.array(z.string()).optional(),
+            deepLinkBase: z.string().optional(),
+          })
+          .strict()
+          .optional(),
         tools: z
           .object({
             deny: z.array(z.string()).optional(),
