@@ -24,7 +24,7 @@ jobs:
   # surface presence as a job output (`secrets` IS available in step `env`) and
   # gate the real jobs via `needs` + a `needs`-context `if:`. Absent key => the
   # labeler jobs SKIP cleanly (green) instead of failing red on every PR;
-  # auto-labeling resumes the moment GH_APP_PRIVATE_KEY (App 2729701) is set (#29).
+  # auto-labeling resumes the moment GH_APP_PRIVATE_KEY (App 4276364) is set (#29).
   gate:
     runs-on: ubuntu-latest
     outputs:
@@ -39,7 +39,7 @@ jobs:
             echo "has_app_key=true" >> "$GITHUB_OUTPUT"
           else
             echo "has_app_key=false" >> "$GITHUB_OUTPUT"
-            echo "::notice::GH_APP_PRIVATE_KEY (App 2729701) not provisioned — skipping labeler jobs. Auto-labeling resumes when the .pem is set (#29)."
+            echo "::notice::GH_APP_PRIVATE_KEY (App 4276364) not provisioned — skipping labeler jobs. Auto-labeling resumes when the .pem is set (#29)."
           fi
 
   label:
@@ -53,7 +53,7 @@ jobs:
       - uses: actions/create-github-app-token@d72941d797fd3113feb6b93fd0dec494b13a2547 # v1
         id: app-token
         with:
-          app-id: "2729701"
+          app-id: "4276364"
           private-key: ${{ secrets.GH_APP_PRIVATE_KEY }}
       - uses: actions/labeler@8558fd74291d67161a8a78ce36a881fa63b766a9 # v5
         with:
@@ -231,7 +231,7 @@ jobs:
       - uses: actions/create-github-app-token@d72941d797fd3113feb6b93fd0dec494b13a2547 # v1
         id: app-token
         with:
-          app-id: "2729701"
+          app-id: "4276364"
           private-key: ${{ secrets.GH_APP_PRIVATE_KEY }}
       - name: Backfill PR labels
         uses: actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b # v7
@@ -473,7 +473,7 @@ jobs:
       - uses: actions/create-github-app-token@d72941d797fd3113feb6b93fd0dec494b13a2547 # v1
         id: app-token
         with:
-          app-id: "2729701"
+          app-id: "4276364"
           private-key: ${{ secrets.GH_APP_PRIVATE_KEY }}
       - name: Apply maintainer or trusted-contributor label
         uses: actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b # v7
