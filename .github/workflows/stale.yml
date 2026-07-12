@@ -8,7 +8,32 @@ on:
 permissions: {}
 
 jobs:
+  # Gate on the GH App private key being provisioned (see auto-response.yml note).
+  # Absent key => the stale sweep SKIPS cleanly (green) instead of failing red on
+  # the daily schedule; resumes when the real org App is provisioned (#29).
+  # NOTE (#29 / going-public): before the App lights this up, ensure internal
+  # AIADLC work-items (gated issues/PRs, e.g. #2952) are exempt-labeled or moved
+  # to a private tracker — else the sweep would auto-close blocked internal work.
+  gate:
+    runs-on: ubuntu-latest
+    outputs:
+      has_app_key: ${{ steps.check.outputs.has_app_key }}
+    steps:
+      - name: Check GH App key presence
+        id: check
+        env:
+          APP_KEY: ${{ secrets.GH_APP_PRIVATE_KEY }}
+        run: |
+          if [ -n "$APP_KEY" ]; then
+            echo "has_app_key=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "has_app_key=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::GH_APP_PRIVATE_KEY not provisioned — skipping stale sweep. Resumes when the real org App is provisioned (#29)."
+          fi
+
   stale:
+    needs: [gate]
+    if: needs.gate.outputs.has_app_key == 'true'
     permissions:
       issues: write
       pull-requests: write
