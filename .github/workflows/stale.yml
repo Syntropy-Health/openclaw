@@ -8,7 +8,32 @@ on:
 permissions: {}
 
 jobs:
+  # Gate on the GH App private key being provisioned (see auto-response.yml note).
+  # Absent key => the stale sweep SKIPS cleanly (green) instead of failing red on
+  # the daily schedule; resumes when the real org App is provisioned (#29).
+  # NOTE (#29 / going-public): before the App lights this up, ensure internal
+  # AIADLC work-items (gated issues/PRs, e.g. #2952) are exempt-labeled or moved
+  # to a private tracker — else the sweep would auto-close blocked internal work.
+  gate:
+    runs-on: ubuntu-latest
+    outputs:
+      has_app_key: ${{ steps.check.outputs.has_app_key }}
+    steps:
+      - name: Check GH App key presence
+        id: check
+        env:
+          APP_KEY: ${{ secrets.GH_APP_PRIVATE_KEY }}
+        run: |
+          if [ -n "$APP_KEY" ]; then
+            echo "has_app_key=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "has_app_key=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::GH_APP_PRIVATE_KEY not provisioned — skipping stale sweep. Resumes when the real org App is provisioned (#29)."
+          fi
+
   stale:
+    needs: [gate]
+    if: needs.gate.outputs.has_app_key == 'true'
     permissions:
       issues: write
       pull-requests: write
@@ -17,20 +42,28 @@ jobs:
       - uses: actions/create-github-app-token@d72941d797fd3113feb6b93fd0dec494b13a2547 # v1
         id: app-token
         with:
-          app-id: "2729701"
+          app-id: "4276364"
           private-key: ${{ secrets.GH_APP_PRIVATE_KEY }}
       - name: Mark stale issues and pull requests
         uses: actions/stale@v9
         with:
           repo-token: ${{ steps.app-token.outputs.token }}
-          days-before-issue-stale: 7
+          # #29 ruling 3: 90d before stale (up from 7/5) — a bridge that protects
+          # UNTAGGED internal AIADLC work-items (exempt-labels only cover LABELED
+          # ones) until ruling-4 separates internal coordination to a private
+          # tracker. Follow-down: bring these back to a normal community value
+          # once that separation lands.
+          days-before-issue-stale: 90
           days-before-issue-close: 5
-          days-before-pr-stale: 5
+          days-before-pr-stale: 90
           days-before-pr-close: 3
           stale-issue-label: stale
           stale-pr-label: stale
-          exempt-issue-labels: enhancement,maintainer,pinned,security,no-stale
-          exempt-pr-labels: maintainer,no-stale
+          # #29 ruling 3: generous exempt set — canonical AIADLC triage labels +
+          # blocked/gated/dependencies/internal/aiadlc so triaged/tagged internal
+          # work is never auto-closed by the community stale sweep.
+          exempt-issue-labels: enhancement,maintainer,pinned,security,no-stale,blocked,gated,dependencies,needs-triage,needs-info,ready-for-agent,ready-for-human,internal,aiadlc,wontfix
+          exempt-pr-labels: maintainer,no-stale,blocked,gated,dependencies,internal,aiadlc
           operations-per-run: 10000
           exempt-all-assignees: true
           remove-stale-when-updated: true

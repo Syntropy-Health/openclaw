@@ -9,7 +9,33 @@ on:
 permissions: {}
 
 jobs:
+  # Gate on the GH App private key being provisioned. The `secrets` context is
+  # NOT available in `if:` (job or step), so surface presence as a job output
+  # (`secrets` IS available in step `env`) and gate the real job via `needs`.
+  # Absent key => auto-response SKIPS cleanly (green) instead of failing red on
+  # every issue/PR event; resumes the moment the real org App is provisioned and
+  # GH_APP_PRIVATE_KEY is set (#29 — org App 'syntropy-community-bot' 4276364 now live;
+  # the guard remains as resilience if the secret is ever rotated/absent).
+  gate:
+    runs-on: ubuntu-latest
+    outputs:
+      has_app_key: ${{ steps.check.outputs.has_app_key }}
+    steps:
+      - name: Check GH App key presence
+        id: check
+        env:
+          APP_KEY: ${{ secrets.GH_APP_PRIVATE_KEY }}
+        run: |
+          if [ -n "$APP_KEY" ]; then
+            echo "has_app_key=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "has_app_key=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::GH_APP_PRIVATE_KEY not provisioned — skipping auto-response. Resumes when the real org App is provisioned (#29)."
+          fi
+
   auto-response:
+    needs: [gate]
+    if: needs.gate.outputs.has_app_key == 'true'
     permissions:
       issues: write
       pull-requests: write
@@ -18,7 +44,7 @@ jobs:
       - uses: actions/create-github-app-token@d72941d797fd3113feb6b93fd0dec494b13a2547 # v1
         id: app-token
         with:
-          app-id: "2729701"
+          app-id: "4276364"
           private-key: ${{ secrets.GH_APP_PRIVATE_KEY }}
       - name: Handle labeled items
         uses: actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b # v7
