@@ -54,10 +54,32 @@ export const MINIMIZED_HEALTH_CONFIRM_TEXT =
   "You have a pending action to confirm. Open the app to review and confirm.";
 
 /**
- * SEC-4 counsel-gate: third-party messaging providers can NEVER be phiApproved
- * via plain config. Any of these appearing in `phiApprovedChannels` is IGNORED
- * (still minimized) — the code enforces the boundary regardless of operator
- * typo/error. A real approval requires a separate counsel-gated override path.
+ * First-party surfaces where PHI egress via `phiApprovedChannels` config is
+ * permitted — the app's own channels the operator fully controls.
+ *
+ * SEC-IRC (deny-unknown posture, CTO #3578): this ALLOWLIST is the enforcement
+ * mechanism, NOT the denylist below. `isThirdPartyChannel` returns true for any
+ * channel NOT in this set — so a known third-party provider, an unknown/future
+ * channel, or a channel omitted from the denylist (the `irc` fail-open) are ALL
+ * refused at RUNTIME, not merely caught by a lint. Adding a new channel is
+ * safe-by-default (PHI-denied) until it is deliberately allowlisted here.
+ */
+const FIRST_PARTY_PHI_CHANNELS: ReadonlySet<string> = new Set([
+  "shrinemobile",
+  "webchat",
+  "matrix",
+]);
+
+/**
+ * SEC-4 counsel-gate: DOCUMENTATION of the known third-party messaging providers.
+ * This list is NOT the enforcement mechanism — enforcement is the deny-unknown
+ * `FIRST_PARTY_PHI_CHANNELS` allowlist above (`isThirdPartyChannel` denies any
+ * channel not in it, so these — and any unlisted/future channel — are IGNORED in
+ * `phiApprovedChannels` and still minimized, regardless of operator typo/error).
+ * The registry-completeness test asserts `isThirdPartyChannel(c) === true` for
+ * every `CHAT_CHANNEL_ORDER` channel (the real, stronger invariant), so a core
+ * channel can never be first-party by omission. A real approval requires a
+ * separate counsel-gated path.
  */
 export const KNOWN_THIRD_PARTY_CHANNELS: readonly string[] = [
   "whatsapp",
@@ -67,15 +89,20 @@ export const KNOWN_THIRD_PARTY_CHANNELS: readonly string[] = [
   "imessage",
   "signal",
   "googlechat",
+  "irc",
 ];
 
-/** Normalize a channel name for denylist comparison — case- and whitespace-insensitive. */
+/** Normalize a channel name for comparison — case- and whitespace-insensitive. */
 function normalizeChannelName(channel: string): string {
   return channel.trim().toLowerCase();
 }
 
+/**
+ * True unless the channel is an explicit first-party surface (deny-unknown).
+ * A third-party channel can never be phiApproved via plain config.
+ */
 export function isThirdPartyChannel(channel: string): boolean {
-  return KNOWN_THIRD_PARTY_CHANNELS.includes(normalizeChannelName(channel));
+  return !FIRST_PARTY_PHI_CHANNELS.has(normalizeChannelName(channel));
 }
 
 /**

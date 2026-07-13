@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import { CHAT_CHANNEL_ORDER } from "../../channels/registry.js";
 import type { ComponentDescriptor } from "../../gateway/component-descriptor.schema.js";
 import {
   descriptorHasHealthContent,
@@ -255,5 +256,55 @@ describe("planChannelDataRender — fail-safe carrier decision", () => {
       text: MINIMIZED_HEALTH_CONFIRM_TEXT,
       minimized: true,
     });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// SEC-IRC (CTO #3578): deny-unknown PHI posture. The denylist was NOT complete
+// (`irc` omitted) → an operator could phiApprove `irc` and leak PHI. The fix
+// hardens the SHAPE: a channel is third-party (PHI-denied) UNLESS explicitly
+// first-party, so `irc` AND any unknown/future channel is refused at RUNTIME,
+// not merely caught by a lint. These assert the behavioral guarantee.
+// ---------------------------------------------------------------------------
+describe("SEC-IRC: deny-unknown PHI posture (CTO #3578)", () => {
+  it("irc is third-party (the omitted-denylist fail-open is closed)", () => {
+    expect(isThirdPartyChannel("irc")).toBe(true);
+    expect(KNOWN_THIRD_PARTY_CHANNELS).toContain("irc");
+  });
+
+  it("BEHAVIORAL: a phiApproved-irc config is REFUSED at policy level → minimized (not full summary)", () => {
+    const descriptor = makeDescriptor({ render: "component", fields: HEALTH_FIELDS });
+    const plan = planChannelRender(descriptor, "irc", { phiApprovedChannels: ["irc"] });
+    expect(plan).toEqual({ kind: "text", text: MINIMIZED_HEALTH_CONFIRM_TEXT, minimized: true });
+    if (plan.kind === "text") {
+      assertNoHealthLeak(plan.text);
+    }
+  });
+
+  it("deny-unknown: an unknown/future channel can NEVER be phiApproved via config (runtime, not lint)", () => {
+    expect(isThirdPartyChannel("some_unknown_channel_xyz")).toBe(true);
+    const descriptor = makeDescriptor({ render: "component", fields: HEALTH_FIELDS });
+    const plan = planChannelRender(descriptor, "some_unknown_channel_xyz", {
+      phiApprovedChannels: ["some_unknown_channel_xyz"],
+    });
+    expect(plan).toEqual({ kind: "text", text: MINIMIZED_HEALTH_CONFIRM_TEXT, minimized: true });
+  });
+
+  it("COMPLETENESS: every core registry channel (CHAT_CHANNEL_ORDER) is third-party (no omission possible)", () => {
+    for (const channel of CHAT_CHANNEL_ORDER) {
+      expect(
+        isThirdPartyChannel(channel),
+        `registry channel '${channel}' must be third-party`,
+      ).toBe(true);
+    }
+  });
+
+  it("REGRESSION: first-party surfaces (shrinemobile/webchat/matrix) stay approvable", () => {
+    for (const channel of ["shrinemobile", "webchat", "matrix"]) {
+      expect(isThirdPartyChannel(channel), `${channel} must stay first-party`).toBe(false);
+    }
+    const { approved, ignored } = sanitizePhiApprovedChannels(["irc", "shrinemobile"]);
+    expect(approved).toEqual(["shrinemobile"]);
+    expect(ignored).toEqual(["irc"]);
   });
 });
