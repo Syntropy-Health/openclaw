@@ -616,10 +616,10 @@ DATABASE_URL=postgresql://... pnpm vitest run extensions/auth-memory-gate/src/in
 
 ## Plugin Documentation
 
-| Plugin                | Documentation                                                                                                                   |
-| --------------------- | ------------------------------------------------------------------------------------------------------------------------------- |
-| persist-user-identity | [IDENTITY_CONTRACT.md](../../extensions/persist-user-identity/IDENTITY_CONTRACT.md) — context block format, DB schema, commands |
-| auth-memory-gate      | [README.md](../../extensions/auth-memory-gate/README.md) — gate modes, config, hook behavior                                    |
-| auth-memory-gate      | [MEMORY_SCOPE_CONTRACT.md](../../extensions/auth-memory-gate/MEMORY_SCOPE_CONTRACT.md) — downstream integration patterns        |
-| memory-graphiti       | [README.md](../../extensions/memory-graphiti/README.md) — backends, strategies, tools                                           |
-| persist-postgres      | [openclaw.plugin.json](../../extensions/persist-postgres/openclaw.plugin.json) — plugin manifest                                |
+| Plugin                | Documentation                                                                                       |
+| --------------------- | --------------------------------------------------------------------------------------------------- |
+| persist-user-identity | `extensions/persist-user-identity/IDENTITY_CONTRACT.md` — context block format, DB schema, commands |
+| auth-memory-gate      | `extensions/auth-memory-gate/README.md` — gate modes, config, hook behavior                         |
+| auth-memory-gate      | `extensions/auth-memory-gate/MEMORY_SCOPE_CONTRACT.md` — downstream integration patterns            |
+| memory-graphiti       | `extensions/memory-graphiti/README.md` — backends, strategies, tools                                |
+| persist-postgres      | `extensions/persist-postgres/openclaw.plugin.json` — plugin manifest                                |
