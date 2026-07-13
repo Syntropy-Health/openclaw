@@ -67,7 +67,10 @@ export const MINIMIZED_HEALTH_CONFIRM_TEXT =
 const FIRST_PARTY_PHI_CHANNELS: ReadonlySet<string> = new Set([
   "shrinemobile",
   "webchat",
-  "matrix",
+  // NOTE (CTO #3581): `matrix` is NOT first-party — a federated messaging
+  // provider is squarely the SEC-4 counsel-gate class. A federation-disabled
+  // self-hosted homeserver may re-argue first-party later WITH deployment
+  // evidence; until then it is third-party (PHI-denied) like any messaging channel.
 ]);
 
 /**
