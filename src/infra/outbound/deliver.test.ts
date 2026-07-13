@@ -881,17 +881,19 @@ describe("deliverOutboundPayloads — R7 channel rendering policy", () => {
     expect(sentText).not.toContain(HEALTH_SUMMARY);
   });
 
-  it("sends full ui.summary on a phiApproved (non-third-party) channel", async () => {
-    const chan = registerPayloadChannel("matrix");
+  it("sends full ui.summary on a phiApproved (first-party) channel", async () => {
+    // webchat is a first-party app surface (not matrix — demoted to third-party
+    // per CTO #3581: a federated messaging provider is the counsel-gate class).
+    const chan = registerPayloadChannel("webchat");
 
     await deliverOutboundPayloads({
-      cfg: { gateway: { outboundRendering: { phiApprovedChannels: ["matrix"] } } },
-      channel: "matrix",
+      cfg: { gateway: { outboundRendering: { phiApprovedChannels: ["webchat"] } } },
+      channel: "webchat",
       to: "!room:1",
       payloads: [{ text: "narration", channelData: componentCarrier({ health: true }) }],
     });
 
-    // Approved (and not denylisted) → full summary; still degraded to text (dropped carrier).
+    // Approved (first-party) → full summary; still degraded to text (dropped carrier).
     expect(chan.sendPayload).not.toHaveBeenCalled();
     expect(chan.sendText).toHaveBeenCalledTimes(1);
     expect(chan.sendText.mock.calls[0][0].text).toBe(HEALTH_SUMMARY);

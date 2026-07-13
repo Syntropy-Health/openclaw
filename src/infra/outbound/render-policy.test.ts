@@ -299,12 +299,27 @@ describe("SEC-IRC: deny-unknown PHI posture (CTO #3578)", () => {
     }
   });
 
-  it("REGRESSION: first-party surfaces (shrinemobile/webchat/matrix) stay approvable", () => {
-    for (const channel of ["shrinemobile", "webchat", "matrix"]) {
+  it("REGRESSION: the app's own surfaces (shrinemobile/webchat) stay approvable", () => {
+    for (const channel of ["shrinemobile", "webchat"]) {
       expect(isThirdPartyChannel(channel), `${channel} must stay first-party`).toBe(false);
     }
     const { approved, ignored } = sanitizePhiApprovedChannels(["irc", "shrinemobile"]);
     expect(approved).toEqual(["shrinemobile"]);
     expect(ignored).toEqual(["irc"]);
+  });
+
+  it("MATRIX DEMOTED (CTO #3581): matrix is third-party (federated protocol = counsel-gate class)", () => {
+    // Matrix is a federated messaging provider — squarely the SEC-4 counsel-gate
+    // class ("third-party messaging providers can NEVER be phiApproved"). Demoted
+    // from the first-party allowlist. A federation-disabled self-hosted homeserver
+    // may re-argue first-party later WITH deployment evidence.
+    expect(isThirdPartyChannel("matrix")).toBe(true);
+    // Behavioral: a phiApproved-matrix config is now REFUSED → minimized.
+    const descriptor = makeDescriptor({ render: "component", fields: HEALTH_FIELDS });
+    const plan = planChannelRender(descriptor, "matrix", { phiApprovedChannels: ["matrix"] });
+    expect(plan).toEqual({ kind: "text", text: MINIMIZED_HEALTH_CONFIRM_TEXT, minimized: true });
+    if (plan.kind === "text") {
+      assertNoHealthLeak(plan.text);
+    }
   });
 });
