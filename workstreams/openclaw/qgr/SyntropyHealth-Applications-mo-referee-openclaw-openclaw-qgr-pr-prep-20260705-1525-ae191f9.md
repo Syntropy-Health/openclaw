@@ -22,7 +22,7 @@ date: 2026-07-05T15:25
 ## Verifiable hashes (recomputed + matched by receipt-verify)
 
 - A (original): ae191f9 — artifact entering the gate
-- E (final):    ae191f9 — artifact after all fixes (verification anchor)
+- E (final): ae191f9 — artifact after all fixes (verification anchor)
 
 ## Procedural attestation log (recorded, not independently verifiable)
 
@@ -30,9 +30,10 @@ These attest that each stage ran. Their inputs are ephemeral (review output,
 triage notes, 1B1 transcripts) and cannot be reconstructed after the fact, so
 they are a procedural log — NOT a cryptographic chain.
 
-- B (findings):  f3e7782
-- C (triage):    bc76c79
+- B (findings): f3e7782
+- C (triage): bc76c79
 - D (principal): bc76c79 — auto-approved — no principal 1B1 (config-only compliance change)
 
 ## Review Summary
+
 Prod chat model → direct Anthropic claude-sonnet-4-5 (drop OpenRouter/Qwen open model), ShrineHealth privacy #1926 'secure APIs only'. Config-only openclaw.json 1-line. QG: tsgo 0, oxlint 2-preexisting/0-new, config-validates, sealed 60/60, model-id valid catalog alias.

@@ -22,7 +22,7 @@ date: 2026-07-07T14:35
 ## Verifiable hashes (recomputed + matched by receipt-verify)
 
 - A (original): 7d71b0c — artifact entering the gate
-- E (final):    7d71b0c — artifact after all fixes (verification anchor)
+- E (final): 7d71b0c — artifact after all fixes (verification anchor)
 
 ## Procedural attestation log (recorded, not independently verifiable)
 
@@ -30,9 +30,10 @@ These attest that each stage ran. Their inputs are ephemeral (review output,
 triage notes, 1B1 transcripts) and cannot be reconstructed after the fact, so
 they are a procedural log — NOT a cryptographic chain.
 
-- B (findings):  1de69f0
-- C (triage):    9b3a9b0
+- B (findings): 1de69f0
+- C (triage): 9b3a9b0
 - D (principal): 9b3a9b0 — auto-approved — no principal 1B1 (staging transport restore)
 
 ## Review Summary
+
 Enable gateway.http.endpoints.responses + chatCompletions in committed openclaw.json — restores /v1/responses (+ /v1/chat/completions) for the mobile chat integration (dropped when the fresh openclaw_data volume reseeded from a committed config that lacked the gateway.http block; endpoint enablement is config-only, no env). Verified validateConfigObject ok:true + resolution serves /v1/responses. CORS origins remain env (OPENCLAW_HTTP_CORS_ORIGINS, devex). QG: tsgo 0, guard test 1/1, sealed 60/60. diff-hash 7d71b0c.

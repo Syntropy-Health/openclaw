@@ -17,6 +17,11 @@
     "src/auto-reply/reply/export-html/",
     "src/gateway/__fixtures__/",
     "Swabble/",
+    // Sealed-referee artifacts are integrity-hash-locked: the sealed form IS the
+    // canonical form. A formatter version bump must never demand churn on a tree
+    // the implementer agent is (correctly) barred from touching — seal integrity
+    // outranks format conformity (CTO ruling, #29 oxfmt debt). oxc/#62.
+    "tests/sealed/",
     "vendor/",
   ],
 }
