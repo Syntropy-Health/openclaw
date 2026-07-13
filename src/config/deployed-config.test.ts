@@ -1,3 +1,4 @@
+import { readFileSync } from "node:fs";
 /**
  * Guard for the committed deploy config (`openclaw.json`).
  *
@@ -14,14 +15,11 @@
  * schema tightened.
  */
 import { describe, test, expect } from "vitest";
-import { readFileSync } from "node:fs";
 import { validateConfigObject } from "./validation.js";
 
 describe("committed deploy config (openclaw.json)", () => {
   test("validates against the gateway config schema — no startup-wedging keys", () => {
-    const raw = JSON.parse(
-      readFileSync(new URL("../../openclaw.json", import.meta.url), "utf8"),
-    );
+    const raw = JSON.parse(readFileSync(new URL("../../openclaw.json", import.meta.url), "utf8"));
     const result = validateConfigObject(raw);
     // Surface the offending keys in the failure message rather than a bare `false`.
     expect(result.ok ? [] : result.issues).toEqual([]);
