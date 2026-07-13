@@ -22,7 +22,7 @@ date: 2026-06-27T18:36
 ## Verifiable hashes (recomputed + matched by receipt-verify)
 
 - A (original): fca6ced — artifact entering the gate
-- E (final):    516a4f6 — artifact after all fixes (verification anchor)
+- E (final): 516a4f6 — artifact after all fixes (verification anchor)
 
 ## Procedural attestation log (recorded, not independently verifiable)
 
@@ -30,9 +30,10 @@ These attest that each stage ran. Their inputs are ephemeral (review output,
 triage notes, 1B1 transcripts) and cannot be reconstructed after the fact, so
 they are a procedural log — NOT a cryptographic chain.
 
-- B (findings):  419102e
-- C (triage):    6fce144
+- B (findings): 419102e
+- C (triage): 6fce144
 - D (principal): 6fce144 — auto-approved — no principal 1B1
 
 ## Review Summary
+
 P2 T2.2 openclaw→SJ /mcp M2M service-auth provider (Clerk M2M JWT, resource claim, cache/refresh, fail-closed); 3 above-threshold QG findings fixed+regressed

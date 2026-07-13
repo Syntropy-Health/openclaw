@@ -28,18 +28,20 @@ context at `before_agent_start`. Allergy/condition-aware, failure-safe.
    - `metrics_data: Record<string, unknown>` (bounded demographics: `age`, `sex`,
      `height_cm`, `weight_kg`, `activity_level`)
 2. **Failure envelopes** (the MCP wrapper, not the service):
-   - `{ error: string }`  (not-found / service-unavailable)
+   - `{ error: string }` (not-found / service-unavailable)
    - `{ type: "paywall", ... }`
 3. **Defensive**: `null` / `undefined` / non-object / partially-malformed.
 
 ## Return contract
 
 ### Returns `null` (caller injects nothing) when:
+
 - `raw` is null/undefined or not a plain object, OR
 - `raw` is a failure envelope: `("error" in raw)` **or** `raw.type === "paywall"`, OR
 - the profile has no usable content (all six fields empty after normalization).
 
 ### Otherwise returns a string block:
+
 - First line is exactly `[SYNTROPY_PROFILE]`.
 - Last line is exactly `[/SYNTROPY_PROFILE]`.
 - Between the markers, **one labelled line per NON-EMPTY field**, each matching
@@ -49,14 +51,14 @@ context at `before_agent_start`. Allergy/condition-aware, failure-safe.
 
 Render non-empty fields in exactly this order:
 
-| # | source field          | label         | value rendering |
-|---|-----------------------|---------------|-----------------|
-| 1 | `allergies`           | `allergies`   | items joined with `, ` |
-| 2 | `conditions`          | `conditions`  | items joined with `, ` |
-| 3 | `health_goals`        | `goals`       | items joined with `, ` |
-| 4 | `supplement_stack`    | `supplements` | items joined with `, ` |
-| 5 | `dietary_preferences` | `diet`        | `key=value` pairs joined with `, ` (input key order) |
-| 6 | `metrics_data`        | `metrics`     | `key=value` pairs joined with `, ` (input key order) |
+| #   | source field          | label         | value rendering                                      |
+| --- | --------------------- | ------------- | ---------------------------------------------------- |
+| 1   | `allergies`           | `allergies`   | items joined with `, `                               |
+| 2   | `conditions`          | `conditions`  | items joined with `, `                               |
+| 3   | `health_goals`        | `goals`       | items joined with `, `                               |
+| 4   | `supplement_stack`    | `supplements` | items joined with `, `                               |
+| 5   | `dietary_preferences` | `diet`        | `key=value` pairs joined with `, ` (input key order) |
+| 6   | `metrics_data`        | `metrics`     | `key=value` pairs joined with `, ` (input key order) |
 
 Allergies and conditions MUST appear before goals/supplements/diet/metrics.
 

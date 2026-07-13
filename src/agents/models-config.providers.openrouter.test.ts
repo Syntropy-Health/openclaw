@@ -57,7 +57,11 @@ describe("OpenRouter implicit provider (C-c)", () => {
       const providers = await resolveImplicitProviders({
         agentDir,
         explicitProviders: {
-          openrouter: { baseUrl: "https://custom.example/v1", api: "openai-completions", models: [] },
+          openrouter: {
+            baseUrl: "https://custom.example/v1",
+            api: "openai-completions",
+            models: [],
+          },
         },
       });
       // Explicit config wins → the implicit builder must not clobber it.

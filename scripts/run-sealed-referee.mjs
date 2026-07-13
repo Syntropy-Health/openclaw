@@ -70,8 +70,11 @@ try {
     for (const a of assertions) {
       // Category = top-level describe, else file basename. Slash-namespaced.
       const category = slug((a.ancestorTitles && a.ancestorTitles[0]) || base);
-      if (a.status === "passed") console.log(`RESULT pass ${category}`);
-      else if (a.status === "failed") console.log(`RESULT fail ${category}`);
+      if (a.status === "passed") {
+        console.log(`RESULT pass ${category}`);
+      } else if (a.status === "failed") {
+        console.log(`RESULT fail ${category}`);
+      }
       // pending/skipped/todo: not a verdict — omit.
     }
   }

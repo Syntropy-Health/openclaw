@@ -1,10 +1,6 @@
 import type { IncomingMessage, ServerResponse } from "node:http";
 import { describe, expect, it } from "vitest";
-import {
-  applyApiCors,
-  resolveAllowedOrigin,
-  resolveCorsAllowedOrigins,
-} from "./cors.js";
+import { applyApiCors, resolveAllowedOrigin, resolveCorsAllowedOrigins } from "./cors.js";
 
 function fakeReq(method: string, origin?: string): IncomingMessage {
   return { method, headers: origin ? { origin } : {} } as unknown as IncomingMessage;
@@ -28,16 +24,22 @@ function fakeRes() {
       ended = true;
     },
   };
-  return { res: res as unknown as ServerResponse, headers, get ended() {
-    return ended;
-  } };
+  return {
+    res: res as unknown as ServerResponse,
+    headers,
+    get ended() {
+      return ended;
+    },
+  };
 }
 
 describe("resolveCorsAllowedOrigins", () => {
   it("unions config + env (comma-separated), trims, dedups, strips trailing slash", () => {
     const out = resolveCorsAllowedOrigins({
       configOrigins: ["http://localhost:8550/", " https://app.example.com "],
-      env: { OPENCLAW_HTTP_CORS_ORIGINS: "http://localhost:8550, https://test.example.com" } as never,
+      env: {
+        OPENCLAW_HTTP_CORS_ORIGINS: "http://localhost:8550, https://test.example.com",
+      } as never,
     });
     expect(out).toContain("http://localhost:8550");
     expect(out).toContain("https://app.example.com");
@@ -77,7 +79,9 @@ describe("resolveAllowedOrigin", () => {
 describe("applyApiCors", () => {
   it("sets ACAO + Vary + preflight headers for an allowed origin", () => {
     const { res, headers } = fakeRes();
-    const out = applyApiCors(fakeReq("POST", "http://localhost:8550"), res, ["http://localhost:8550"]);
+    const out = applyApiCors(fakeReq("POST", "http://localhost:8550"), res, [
+      "http://localhost:8550",
+    ]);
     expect(out.preflight).toBe(false);
     expect(headers["access-control-allow-origin"]).toBe("http://localhost:8550");
     expect(headers["vary"]).toBe("Origin");

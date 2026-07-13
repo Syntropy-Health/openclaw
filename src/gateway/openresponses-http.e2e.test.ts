@@ -783,10 +783,7 @@ describe("OpenResponses HTTP API (e2e)", () => {
       const port = enabledPort;
       agentCommand.mockReset();
       agentCommand.mockResolvedValueOnce({
-        payloads: [
-          { text: "Here is your answer." },
-          { text: "⚠️ a tool warning", isError: true },
-        ],
+        payloads: [{ text: "Here is your answer." }, { text: "⚠️ a tool warning", isError: true }],
         meta: {},
       } as never);
 
@@ -931,7 +928,9 @@ describe("OpenResponses HTTP API (e2e)", () => {
 
     it("OPTIONS preflight from an allowed origin → 204 + Access-Control-* headers", async () => {
       await writeGatewayConfig({
-        gateway: { http: { cors: { allowedOrigins: [ORIGIN] }, endpoints: { responses: { enabled: true } } } },
+        gateway: {
+          http: { cors: { allowedOrigins: [ORIGIN] }, endpoints: { responses: { enabled: true } } },
+        },
       });
       const port = await getFreePort();
       const server = await startServer(port, { openResponsesEnabled: true });
@@ -946,7 +945,7 @@ describe("OpenResponses HTTP API (e2e)", () => {
         });
         expect(res.status).toBe(204);
         expect(res.headers.get("access-control-allow-origin")).toBe(ORIGIN);
-        expect((res.headers.get("access-control-allow-methods") ?? "")).toContain("POST");
+        expect(res.headers.get("access-control-allow-methods") ?? "").toContain("POST");
         expect((res.headers.get("access-control-allow-headers") ?? "").toLowerCase()).toContain(
           "authorization",
         );
@@ -959,7 +958,9 @@ describe("OpenResponses HTTP API (e2e)", () => {
 
     it("actual POST from an allowed origin → Access-Control-Allow-Origin echoed on the 200", async () => {
       await writeGatewayConfig({
-        gateway: { http: { cors: { allowedOrigins: [ORIGIN] }, endpoints: { responses: { enabled: true } } } },
+        gateway: {
+          http: { cors: { allowedOrigins: [ORIGIN] }, endpoints: { responses: { enabled: true } } },
+        },
       });
       const port = await getFreePort();
       const server = await startServer(port, { openResponsesEnabled: true });
@@ -981,7 +982,9 @@ describe("OpenResponses HTTP API (e2e)", () => {
 
     it("disallowed origin → NO Access-Control-Allow-Origin (browser blocks)", async () => {
       await writeGatewayConfig({
-        gateway: { http: { cors: { allowedOrigins: [ORIGIN] }, endpoints: { responses: { enabled: true } } } },
+        gateway: {
+          http: { cors: { allowedOrigins: [ORIGIN] }, endpoints: { responses: { enabled: true } } },
+        },
       });
       const port = await getFreePort();
       const server = await startServer(port, { openResponsesEnabled: true });

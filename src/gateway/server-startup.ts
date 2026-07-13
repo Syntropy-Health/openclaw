@@ -20,8 +20,8 @@ import { loadInternalHooks } from "../hooks/loader.js";
 import { isTruthyEnvValue } from "../infra/env.js";
 import type { loadOpenClawPlugins } from "../plugins/loader.js";
 import { type PluginServicesHandle, startPluginServices } from "../plugins/services.js";
-import { startBrowserControlServerIfEnabled } from "./server-browser.js";
 import { chatServiceSidecarEnabled } from "./chat-service-mode.js";
+import { startBrowserControlServerIfEnabled } from "./server-browser.js";
 import {
   scheduleRestartSentinelWake,
   shouldWakeFromRestartSentinel,

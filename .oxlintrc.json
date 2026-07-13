@@ -34,6 +34,11 @@
     "src/auto-reply/reply/export-html/template.js",
     "src/canvas-host/a2ui/a2ui.bundle.js",
     "Swabble/",
+    // Sealed-referee artifacts are integrity-hash-locked: the sealed form IS the
+    // canonical form. A linter version bump must never demand churn on a tree the
+    // implementer agent is (correctly) hook-barred from touching — seal integrity
+    // outranks style conformity (CTO ruling; same doctrine as the oxfmt exemption).
+    "tests/sealed/",
     "vendor/"
   ]
 }
