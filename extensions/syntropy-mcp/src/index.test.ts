@@ -199,6 +199,17 @@ describe("syntropy-mcp config", () => {
     expect(parsed.maxStaleSeconds).toBe(120);
   });
 
+  it("rejects maxStaleSeconds < refreshSeconds (PR#56: incoherent freshness window)", () => {
+    expect(() =>
+      parseSyntropyMcpConfig(baseConfig({ refreshSeconds: 300, maxStaleSeconds: 120 })),
+    ).toThrow(/maxStaleSeconds must be >= refreshSeconds/);
+    // equal is allowed (boundary).
+    expect(
+      parseSyntropyMcpConfig(baseConfig({ refreshSeconds: 300, maxStaleSeconds: 300 }))
+        .maxStaleSeconds,
+    ).toBe(300);
+  });
+
   it("rejects malformed server entries", () => {
     expect(() => parseSyntropyMcpConfig({ servers: [{ id: "kg" }] })).toThrow();
     expect(() =>
