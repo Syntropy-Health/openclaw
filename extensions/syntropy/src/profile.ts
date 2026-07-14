@@ -20,8 +20,9 @@ const VALUE_CAP = 200;
 /** Ellipsis appended when a value is truncated (U+2026). */
 const ELLIPSIS = "…";
 
-const OPEN = "[SYNTROPY_PROFILE]";
-const CLOSE = "[/SYNTROPY_PROFILE]";
+/** Profile-block delimiters — the single source of truth (tests import these; never re-hardcode). */
+export const OPEN = "[SYNTROPY_PROFILE]";
+export const CLOSE = "[/SYNTROPY_PROFILE]";
 
 /** True for a plain (non-null, non-array) object. */
 function isPlainObject(v: unknown): v is Record<string, unknown> {
