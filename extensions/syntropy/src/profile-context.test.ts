@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 import { TtlCache } from "./cache.js";
 import type { SyntropyToolResult } from "./client.js";
 import { resolveProfileContext } from "./profile-context.js";
+import { CLOSE, OPEN } from "./profile.js";
 
 const PROFILE = { allergies: ["peanuts"] };
 const ok = (data: unknown): SyntropyToolResult => ({ data, ok: true });
@@ -14,10 +15,10 @@ function newCache() {
 describe("resolveProfileContext", () => {
   it("cache hit returns cached without fetching", async () => {
     const cache = newCache();
-    cache.set("c:p", "[SYNTROPY_PROFILE]\nallergies: peanuts\n[/SYNTROPY_PROFILE]");
+    cache.set("c:p", `${OPEN}\nallergies: peanuts\n${CLOSE}`);
     const fetchProfile = vi.fn<() => Promise<SyntropyToolResult>>();
     const block = await resolveProfileContext({ cache, cacheKey: "c:p", fetchProfile });
-    expect(block).toBe("[SYNTROPY_PROFILE]\nallergies: peanuts\n[/SYNTROPY_PROFILE]");
+    expect(block).toBe(`${OPEN}\nallergies: peanuts\n${CLOSE}`);
     expect(fetchProfile).not.toHaveBeenCalled();
   });
 
@@ -92,7 +93,7 @@ describe("resolveProfileContext", () => {
 
   it("identity scoping — different keys do not share", async () => {
     const cache = newCache();
-    cache.set("a:1", "[SYNTROPY_PROFILE]\nallergies: x\n[/SYNTROPY_PROFILE]");
+    cache.set("a:1", `${OPEN}\nallergies: x\n${CLOSE}`);
     const fetchProfile = vi.fn(async () => ok(PROFILE));
     const block = await resolveProfileContext({ cache, cacheKey: "b:2", fetchProfile });
     expect(block).toContain("allergies: peanuts");
@@ -108,7 +109,7 @@ describe("resolveProfileContext", () => {
   });
 
   it("hit does not re-set the cache (no TTL refresh)", async () => {
-    const getSpy = vi.fn(() => "[SYNTROPY_PROFILE]\nallergies: x\n[/SYNTROPY_PROFILE]");
+    const getSpy = vi.fn(() => `${OPEN}\nallergies: x\n${CLOSE}`);
     const setSpy = vi.fn();
     const mockCache = {
       get: getSpy,

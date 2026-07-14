@@ -251,6 +251,12 @@ export type ActorTokenProvider = {
  * Per-request identity the m2m execute-time getToken resolves against.
  * `channel` is required for the Tier-2 channel-scoped requested_subject
  * ("<channel>:<externalId>"); `userJwt` selects Tier 1 (Clerk-JWT/HTTP).
+ *
+ * BOUNDARY: this is the LOOSE inbound shape (all-optional). `ExchangeSubject`
+ * (token-exchange.ts) is the VALIDATED discriminated-union form the exchange
+ * requires; `toExchangeSubject` (below) is the ONLY bridge — it validates/narrows
+ * a RequestSubject into an ExchangeSubject (or null). Never pass a RequestSubject
+ * to the exchange directly.
  */
 export type RequestSubject = { externalId?: string; userJwt?: string; channel?: string };
 

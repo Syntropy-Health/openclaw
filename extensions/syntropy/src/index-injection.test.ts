@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 import { TtlCache } from "./cache.js";
 import type { SyntropyToolResult } from "./client.js";
 import { decideProfileInjection, SYNTROPY_GATE } from "./index.js";
+import { CLOSE, OPEN } from "./profile.js";
 
 // Wiring coverage for the SYN-206 Task 2 `before_agent_start` decision
 // (extracted from the hook closure to be testable without a DB). Covers the
@@ -57,7 +58,7 @@ describe("wiring/paired", () => {
       fetchProfile,
     });
 
-    expect(res.prependContext).toContain("[SYNTROPY_PROFILE]");
+    expect(res.prependContext).toContain(OPEN);
     expect(res.prependContext).toContain("allergies: peanuts");
     // token threaded through; user cached for the sync tool factory
     expect(fetchProfile).toHaveBeenCalledWith("sj_1");
@@ -70,10 +71,7 @@ describe("wiring/unpaired", () => {
     const { resolvedUsers, profileBlocks } = caches();
     // simulate a prior pairing left in cache
     resolvedUsers.set("whatsapp:+1AAA", user("1"));
-    profileBlocks.set(
-      "whatsapp:+1AAA",
-      "[SYNTROPY_PROFILE]\nallergies: stale\n[/SYNTROPY_PROFILE]",
-    );
+    profileBlocks.set("whatsapp:+1AAA", `${OPEN}\nallergies: stale\n${CLOSE}`);
     const fetchProfile = vi.fn(async (_t: string) => okProfile("x"));
 
     const res = await decideProfileInjection({

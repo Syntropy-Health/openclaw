@@ -4,7 +4,6 @@ import type { ComponentDescriptor } from "../../gateway/component-descriptor.sch
 import {
   descriptorHasHealthContent,
   isThirdPartyChannel,
-  KNOWN_THIRD_PARTY_CHANNELS,
   MINIMIZED_HEALTH_CONFIRM_TEXT,
   planChannelDataRender,
   planChannelRender,
@@ -165,11 +164,6 @@ describe("planChannelRender — channel-keyed, fail-safe minimization", () => {
 });
 
 describe("sanitizePhiApprovedChannels / isThirdPartyChannel (SEC-4 counsel-gate)", () => {
-  it("all known third-party channels are denylisted", () => {
-    for (const channel of KNOWN_THIRD_PARTY_CHANNELS) {
-      expect(isThirdPartyChannel(channel)).toBe(true);
-    }
-  });
   it("strips denylisted entries, keeps first-party ones", () => {
     const { approved, ignored } = sanitizePhiApprovedChannels([
       "whatsapp",
@@ -269,7 +263,6 @@ describe("planChannelDataRender — fail-safe carrier decision", () => {
 describe("SEC-IRC: deny-unknown PHI posture (CTO #3578)", () => {
   it("irc is third-party (the omitted-denylist fail-open is closed)", () => {
     expect(isThirdPartyChannel("irc")).toBe(true);
-    expect(KNOWN_THIRD_PARTY_CHANNELS).toContain("irc");
   });
 
   it("BEHAVIORAL: a phiApproved-irc config is REFUSED at policy level → minimized (not full summary)", () => {

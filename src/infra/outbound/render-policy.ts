@@ -57,12 +57,16 @@ export const MINIMIZED_HEALTH_CONFIRM_TEXT =
  * First-party surfaces where PHI egress via `phiApprovedChannels` config is
  * permitted — the app's own channels the operator fully controls.
  *
- * SEC-IRC (deny-unknown posture, CTO #3578): this ALLOWLIST is the enforcement
- * mechanism, NOT the denylist below. `isThirdPartyChannel` returns true for any
- * channel NOT in this set — so a known third-party provider, an unknown/future
- * channel, or a channel omitted from the denylist (the `irc` fail-open) are ALL
- * refused at RUNTIME, not merely caught by a lint. Adding a new channel is
- * safe-by-default (PHI-denied) until it is deliberately allowlisted here.
+ * SEC-IRC (deny-unknown posture, CTO #3578): this ALLOWLIST is the SOLE
+ * enforcement mechanism. `isThirdPartyChannel` returns true for any channel NOT
+ * in this set — so every known third-party provider (`CHAT_CHANNEL_ORDER`), any
+ * unknown/future channel, and the historical `irc` fail-open are ALL refused at
+ * RUNTIME, not merely caught by a lint. Adding a new channel is safe-by-default
+ * (PHI-denied) until it is deliberately allowlisted here. The registry-
+ * completeness test (`render-policy.test.ts`) asserts `isThirdPartyChannel(c) ===
+ * true` for every `CHAT_CHANNEL_ORDER` channel — the load-bearing invariant that a
+ * core channel can never become first-party by omission. A real PHI approval
+ * requires a separate counsel-gated path, never `phiApprovedChannels` config.
  */
 const FIRST_PARTY_PHI_CHANNELS: ReadonlySet<string> = new Set([
   "shrinemobile",
@@ -72,28 +76,6 @@ const FIRST_PARTY_PHI_CHANNELS: ReadonlySet<string> = new Set([
   // self-hosted homeserver may re-argue first-party later WITH deployment
   // evidence; until then it is third-party (PHI-denied) like any messaging channel.
 ]);
-
-/**
- * SEC-4 counsel-gate: DOCUMENTATION of the known third-party messaging providers.
- * This list is NOT the enforcement mechanism — enforcement is the deny-unknown
- * `FIRST_PARTY_PHI_CHANNELS` allowlist above (`isThirdPartyChannel` denies any
- * channel not in it, so these — and any unlisted/future channel — are IGNORED in
- * `phiApprovedChannels` and still minimized, regardless of operator typo/error).
- * The registry-completeness test asserts `isThirdPartyChannel(c) === true` for
- * every `CHAT_CHANNEL_ORDER` channel (the real, stronger invariant), so a core
- * channel can never be first-party by omission. A real approval requires a
- * separate counsel-gated path.
- */
-export const KNOWN_THIRD_PARTY_CHANNELS: readonly string[] = [
-  "whatsapp",
-  "slack",
-  "telegram",
-  "discord",
-  "imessage",
-  "signal",
-  "googlechat",
-  "irc",
-];
 
 /** Normalize a channel name for comparison — case- and whitespace-insensitive. */
 function normalizeChannelName(channel: string): string {
