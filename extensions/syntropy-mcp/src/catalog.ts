@@ -70,6 +70,14 @@ export type CatalogOptions = {
 export type CatalogEntry = {
   serverId: string;
   descriptor: McpToolDescriptor;
+  /**
+   * The tool's ORIGINAL wire name (what the MCP server knows it as) — preserved
+   * explicitly because `descriptor.name` may be collision-prefixed with
+   * "<serverId>:" for surfacing. Never infer the wire name by stripping that
+   * prefix: a tool whose natural name legitimately starts with "<serverId>:"
+   * would be mis-stripped (PR#56 review).
+   */
+  wireName: string;
   staleness: "fresh" | "stale";
 };
 
@@ -167,7 +175,14 @@ export class ToolCatalog {
           surfaced = { ...descriptor, name: prefixed };
         }
         seenNames.add(surfaced.name);
-        out.push({ serverId: entry.config.id, descriptor: surfaced, staleness });
+        // wireName is the ORIGINAL descriptor.name (pre-prefix) — the name the MCP
+        // server actually knows; `surfaced.name` may be collision-prefixed.
+        out.push({
+          serverId: entry.config.id,
+          descriptor: surfaced,
+          wireName: descriptor.name,
+          staleness,
+        });
       }
     }
 
@@ -182,6 +197,13 @@ export class ToolCatalog {
   isProvablyReadOnly(descriptor: McpToolDescriptor): boolean {
     const annotations = descriptor.annotations;
     if (!annotations) return false;
+    // Fail-closed veto (PR#56 review): ANY mutation-suggesting annotation
+    // disqualifies. A compromised backend must not keep a write tool alive past
+    // the max-stale drop (S6) by pairing readOnlyHint:true with mutates:true, or
+    // assert read-only via readOnlyHint:false. Reusing isMutating guarantees this
+    // predicate stays STRICTLY STRONGER than !isMutating (the documented invariant).
+    if (this.isMutating(descriptor)) return false;
+    // Then require an affirmative read-only assertion.
     return annotations.readOnlyHint === true || annotations.mutates === false;
   }
 

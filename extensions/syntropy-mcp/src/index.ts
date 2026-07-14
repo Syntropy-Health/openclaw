@@ -187,6 +187,13 @@ export function parseSyntropyMcpConfig(
       ? maxStaleSecondsRaw
       : 3 * refreshSeconds;
 
+  // PR#56 review: maxStaleSeconds < refreshSeconds is incoherent — a tool could be
+  // both "fresh" (age <= refresh) and "past max-stale" (age > maxStale), making the
+  // fail-closed drop fire on still-fresh tools. Reject at config time.
+  if (maxStaleSeconds < refreshSeconds) {
+    throw new Error("maxStaleSeconds must be >= refreshSeconds");
+  }
+
   return { servers, refreshSeconds, maxStaleSeconds };
 }
 
@@ -393,11 +400,11 @@ function buildAgentTool(params: {
     logger,
   } = params;
   const surfacedName = entry.descriptor.name;
-  // The catalog prefixes colliding names with "<serverId>:"; the wire name
-  // the MCP server knows is the unprefixed one.
-  const wireName = surfacedName.startsWith(`${server.id}:`)
-    ? surfacedName.slice(server.id.length + 1)
-    : surfacedName;
+  // Wire name = the ORIGINAL tool name the catalog preserved (PR#56 review). NOT
+  // inferred by stripping a "<serverId>:" prefix — a tool whose natural name
+  // legitimately starts with "<serverId>:" (e.g. server "kg" exposing "kg:search"
+  // with no collision) would be mis-stripped to "search" and hit the wrong tool.
+  const wireName = entry.wireName;
 
   return {
     name: surfacedName,

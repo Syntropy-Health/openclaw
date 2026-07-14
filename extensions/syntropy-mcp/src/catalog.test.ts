@@ -75,6 +75,21 @@ describe("ToolCatalog refresh + getToolDescriptors", () => {
     for (const entry of entries) expect(entry.staleness).toBe("fresh");
   });
 
+  it("PR#56: wireName preserves a tool whose natural name starts with '<serverId>:' (no mis-strip)", async () => {
+    // Server "kg" exposes a tool literally named "kg:search" with NO collision, so
+    // the catalog does not prefix it → surfaced name is "kg:search". The old wire-
+    // name inference stripped the "kg:" prefix → "search" (wrong tool on the wire).
+    // wireName must preserve the ORIGINAL name.
+    const listTools = vi.fn(
+      async (): Promise<McpToolListResult> => okResult([descriptor("kg:search")]),
+    );
+    const catalog = new ToolCatalog([server("kg")], baseOpts({ listTools }));
+    await catalog.refresh();
+    const [entry] = catalog.getToolDescriptors();
+    expect(entry!.descriptor.name).toBe("kg:search"); // surfaced (unprefixed — no collision)
+    expect(entry!.wireName).toBe("kg:search"); // original preserved, NOT stripped to "search"
+  });
+
   // -------------------------------------------------------------------------
   // 2. Stale-while-refreshing: failure keeps previous set within maxStale
   // -------------------------------------------------------------------------
@@ -327,5 +342,54 @@ describe("ToolCatalog.isMutating", () => {
     expect(catalog.isMutating(descriptor("t", { readOnlyHint: true }))).toBe(false);
     expect(catalog.isMutating(descriptor("t", { mutates: false }))).toBe(false);
     expect(catalog.isMutating(descriptor("t", { requires_confirm: false }))).toBe(false);
+  });
+});
+
+describe("ToolCatalog.isProvablyReadOnly (PR#56 fail-closed veto)", () => {
+  const catalog = new ToolCatalog([], { now });
+
+  it("is false for absent/empty annotations (not PROVABLY read-only)", () => {
+    expect(catalog.isProvablyReadOnly(descriptor("t"))).toBe(false);
+    expect(catalog.isProvablyReadOnly(descriptor("t", {}))).toBe(false);
+  });
+
+  it("is true only on an affirmative read-only assertion", () => {
+    expect(catalog.isProvablyReadOnly(descriptor("t", { readOnlyHint: true }))).toBe(true);
+    expect(catalog.isProvablyReadOnly(descriptor("t", { mutates: false }))).toBe(true);
+  });
+
+  it("CONTRADICTORY annotations fail closed — a mutation hint vetoes read-only", () => {
+    // {readOnlyHint:true, mutates:true}: the old `||` returned true (fail-open) —
+    // a compromised backend could keep a write tool alive past the max-stale drop.
+    expect(catalog.isProvablyReadOnly(descriptor("t", { readOnlyHint: true, mutates: true }))).toBe(
+      false,
+    );
+    // {readOnlyHint:false, mutates:false}: old `||` returned true via mutates===false
+    // despite readOnlyHint:false explicitly asserting non-read-only.
+    expect(
+      catalog.isProvablyReadOnly(descriptor("t", { readOnlyHint: false, mutates: false })),
+    ).toBe(false);
+    // requires_confirm also vetoes.
+    expect(
+      catalog.isProvablyReadOnly(descriptor("t", { readOnlyHint: true, requires_confirm: true })),
+    ).toBe(false);
+  });
+
+  it("INVARIANT: isProvablyReadOnly ⟹ !isMutating (strictly stronger)", () => {
+    for (const ann of [
+      { readOnlyHint: true, mutates: true },
+      { readOnlyHint: false, mutates: false },
+      { readOnlyHint: true },
+      { mutates: false },
+      { mutates: true },
+      {},
+    ]) {
+      const d = descriptor("t", ann);
+      if (catalog.isProvablyReadOnly(d)) {
+        expect(catalog.isMutating(d), `${JSON.stringify(ann)} provably-RO but mutating`).toBe(
+          false,
+        );
+      }
+    }
   });
 });
