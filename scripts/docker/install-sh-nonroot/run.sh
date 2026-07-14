@@ -37,11 +37,16 @@ if [[ -z "$CMD_PATH" ]]; then
   exit 1
 fi
 echo "==> Verify CLI installed: $CLI_NAME"
-INSTALLED_VERSION="$("$CMD_PATH" --version 2>/dev/null | head -n 1 | tr -d '\r')"
+# `--version` may print a bare version ("2026.6.11") OR a banner-style line
+# ("OpenClaw 2026.7.1 (2d2ddc4)") — parse the semver token so the assertion is
+# robust to the banner format (mirrors install-sh-smoke/run.sh; #58 fixed the
+# root harness but missed this sibling nonroot one).
+RAW_VERSION_OUTPUT="$("$CMD_PATH" --version 2>/dev/null | head -n 1 | tr -d '\r')"
+INSTALLED_VERSION="$(printf '%s' "$RAW_VERSION_OUTPUT" | grep -oE '[0-9]+\.[0-9]+\.[0-9]+([.-][0-9A-Za-z.]+)?' | head -n 1)"
 
-echo "cli=$CLI_NAME installed=$INSTALLED_VERSION expected=$LATEST_VERSION"
+echo "cli=$CLI_NAME installed=$INSTALLED_VERSION expected=$LATEST_VERSION raw=$RAW_VERSION_OUTPUT"
 if [[ "$INSTALLED_VERSION" != "$LATEST_VERSION" ]]; then
-  echo "ERROR: expected ${CLI_NAME}@${LATEST_VERSION}, got ${CLI_NAME}@${INSTALLED_VERSION}" >&2
+  echo "ERROR: expected ${CLI_NAME}@${LATEST_VERSION}, got ${CLI_NAME}@${INSTALLED_VERSION:-<unparsed>} (raw: $RAW_VERSION_OUTPUT)" >&2
   exit 1
 fi
 
