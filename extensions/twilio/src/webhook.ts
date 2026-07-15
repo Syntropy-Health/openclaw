@@ -77,7 +77,12 @@ async function readBody(req: IncomingMessage): Promise<string> {
 }
 
 export type SmsWebhookDeps = {
-  config: ResolvedTwilioSmsConfig;
+  /**
+   * Resolve the current credential-complete config per request (lazy, so the
+   * route honors an inert/unprovisioned channel and picks up config changes
+   * without re-registration). Null → the channel is not configured (503).
+   */
+  resolveConfig: () => ResolvedTwilioSmsConfig | null;
   /** Called ONLY for authenticated, routable inbound (status 200). */
   onInbound: (inbound: InboundSms) => void | Promise<void>;
   /**
@@ -92,6 +97,14 @@ export type SmsWebhookDeps = {
 /** Node adapter: validate → (on 200) route → respond. Thin wrapper over the pure core. */
 export function createSmsWebhookHandler(deps: SmsWebhookDeps) {
   return async (req: IncomingMessage, res: ServerResponse): Promise<void> => {
+    const config = deps.resolveConfig();
+    if (!config) {
+      // Inert / unprovisioned channel — no auth key to validate against.
+      res.writeHead(503);
+      res.end();
+      return;
+    }
+
     const raw = await readBody(req);
     const bodyParams = new URLSearchParams(raw);
     const signature = firstHeader(req.headers["x-twilio-signature"]);
@@ -102,7 +115,7 @@ export function createSmsWebhookHandler(deps: SmsWebhookDeps) {
       signature,
       url,
       bodyParams,
-      authToken: deps.config.authToken,
+      authToken: config.authToken,
     });
 
     if (decision.status === 200) {

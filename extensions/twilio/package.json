@@ -1,0 +1,18 @@
+{
+  "name": "@openclaw/twilio",
+  "version": "2026.2.1",
+  "private": true,
+  "description": "Twilio SMS channel for OpenClaw — outbound send, X-Twilio-Signature inbound webhook, TCPA opt-out rail",
+  "type": "module",
+  "dependencies": {
+    "postgres": "^3.4.5"
+  },
+  "devDependencies": {
+    "openclaw": "workspace:*"
+  },
+  "openclaw": {
+    "extensions": [
+      "./src/index.ts"
+    ]
+  }
+}
