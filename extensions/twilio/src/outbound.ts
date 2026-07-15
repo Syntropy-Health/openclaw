@@ -15,6 +15,7 @@
 
 import type { ChannelOutboundAdapter } from "openclaw/plugin-sdk";
 import type { OpenClawConfig } from "openclaw/plugin-sdk";
+import { SMS_CHANNEL_ID } from "./accounts.js";
 import { guardedSendSms, type OptOutStore } from "./compliance.js";
 import { type ResolvedTwilioSmsConfig } from "./config.js";
 import { type SmsFetch } from "./send.js";
@@ -44,7 +45,11 @@ export function buildSmsOutboundAdapter(deps: SmsOutboundDeps): ChannelOutboundA
 
       if ("suppressed" in result) {
         // Terminal + non-retryable: the opt-out rail short-circuited the send.
-        return { channel: "sms", messageId: SMS_OPTOUT_SUPPRESSED, meta: { suppressed: true } };
+        return {
+          channel: SMS_CHANNEL_ID,
+          messageId: SMS_OPTOUT_SUPPRESSED,
+          meta: { suppressed: true },
+        };
       }
       if (!result.ok) {
         // Throw → deliver.ts failDelivery → retry. The api-key secret is never
@@ -53,7 +58,7 @@ export function buildSmsOutboundAdapter(deps: SmsOutboundDeps): ChannelOutboundA
         throw new Error(`sms send failed${code}: ${result.error}`);
       }
       return {
-        channel: "sms",
+        channel: SMS_CHANNEL_ID,
         messageId: result.sid,
         ...(result.status ? { meta: { status: result.status } } : {}),
       };

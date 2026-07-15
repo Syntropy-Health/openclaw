@@ -12,22 +12,20 @@
  * a number that may have opted out.
  */
 
-import type { OpenClawConfig, OpenClawPluginApi } from "openclaw/plugin-sdk";
-import { dispatchInboundMessageWithDispatcher } from "../../../src/auto-reply/dispatch.js";
-import type { MsgContext } from "../../../src/auto-reply/templating.js";
-import { buildAgentPeerSessionKey, DEFAULT_AGENT_ID } from "../../../src/routing/session-key.js";
-import { resolveSmsAccount, SMS_CHANNEL_ID } from "./accounts.js";
+import type { OpenClawPluginApi } from "openclaw/plugin-sdk";
+import { resolveSmsAccount } from "./accounts.js";
 import { createSmsPlugin } from "./channel.js";
-import { guardedSendSms, handleInboundCompliance, type OptOutStore } from "./compliance.js";
-import { type ResolvedTwilioSmsConfig } from "./config.js";
+import { type OptOutStore } from "./compliance.js";
 import { asSqlTag, createSmsPgClient, type SmsPgClient } from "./db.js";
+import { handleInboundSms } from "./inbound.js";
 import { createPgOptOutStore, ensureOptOutSchema } from "./optout-store.js";
-import { createSmsWebhookHandler, type InboundSms } from "./webhook.js";
+import { createSmsWebhookHandler } from "./webhook.js";
 
 /**
  * A store that throws on every read — used when no durable DB is available. Via
- * `guardedSendSms`'s fail-closed catch, this suppresses ALL sends: an unprovable
- * opt-out state must never let a message through.
+ * `guardedSendSms`'s fail-closed catch, this suppresses ALL agent sends: an
+ * unprovable opt-out state must never let generated content through. (Mandated
+ * compliance acks go via the unguarded path and are unaffected.)
  */
 const FAIL_CLOSED_STORE: OptOutStore = {
   isOptedOut: () => {
@@ -36,43 +34,6 @@ const FAIL_CLOSED_STORE: OptOutStore = {
   optOut: () => {},
   optIn: () => {},
 };
-
-/** Build the inbound message context + dispatch a real (non-compliance) SMS to the agent. */
-async function routeInboundToAgent(params: {
-  inbound: InboundSms;
-  cfg: OpenClawConfig;
-  config: ResolvedTwilioSmsConfig;
-  store: OptOutStore;
-}): Promise<void> {
-  const { inbound, cfg, config, store } = params;
-  const sessionKey = buildAgentPeerSessionKey({
-    agentId: DEFAULT_AGENT_ID,
-    channel: SMS_CHANNEL_ID,
-    peerKind: "direct",
-    peerId: inbound.from,
-    dmScope: "per-channel-peer",
-  });
-  const ctx: MsgContext = {
-    Body: inbound.body,
-    From: inbound.from,
-    To: config.smsNumber,
-    SessionKey: sessionKey,
-    Provider: SMS_CHANNEL_ID,
-    Surface: SMS_CHANNEL_ID,
-    ChatType: "direct",
-  };
-  await dispatchInboundMessageWithDispatcher({
-    ctx,
-    cfg,
-    dispatcherOptions: {
-      // The agent's reply goes back out through the opt-out-guarded send path.
-      deliver: async (payload) => {
-        const text = payload.text?.trim();
-        if (text) await guardedSendSms({ config, to: inbound.from, body: text }, store);
-      },
-    },
-  });
-}
 
 const twilioSmsPlugin = {
   id: "twilio",
@@ -114,13 +75,8 @@ const twilioSmsPlugin = {
         onInbound: async (inbound) => {
           const config = resolveSmsAccount(api.config).config;
           if (!config) return;
-          // TCPA rail: STOP/START/HELP handled BEFORE the agent ever sees the message.
-          const outcome = await handleInboundCompliance(inbound.from, inbound.body, store);
-          if (outcome.kind !== "passthrough") {
-            await guardedSendSms({ config, to: inbound.from, body: outcome.reply }, store);
-            return;
-          }
-          await routeInboundToAgent({ inbound, cfg: api.config, config, store });
+          // Compliance-first → access policy → agent (see inbound.ts).
+          await handleInboundSms({ inbound, cfg: api.config, config, store });
         },
       }),
     });

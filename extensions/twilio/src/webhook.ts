@@ -67,11 +67,31 @@ export function decideInboundSms(input: {
   return { status: 200, inbound };
 }
 
-/** Read a request body stream to a UTF-8 string (bounded by the caller's server). */
+/**
+ * Max inbound body we will buffer. This route is UNAUTHENTICATED until the
+ * signature is validated (which requires the body), so without a cap an
+ * anonymous caller could stream an unbounded POST and OOM the whole gateway
+ * (CWE-770). Twilio inbound SMS webhooks are well under ~4 KB; 64 KB is generous.
+ */
+export const MAX_INBOUND_BODY_BYTES = 64 * 1024;
+
+/** Signals the body exceeded {@link MAX_INBOUND_BODY_BYTES} — surfaced as HTTP 413. */
+export class BodyTooLargeError extends Error {
+  constructor() {
+    super("request body exceeds the inbound cap");
+    this.name = "BodyTooLargeError";
+  }
+}
+
+/** Read a request body stream to a UTF-8 string, capping cumulative bytes. */
 async function readBody(req: IncomingMessage): Promise<string> {
   const chunks: Buffer[] = [];
+  let total = 0;
   for await (const chunk of req) {
-    chunks.push(typeof chunk === "string" ? Buffer.from(chunk) : (chunk as Buffer));
+    const buf = typeof chunk === "string" ? Buffer.from(chunk) : (chunk as Buffer);
+    total += buf.length;
+    if (total > MAX_INBOUND_BODY_BYTES) throw new BodyTooLargeError();
+    chunks.push(buf);
   }
   return Buffer.concat(chunks).toString("utf8");
 }
@@ -105,7 +125,25 @@ export function createSmsWebhookHandler(deps: SmsWebhookDeps) {
       return;
     }
 
-    const raw = await readBody(req);
+    // DoS guard: reject an over-cap body — first on the declared Content-Length,
+    // then defensively while streaming (readBody throws BodyTooLargeError).
+    const declaredLength = Number(firstHeader(req.headers["content-length"]));
+    if (Number.isFinite(declaredLength) && declaredLength > MAX_INBOUND_BODY_BYTES) {
+      res.writeHead(413);
+      res.end();
+      return;
+    }
+    let raw: string;
+    try {
+      raw = await readBody(req);
+    } catch (err) {
+      if (err instanceof BodyTooLargeError) {
+        res.writeHead(413);
+        res.end();
+        return;
+      }
+      throw err;
+    }
     const bodyParams = new URLSearchParams(raw);
     const signature = firstHeader(req.headers["x-twilio-signature"]);
     const url = deps.resolveUrl?.(req) ?? defaultUrl(req);

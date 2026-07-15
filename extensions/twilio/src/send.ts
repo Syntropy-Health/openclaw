@@ -80,7 +80,14 @@ export async function sendSms(params: SendSmsParams): Promise<SendSmsResult> {
   }
 
   const text = await response.text();
-  const data = (text ? JSON.parse(text) : {}) as { sid?: string; status?: string };
+  let data: { sid?: string; status?: string };
+  try {
+    data = (text ? JSON.parse(text) : {}) as { sid?: string; status?: string };
+  } catch {
+    // Contract: sendSms never throws. A 2xx with a non-JSON body is degraded to
+    // a failure result (mirrors the error-path parse handling).
+    return { ok: false, status: response.status, error: "unparseable Twilio success body" };
+  }
   if (!data.sid) {
     return { ok: false, status: response.status, error: "Twilio response missing message sid" };
   }

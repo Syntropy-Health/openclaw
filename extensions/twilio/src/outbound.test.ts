@@ -74,20 +74,27 @@ describe("buildSmsOutboundAdapter", () => {
     await expect(a.sendText!(ctx("+15557654321", "nudge"))).rejects.toThrow(/not configured/i);
   });
 
-  it("never leaks the api-key secret in a thrown error", async () => {
+  it("surfaces the status + Twilio message on failure but NEVER the api-key secret", async () => {
+    // Load-bearing: a body that WOULD expose a leak if the error interpolated
+    // request/auth — assert real diagnostic info is present AND the secret is not.
     const failFetch = vi.fn(
-      async () => new Response("upstream error", { status: 502 }),
+      async () =>
+        new Response(JSON.stringify({ code: 21211, message: "Invalid 'To'" }), { status: 400 }),
     ) as unknown as typeof fetch;
     const a = buildSmsOutboundAdapter({
       resolveConfig: () => CONFIG,
       store: emptyStore,
       fetchImpl: failFetch,
     });
-    await expect(a.sendText!(ctx("+15557654321", "nudge"))).rejects.toThrow();
+    let caught: unknown;
     try {
       await a.sendText!(ctx("+15557654321", "nudge"));
     } catch (e) {
-      expect(String(e)).not.toContain("secret_never_leak");
+      caught = e;
     }
+    const msg = String(caught);
+    expect(msg).toContain("400"); // real diagnostic info surfaced (not tautological)
+    expect(msg).toContain("Invalid 'To'");
+    expect(msg).not.toContain("secret_never_leak"); // ...but never the api-key secret
   });
 });

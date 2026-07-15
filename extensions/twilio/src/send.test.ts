@@ -94,4 +94,22 @@ describe("sendSms — Twilio REST outbound", () => {
     if (!r.ok) expect(r.status).toBeNull();
     expect(JSON.stringify(r)).not.toContain("secret_value_never_leak");
   });
+
+  it("returns a failure result (not ok) when a 2xx response has no message sid", async () => {
+    const fetchImpl = vi.fn(
+      async () => new Response(JSON.stringify({ status: "queued" }), { status: 201 }),
+    ) as unknown as typeof fetch;
+    const r = await sendSms({ config: CONFIG, to: "+15557654321", body: "hi", fetchImpl });
+    expect(r.ok).toBe(false);
+    if (!r.ok) expect(r.error).toMatch(/missing message sid/i);
+  });
+
+  it("does NOT throw on a 2xx response with a non-JSON body (contract: never throws)", async () => {
+    const fetchImpl = vi.fn(
+      async () => new Response("<html>gateway</html>", { status: 200 }),
+    ) as unknown as typeof fetch;
+    const r = await sendSms({ config: CONFIG, to: "+15557654321", body: "hi", fetchImpl });
+    expect(r.ok).toBe(false);
+    if (!r.ok) expect(r.error).toMatch(/unparseable/i);
+  });
 });

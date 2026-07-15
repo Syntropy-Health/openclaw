@@ -60,6 +60,11 @@ describe("classifyCompliance — exact-keyword match (no false opt-out from conv
       expect(classifyCompliance(m), m).toBeNull();
     }
   });
+  it("treats a blank / whitespace-only body as passthrough (null)", () => {
+    for (const m of ["", "   ", "\n\t"]) {
+      expect(classifyCompliance(m), JSON.stringify(m)).toBeNull();
+    }
+  });
 });
 
 describe("handleInboundCompliance", () => {
