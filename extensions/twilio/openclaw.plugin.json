@@ -1,0 +1,37 @@
+{
+  "id": "twilio",
+  "uiHints": {
+    "accountSid": {
+      "label": "Twilio Subaccount SID",
+      "placeholder": "AC…",
+      "help": "The per-env subaccount Account SID (not the master account)."
+    },
+    "apiKeySid": {
+      "label": "API Key SID",
+      "placeholder": "SK…",
+      "help": "Scoped Standard API Key SID used for REST send auth."
+    },
+    "apiKeySecret": {
+      "label": "API Key Secret",
+      "sensitive": true,
+      "help": "Paired with the API Key SID for REST basic-auth. Never the master Auth Token."
+    },
+    "authToken": {
+      "label": "Subaccount Auth Token",
+      "sensitive": true,
+      "help": "Used ONLY as the X-Twilio-Signature HMAC key for inbound webhook validation."
+    },
+    "smsNumber": {
+      "label": "SMS Sender Number",
+      "placeholder": "+15550001234"
+    },
+    "inbound": {
+      "label": "Inbound Policy",
+      "help": "pairing (default, deny-by-default → connect CTA), allowlist, or disabled."
+    },
+    "allowFrom": {
+      "label": "Inbound Allowlist",
+      "advanced": true
+    }
+  }
+}
