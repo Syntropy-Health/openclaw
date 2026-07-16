@@ -101,6 +101,12 @@ export type WhatsAppConfig = {
   debounceMs?: number;
   /** Heartbeat visibility settings for this channel. */
   heartbeat?: ChannelHeartbeatVisibilityConfig;
+  /**
+   * WhatsApp transport (B-Twilio-2 dual-path). `baileys` (default) is the legacy
+   * unofficial WhatsApp Web transport; `twilio-waba` routes via the Twilio WABA
+   * adapter. Default keeps Baileys the live transport until cutover (CTO-gated).
+   */
+  transport?: "baileys" | "twilio-waba";
 };
 
 export type WhatsAppAccountConfig = {

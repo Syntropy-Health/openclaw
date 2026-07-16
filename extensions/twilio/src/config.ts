@@ -48,6 +48,12 @@ export const TwilioSmsConfigSchema = z
     authToken: z.string().min(1).optional(),
     /** The E.164 SMS sender number provisioned on this subaccount. */
     smsNumber: E164Schema.optional(),
+    /**
+     * The E.164 WhatsApp (WABA) sender number provisioned on this subaccount
+     * (B-Twilio-2). Distinct from `smsNumber`; used only by the WhatsApp transport.
+     * Wire-prefixed with `whatsapp:` at send time (see transport.ts).
+     */
+    whatsappNumber: E164Schema.optional(),
     /** Inbound handling. Default `pairing` (unpaired → connect CTA, deny-by-default). */
     inbound: TwilioInboundPolicySchema.default("pairing"),
     /** E.164 numbers accepted when `inbound: "allowlist"`. */
@@ -67,6 +73,17 @@ export type ResolvedTwilioSmsConfig = {
   allowFrom: readonly string[];
 };
 
+/** Resolved WABA (WhatsApp) config — shares the subaccount creds, own sender number. */
+export type ResolvedTwilioWabaConfig = {
+  accountSid: string;
+  apiKeySid: string;
+  apiKeySecret: string;
+  authToken: string;
+  whatsappNumber: string;
+  inbound: TwilioInboundPolicy;
+  allowFrom: readonly string[];
+};
+
 /** Env-var names (Infisical `channels/twilio/{env}` → runtime env). */
 const ENV = {
   accountSid: "TWILIO_ACCOUNT_SID",
@@ -74,6 +91,7 @@ const ENV = {
   apiKeySecret: "TWILIO_API_KEY_SECRET",
   authToken: "TWILIO_AUTH_TOKEN",
   smsNumber: "TWILIO_SMS_NUMBER",
+  whatsappNumber: "TWILIO_WHATSAPP_NUMBER",
 } as const;
 
 /**
@@ -106,6 +124,38 @@ export function resolveTwilioSmsConfig(
     apiKeySecret,
     authToken,
     smsNumber,
+    inbound: parsed.inbound,
+    allowFrom: parsed.allowFrom,
+  };
+}
+
+/**
+ * WABA (WhatsApp) counterpart of {@link resolveTwilioSmsConfig}: same fail-closed
+ * "no partial wiring" gate, but keyed on the WhatsApp sender (`whatsappNumber`)
+ * instead of `smsNumber`. Returns null (channel INERT) unless every shared
+ * credential + the WABA sender is present. `authToken` is likewise required
+ * (X-Twilio-Signature validates the WABA inbound webhook the same way, §4.3).
+ */
+export function resolveTwilioWabaConfig(
+  input: TwilioSmsConfig | undefined,
+  env: NodeJS.ProcessEnv = process.env,
+): ResolvedTwilioWabaConfig | null {
+  const parsed = input ?? TwilioSmsConfigSchema.parse({});
+  const accountSid = parsed.accountSid ?? env[ENV.accountSid];
+  const apiKeySid = parsed.apiKeySid ?? env[ENV.apiKeySid];
+  const apiKeySecret = parsed.apiKeySecret ?? env[ENV.apiKeySecret];
+  const authToken = parsed.authToken ?? env[ENV.authToken];
+  const whatsappNumber = parsed.whatsappNumber ?? env[ENV.whatsappNumber];
+
+  if (!accountSid || !apiKeySid || !apiKeySecret || !authToken || !whatsappNumber) {
+    return null;
+  }
+  return {
+    accountSid,
+    apiKeySid,
+    apiKeySecret,
+    authToken,
+    whatsappNumber,
     inbound: parsed.inbound,
     allowFrom: parsed.allowFrom,
   };

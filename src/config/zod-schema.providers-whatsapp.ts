@@ -98,6 +98,9 @@ export const WhatsAppAccountSchema = WhatsAppSharedSchema.extend({
 export const WhatsAppConfigSchema = WhatsAppSharedSchema.extend({
   accounts: z.record(z.string(), WhatsAppAccountSchema.optional()).optional(),
   mediaMaxMb: z.number().int().positive().optional().default(50),
+  // B-Twilio-2 dual-path transport selector. Default `baileys` keeps the legacy
+  // transport live until the Twilio WABA cutover (CTO-gated).
+  transport: z.enum(["baileys", "twilio-waba"]).optional().default("baileys"),
   actions: z
     .object({
       reactions: z.boolean().optional(),

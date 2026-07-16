@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   E164Schema,
   resolveTwilioSmsConfig,
+  resolveTwilioWabaConfig,
   TwilioSmsConfigSchema,
   type TwilioSmsConfig,
 } from "./config.js";
@@ -93,5 +94,45 @@ describe("resolveTwilioSmsConfig — fail-closed credential completeness", () =>
     const env: NodeJS.ProcessEnv = { TWILIO_SMS_NUMBER: "+15550000000" };
     const r = resolveTwilioSmsConfig(FULL, env);
     expect(r?.smsNumber).toBe("+15550001234"); // config wins
+  });
+});
+
+describe("resolveTwilioWabaConfig — WhatsApp sender, same fail-closed gate", () => {
+  const WABA_FULL = TwilioSmsConfigSchema.parse({
+    accountSid: "AC_test",
+    apiKeySid: "SK_test",
+    apiKeySecret: "secret_test",
+    authToken: "authtok_test",
+    whatsappNumber: "+15550005678",
+  });
+
+  it("resolves when shared creds + the WABA sender are present", () => {
+    const r = resolveTwilioWabaConfig(WABA_FULL, NO_ENV);
+    expect(r).not.toBeNull();
+    expect(r?.whatsappNumber).toBe("+15550005678");
+    expect(r).not.toHaveProperty("smsNumber"); // WABA config is keyed on whatsappNumber
+  });
+
+  it("is INERT (null) when whatsappNumber is missing even with all SMS creds present", () => {
+    expect(resolveTwilioWabaConfig(FULL, NO_ENV)).toBeNull(); // FULL has smsNumber, no whatsappNumber
+  });
+
+  it("returns null when ANY shared credential is missing (no partial wiring)", () => {
+    for (const missing of ["accountSid", "apiKeySid", "apiKeySecret", "authToken"] as const) {
+      const partial = { ...WABA_FULL, [missing]: undefined } as TwilioSmsConfig;
+      expect(resolveTwilioWabaConfig(partial, NO_ENV), `missing ${missing}`).toBeNull();
+    }
+  });
+
+  it("falls back to env (TWILIO_WHATSAPP_NUMBER)", () => {
+    const env: NodeJS.ProcessEnv = {
+      TWILIO_ACCOUNT_SID: "AC_env",
+      TWILIO_API_KEY_SID: "SK_env",
+      TWILIO_API_KEY_SECRET: "secret_env",
+      TWILIO_AUTH_TOKEN: "authtok_env",
+      TWILIO_WHATSAPP_NUMBER: "+15550009999",
+    };
+    const r = resolveTwilioWabaConfig(TwilioSmsConfigSchema.parse({}), env);
+    expect(r?.whatsappNumber).toBe("+15550009999");
   });
 });
