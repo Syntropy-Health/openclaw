@@ -67,6 +67,23 @@ describe("resolveKapsoConfig — fail-closed credential completeness", () => {
     expect(r?.baseUrl).toBe("https://api.kapso.ai/meta/whatsapp/v24.0");
   });
 
+  it("resolves with businessAccountId and NO explicit phoneNumberId (derived later via lookup)", () => {
+    const noPn = KapsoConfigSchema.parse({
+      apiKey: "k",
+      appSecret: "s",
+      businessAccountId: "1312147934010664",
+    });
+    const r = resolveKapsoConfig(noPn, NO_ENV);
+    expect(r).not.toBeNull();
+    expect(r?.phoneNumberId).toBeUndefined();
+    expect(r?.businessAccountId).toBe("1312147934010664");
+  });
+
+  it("stays INERT when neither phoneNumberId nor businessAccountId is present", () => {
+    const noTarget = KapsoConfigSchema.parse({ apiKey: "k", appSecret: "s" });
+    expect(resolveKapsoConfig(noTarget, NO_ENV)).toBeNull();
+  });
+
   it("carries the optional context ids (businessAccountId/portfolioId/configId) through", () => {
     const withIds = KapsoConfigSchema.parse({
       ...FULL,

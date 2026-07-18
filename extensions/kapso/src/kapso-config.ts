@@ -57,9 +57,14 @@ export type KapsoConfig = z.infer<typeof KapsoConfigSchema>;
 export type ResolvedKapsoConfig = {
   apiKey: string;
   baseUrl: string;
-  phoneNumberId: string;
+  /**
+   * Explicit sender phone-number-id. Optional here: when absent it is derived at
+   * runtime from `businessAccountId` (see kapso-phone.ts). The credential gate
+   * requires at least one of `phoneNumberId` / `businessAccountId`.
+   */
+  phoneNumberId?: string;
   appSecret: string;
-  /** Stored context (optional): available for phone-number lookup / Kapso-native ops. */
+  /** Stored context: enables the phone-number lookup / Kapso-native ops. */
   businessAccountId?: string;
   portfolioId?: string;
   configId?: string;
@@ -98,11 +103,12 @@ export function resolveKapsoConfig(
   const baseUrl = parsed.baseUrl ?? env[ENV.baseUrl] ?? DEFAULT_BASE_URL;
   const phoneNumberId = parsed.phoneNumberId ?? env[ENV.phoneNumberId];
   const appSecret = parsed.appSecret ?? env[ENV.appSecret];
+  const businessAccountId = parsed.businessAccountId ?? env[ENV.businessAccountId];
 
-  // Fail-closed on the credentials required to run: API key (send auth),
-  // phone-number-id (send target), app secret (webhook HMAC). baseUrl always
-  // resolves (default). The context ids are optional.
-  if (!apiKey || !phoneNumberId || !appSecret) {
+  // Fail-closed on the credentials required to run: API key (send auth), app
+  // secret (webhook HMAC), and a send TARGET — either an explicit phone-number-id
+  // OR a business-account-id it can be derived from. baseUrl always resolves.
+  if (!apiKey || !appSecret || (!phoneNumberId && !businessAccountId)) {
     return null;
   }
   return {
@@ -110,7 +116,7 @@ export function resolveKapsoConfig(
     baseUrl,
     phoneNumberId,
     appSecret,
-    businessAccountId: parsed.businessAccountId ?? env[ENV.businessAccountId],
+    businessAccountId,
     portfolioId: parsed.portfolioId ?? env[ENV.portfolioId],
     configId: parsed.configId ?? env[ENV.configId],
     inbound: parsed.inbound,

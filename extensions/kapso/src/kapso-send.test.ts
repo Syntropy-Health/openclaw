@@ -29,7 +29,13 @@ function capturingFetch(payload: unknown = { messages: [{ id: "wamid.ABC" }] }) 
 describe("sendKapsoMessage — WhatsApp Cloud API send", () => {
   it("POSTs to {baseUrl}/{phoneNumberId}/messages with X-API-Key auth + JSON", async () => {
     const { fn, seen } = capturingFetch();
-    await sendKapsoMessage({ config: CONFIG, to: "+15557654321", body: "hi", fetchImpl: fn });
+    await sendKapsoMessage({
+      config: CONFIG,
+      phoneNumberId: "PN_123",
+      to: "+15557654321",
+      body: "hi",
+      fetchImpl: fn,
+    });
     expect(seen[0].url).toBe("https://api.kapso.ai/whatsapp/PN_123/messages");
     expect(seen[0].apiKeyHeader).toBe("kapso_key_never_leak");
     expect(seen[0].contentType).toBe("application/json");
@@ -39,6 +45,7 @@ describe("sendKapsoMessage — WhatsApp Cloud API send", () => {
     const { fn, seen } = capturingFetch();
     await sendKapsoMessage({
       config: CONFIG,
+      phoneNumberId: "PN_123",
       to: "+15557654321",
       body: "your nudge",
       fetchImpl: fn,
@@ -59,6 +66,7 @@ describe("sendKapsoMessage — WhatsApp Cloud API send", () => {
     const { fn } = capturingFetch({ messages: [{ id: "wamid.SUCCESS" }] });
     const r = await sendKapsoMessage({
       config: CONFIG,
+      phoneNumberId: "PN_123",
       to: "+15557654321",
       body: "hi",
       fetchImpl: fn,
@@ -73,7 +81,13 @@ describe("sendKapsoMessage — WhatsApp Cloud API send", () => {
           status: 400,
         }),
     ) as unknown as typeof fetch;
-    const r = await sendKapsoMessage({ config: CONFIG, to: "bad", body: "hi", fetchImpl: fn });
+    const r = await sendKapsoMessage({
+      config: CONFIG,
+      phoneNumberId: "PN_123",
+      to: "bad",
+      body: "hi",
+      fetchImpl: fn,
+    });
     expect(r.ok).toBe(false);
     if (!r.ok) {
       expect(r.status).toBe(400);
@@ -88,6 +102,7 @@ describe("sendKapsoMessage — WhatsApp Cloud API send", () => {
     }) as unknown as typeof fetch;
     const r = await sendKapsoMessage({
       config: CONFIG,
+      phoneNumberId: "PN_123",
       to: "+15557654321",
       body: "hi",
       fetchImpl: fn,
@@ -101,6 +116,7 @@ describe("sendKapsoMessage — WhatsApp Cloud API send", () => {
     const { fn } = capturingFetch({ messages: [] });
     const r = await sendKapsoMessage({
       config: CONFIG,
+      phoneNumberId: "PN_123",
       to: "+15557654321",
       body: "hi",
       fetchImpl: fn,

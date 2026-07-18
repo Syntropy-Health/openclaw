@@ -23,6 +23,8 @@ export type KapsoSendResult =
 
 export type SendKapsoParams = {
   config: ResolvedKapsoConfig;
+  /** Resolved sender phone-number-id (explicit config value or derived via kapso-phone.ts). */
+  phoneNumberId: string;
   /** Destination E.164 peer number (Cloud API accepts the bare E.164 without `+`, but tolerates it). */
   to: string;
   /** Message text (nudge/CTA/nav only — never PHI; enforced upstream by render-policy). */
@@ -37,10 +39,10 @@ export type SendKapsoParams = {
  * returned error text.
  */
 export async function sendKapsoMessage(params: SendKapsoParams): Promise<KapsoSendResult> {
-  const { config, to, body } = params;
+  const { config, phoneNumberId, to, body } = params;
   const doFetch = params.fetchImpl ?? fetch;
 
-  const url = `${config.baseUrl.replace(/\/$/, "")}/${config.phoneNumberId}/messages`;
+  const url = `${config.baseUrl.replace(/\/$/, "")}/${phoneNumberId}/messages`;
   const payload = {
     messaging_product: "whatsapp",
     recipient_type: "individual",
