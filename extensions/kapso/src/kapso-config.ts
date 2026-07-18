@@ -27,18 +27,24 @@ export type KapsoInboundPolicy = z.infer<typeof KapsoInboundPolicySchema>;
 
 export const KapsoConfigSchema = z
   .object({
-    /** Kapso project API key (Bearer auth for REST send). */
+    /** Kapso project API key — sent in the `X-API-Key` header for REST send. */
     apiKey: z.string().min(1).optional(),
-    /** Kapso API base URL (Cloud-API host). Set at provisioning (no guessed default). */
+    /** Kapso Meta-proxy base URL. Optional — resolver defaults to the documented host + version. */
     baseUrl: z.string().url().optional(),
-    /** WABA sender phone-number-id (Cloud API `{phoneNumberId}/messages`). */
+    /** WABA sender phone-number-id (Cloud API `{phoneNumberId}/messages`, path param). */
     phoneNumberId: z.string().min(1).optional(),
     /**
-     * App secret — required ONLY as the HMAC key for the inbound
-     * `x-hub-signature-256` webhook validation (§ webhook). Not used for REST auth
-     * (the API key is).
+     * Meta app secret — required ONLY as the HMAC key for the inbound
+     * `x-hub-signature-256` webhook validation. Not used for REST auth (the API
+     * key is). Sourced from the GTM Infisical project's Meta app credentials.
      */
     appSecret: z.string().min(1).optional(),
+    /** WhatsApp Business Account (WABA) id — context; enables phone-number lookup. */
+    businessAccountId: z.string().min(1).optional(),
+    /** Meta Business Portfolio id — context. */
+    portfolioId: z.string().min(1).optional(),
+    /** Kapso WhatsApp config id — identifies the connection for Kapso-native ops. */
+    configId: z.string().min(1).optional(),
     /** Inbound handling. Default `pairing` (unpaired → connect CTA, deny-by-default). */
     inbound: KapsoInboundPolicySchema.default("pairing"),
     /** E.164 numbers accepted when `inbound: "allowlist"`. */
@@ -53,9 +59,16 @@ export type ResolvedKapsoConfig = {
   baseUrl: string;
   phoneNumberId: string;
   appSecret: string;
+  /** Stored context (optional): available for phone-number lookup / Kapso-native ops. */
+  businessAccountId?: string;
+  portfolioId?: string;
+  configId?: string;
   inbound: KapsoInboundPolicy;
   allowFrom: readonly string[];
 };
+
+/** Default Kapso Meta-proxy base URL (documented host + Graph version). */
+const DEFAULT_BASE_URL = "https://api.kapso.ai/meta/whatsapp/v24.0";
 
 /** Env-var names (Infisical `channels/kapso/{env}` → runtime env). */
 const ENV = {
@@ -63,6 +76,9 @@ const ENV = {
   baseUrl: "KAPSO_BASE_URL",
   phoneNumberId: "KAPSO_PHONE_NUMBER_ID",
   appSecret: "KAPSO_APP_SECRET",
+  businessAccountId: "KAPSO_BUSINESS_ACCOUNT_ID",
+  portfolioId: "KAPSO_BUSINESS_PORTFOLIO_ID",
+  configId: "KAPSO_CONFIG_ID",
 } as const;
 
 /**
@@ -79,11 +95,14 @@ export function resolveKapsoConfig(
 ): ResolvedKapsoConfig | null {
   const parsed = input ?? KapsoConfigSchema.parse({});
   const apiKey = parsed.apiKey ?? env[ENV.apiKey];
-  const baseUrl = parsed.baseUrl ?? env[ENV.baseUrl];
+  const baseUrl = parsed.baseUrl ?? env[ENV.baseUrl] ?? DEFAULT_BASE_URL;
   const phoneNumberId = parsed.phoneNumberId ?? env[ENV.phoneNumberId];
   const appSecret = parsed.appSecret ?? env[ENV.appSecret];
 
-  if (!apiKey || !baseUrl || !phoneNumberId || !appSecret) {
+  // Fail-closed on the credentials required to run: API key (send auth),
+  // phone-number-id (send target), app secret (webhook HMAC). baseUrl always
+  // resolves (default). The context ids are optional.
+  if (!apiKey || !phoneNumberId || !appSecret) {
     return null;
   }
   return {
@@ -91,6 +110,9 @@ export function resolveKapsoConfig(
     baseUrl,
     phoneNumberId,
     appSecret,
+    businessAccountId: parsed.businessAccountId ?? env[ENV.businessAccountId],
+    portfolioId: parsed.portfolioId ?? env[ENV.portfolioId],
+    configId: parsed.configId ?? env[ENV.configId],
     inbound: parsed.inbound,
     allowFrom: parsed.allowFrom,
   };

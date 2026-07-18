@@ -12,12 +12,12 @@ const CONFIG: ResolvedKapsoConfig = {
 };
 
 function capturingFetch(payload: unknown = { messages: [{ id: "wamid.ABC" }] }) {
-  const seen: { url: string; auth: string; contentType: string; body: string }[] = [];
+  const seen: { url: string; apiKeyHeader: string; contentType: string; body: string }[] = [];
   const fn = vi.fn(async (url: string, init: RequestInit) => {
     const h = init.headers as Record<string, string>;
     seen.push({
       url,
-      auth: h.Authorization,
+      apiKeyHeader: h["X-API-Key"],
       contentType: h["Content-Type"],
       body: String(init.body),
     });
@@ -27,11 +27,11 @@ function capturingFetch(payload: unknown = { messages: [{ id: "wamid.ABC" }] }) 
 }
 
 describe("sendKapsoMessage — WhatsApp Cloud API send", () => {
-  it("POSTs to {baseUrl}/{phoneNumberId}/messages with Bearer api-key auth + JSON", async () => {
+  it("POSTs to {baseUrl}/{phoneNumberId}/messages with X-API-Key auth + JSON", async () => {
     const { fn, seen } = capturingFetch();
     await sendKapsoMessage({ config: CONFIG, to: "+15557654321", body: "hi", fetchImpl: fn });
     expect(seen[0].url).toBe("https://api.kapso.ai/whatsapp/PN_123/messages");
-    expect(seen[0].auth).toBe("Bearer kapso_key_never_leak");
+    expect(seen[0].apiKeyHeader).toBe("kapso_key_never_leak");
     expect(seen[0].contentType).toBe("application/json");
   });
 

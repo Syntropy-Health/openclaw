@@ -1,11 +1,14 @@
 /**
  * Kapso WhatsApp outbound send (B-Kapso-1, slice 1) — the Cloud API REST send.
  *
- * Kapso rides Meta's WhatsApp Cloud API: POST a standard Cloud API message
- * payload to `{baseUrl}/{phoneNumberId}/messages` with `Authorization: Bearer
- * {apiKey}`. `fetch` is an injectable seam so tests never touch the network; the
- * api key is confined to the Authorization header and never surfaced in the
- * returned result (fail-closed secret hygiene). No media in v1.
+ * Kapso rides Meta's WhatsApp Cloud API via its Meta-proxy: POST a standard
+ * Cloud API message payload to `{baseUrl}/{phoneNumberId}/messages` (baseUrl
+ * default `https://api.kapso.ai/meta/whatsapp/v24.0`) authenticated with the
+ * project API key in the **`X-API-Key`** header (Kapso's recommended auth for
+ * the Meta Proxy API — NOT `Authorization: Bearer`). `fetch` is an injectable
+ * seam so tests never touch the network; the api key is confined to the header
+ * and never surfaced in the returned result (fail-closed secret hygiene). No
+ * media in v1.
  */
 
 import { type ResolvedKapsoConfig } from "./kapso-config.js";
@@ -43,7 +46,7 @@ export async function sendKapsoMessage(params: SendKapsoParams): Promise<KapsoSe
     recipient_type: "individual",
     to,
     type: "text",
-    text: { preview_url: false, body },
+    text: { body },
   };
 
   let response: Response;
@@ -51,7 +54,7 @@ export async function sendKapsoMessage(params: SendKapsoParams): Promise<KapsoSe
     response = await doFetch(url, {
       method: "POST",
       headers: {
-        Authorization: `Bearer ${config.apiKey}`,
+        "X-API-Key": config.apiKey,
         "Content-Type": "application/json",
       },
       body: JSON.stringify(payload),

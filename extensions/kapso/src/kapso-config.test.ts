@@ -53,11 +53,30 @@ describe("resolveKapsoConfig — fail-closed credential completeness", () => {
     expect(resolveKapsoConfig(undefined, NO_ENV)).toBeNull();
   });
 
-  it("returns null when ANY single credential is missing (no partial wiring)", () => {
-    for (const missing of ["apiKey", "baseUrl", "phoneNumberId", "appSecret"] as const) {
+  it("returns null when ANY required credential is missing (apiKey/phoneNumberId/appSecret)", () => {
+    for (const missing of ["apiKey", "phoneNumberId", "appSecret"] as const) {
       const partial = { ...FULL, [missing]: undefined } as KapsoConfig;
       expect(resolveKapsoConfig(partial, NO_ENV), `missing ${missing}`).toBeNull();
     }
+  });
+
+  it("defaults baseUrl to the Kapso Meta-proxy host when not provided", () => {
+    const noBaseUrl = { ...FULL, baseUrl: undefined } as KapsoConfig;
+    const r = resolveKapsoConfig(noBaseUrl, NO_ENV);
+    expect(r).not.toBeNull();
+    expect(r?.baseUrl).toBe("https://api.kapso.ai/meta/whatsapp/v24.0");
+  });
+
+  it("carries the optional context ids (businessAccountId/portfolioId/configId) through", () => {
+    const withIds = KapsoConfigSchema.parse({
+      ...FULL,
+      businessAccountId: "1312147934010664",
+      portfolioId: "282010709070165",
+      configId: "46202afe-8604-4656-be52-394656c315f7",
+    });
+    const r = resolveKapsoConfig(withIds, NO_ENV);
+    expect(r?.businessAccountId).toBe("1312147934010664");
+    expect(r?.configId).toBe("46202afe-8604-4656-be52-394656c315f7");
   });
 
   it("REQUIRES appSecret — an inbound channel with no x-hub-signature-256 key must not run", () => {
