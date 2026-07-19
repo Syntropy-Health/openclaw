@@ -105,10 +105,14 @@ describe("B-Kapso-1 rails — fail-closed opt-out store", () => {
   });
 });
 
-type Captured = { route: { path?: string } | null; hooks: string[] };
+type Captured = {
+  route: { path?: string } | null;
+  hooks: string[];
+  transports: Array<{ channel: string; transport: string; hasSend: boolean }>;
+};
 
 function fakeApi() {
-  const captured: Captured = { route: null, hooks: [] };
+  const captured: Captured = { route: null, hooks: [], transports: [] };
   const warns: string[] = [];
   const api = {
     pluginConfig: {} as Record<string, unknown>,
@@ -116,6 +120,13 @@ function fakeApi() {
     logger: { info: () => {}, warn: (m: string) => warns.push(m), error: () => {} },
     registerHttpRoute: (params: unknown) => {
       captured.route = params as Captured["route"];
+    },
+    registerChannelTransport: (r: { channel: string; transport: string; send: unknown }) => {
+      captured.transports.push({
+        channel: r.channel,
+        transport: r.transport,
+        hasSend: typeof r.send === "function",
+      });
     },
     on: (name: string) => {
       captured.hooks.push(name);
@@ -137,6 +148,12 @@ describe("B-Kapso-1 rails — register() wiring", () => {
     }
     expect(captured.route?.path).toBe("/kapso/whatsapp");
     expect(captured.hooks).toContain("gateway_stop");
+    // Registers the whatsapp/kapso OUTBOUND transport via the plugin primitive.
+    expect(captured.transports).toContainEqual({
+      channel: "whatsapp",
+      transport: "kapso",
+      hasSend: true,
+    });
     // No DB → the fail-closed store is installed, and the operator is warned.
     expect(warns.some((m) => m.includes("fail-closed"))).toBe(true);
   });

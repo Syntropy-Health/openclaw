@@ -5,6 +5,7 @@ import type { AuthProfileCredential, OAuthCredential } from "../agents/auth-prof
 import type { AnyAgentTool } from "../agents/tools/common.js";
 import type { ReplyPayload } from "../auto-reply/types.js";
 import type { ChannelDock } from "../channels/dock.js";
+import type { ChannelOutboundTransport } from "../channels/plugins/types.adapters.js";
 import type { ChannelId, ChannelPlugin } from "../channels/plugins/types.js";
 import type { createVpsAwareOAuthHandlers } from "../commands/oauth-flow.js";
 import type { OpenClawConfig } from "../config/config.js";
@@ -226,6 +227,18 @@ export type OpenClawPluginChannelRegistration = {
   dock?: ChannelDock;
 };
 
+/**
+ * Register an alternate OUTBOUND transport for an existing channel (e.g. a
+ * `whatsapp`/`kapso` send). The core outbound adapter selects it by the channel's
+ * configured transport. First-class registry primitive (vs a module singleton):
+ * inherits lifecycle-invalidation on registry swap + the global-symbol registry.
+ */
+export type OpenClawPluginChannelTransportRegistration = {
+  channel: string;
+  transport: string;
+  send: ChannelOutboundTransport;
+};
+
 export type OpenClawPluginDefinition = {
   id?: string;
   name?: string;
@@ -263,6 +276,7 @@ export type OpenClawPluginApi = {
   registerHttpHandler: (handler: OpenClawPluginHttpHandler) => void;
   registerHttpRoute: (params: { path: string; handler: OpenClawPluginHttpRouteHandler }) => void;
   registerChannel: (registration: OpenClawPluginChannelRegistration | ChannelPlugin) => void;
+  registerChannelTransport: (registration: OpenClawPluginChannelTransportRegistration) => void;
   registerGatewayMethod: (method: string, handler: GatewayRequestHandler) => void;
   registerCli: (registrar: OpenClawPluginCliRegistrar, opts?: { commands?: string[] }) => void;
   registerService: (service: OpenClawPluginService) => void;

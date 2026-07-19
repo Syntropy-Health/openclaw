@@ -8,6 +8,7 @@ export const registryState: { registry: PluginRegistry } = {
     tools: [],
     hooks: [],
     typedHooks: [],
+    channelTransports: [],
     channels: [],
     providers: [],
     gatewayHandlers: {},
