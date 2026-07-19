@@ -1,0 +1,52 @@
+{
+  "id": "kapso",
+  "configSchema": {
+    "type": "object",
+    "additionalProperties": true,
+    "properties": {}
+  },
+  "uiHints": {
+    "apiKey": {
+      "label": "Kapso API Key",
+      "sensitive": true,
+      "help": "Kapso project API key — sent in the X-API-Key header for Cloud API REST send (NOT Authorization: Bearer)."
+    },
+    "appSecret": {
+      "label": "Meta App Secret",
+      "sensitive": true,
+      "help": "Meta app secret — used ONLY as the x-hub-signature-256 HMAC key for inbound webhook validation."
+    },
+    "phoneNumberId": {
+      "label": "WABA Phone-Number ID",
+      "help": "Cloud API sender phone-number-id ({phoneNumberId}/messages). Optional — derived from the WABA id when absent."
+    },
+    "businessAccountId": {
+      "label": "WhatsApp Business Account ID",
+      "help": "WABA id — enables phone-number-id lookup when phoneNumberId is not set."
+    },
+    "portfolioId": {
+      "label": "Meta Business Portfolio ID",
+      "advanced": true,
+      "help": "Context only — identifies the owning Meta Business Portfolio."
+    },
+    "configId": {
+      "label": "Kapso WhatsApp Config ID",
+      "advanced": true,
+      "help": "Context only — identifies the Kapso connection for Kapso-native ops."
+    },
+    "baseUrl": {
+      "label": "Kapso Meta-Proxy Base URL",
+      "advanced": true,
+      "help": "Defaults to https://api.kapso.ai/meta/whatsapp/v24.0."
+    },
+    "inbound": {
+      "label": "Inbound Policy",
+      "help": "pairing (default, deny-by-default → connect CTA), allowlist, or disabled."
+    },
+    "allowFrom": {
+      "label": "Inbound Allowlist",
+      "advanced": true,
+      "help": "E.164 numbers (+…) accepted when inbound: allowlist."
+    }
+  }
+}
