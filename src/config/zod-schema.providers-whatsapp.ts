@@ -98,6 +98,10 @@ export const WhatsAppAccountSchema = WhatsAppSharedSchema.extend({
 export const WhatsAppConfigSchema = WhatsAppSharedSchema.extend({
   accounts: z.record(z.string(), WhatsAppAccountSchema.optional()).optional(),
   mediaMaxMb: z.number().int().positive().optional().default(50),
+  // B-Kapso slice 3b OUTBOUND transport selector. Default `baileys` keeps the
+  // legacy transport live until the Kapso dev-number cutover (slice 4, principal-
+  // gated). `twilio-waba` was dropped (ADR 0002 — Kapso is the WhatsApp transport).
+  transport: z.enum(["baileys", "kapso"]).optional().default("baileys"),
   actions: z
     .object({
       reactions: z.boolean().optional(),

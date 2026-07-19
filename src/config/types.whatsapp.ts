@@ -101,6 +101,14 @@ export type WhatsAppConfig = {
   debounceMs?: number;
   /** Heartbeat visibility settings for this channel. */
   heartbeat?: ChannelHeartbeatVisibilityConfig;
+  /**
+   * WhatsApp OUTBOUND transport (B-Kapso slice 3b). `baileys` (default) is the
+   * legacy unofficial WhatsApp Web transport; `kapso` routes agent-initiated/
+   * proactive outbound through the Kapso Meta Cloud API extension. Default keeps
+   * Baileys the live transport until the dev-number E2E cutover (slice 4,
+   * principal-gated). Superseded value `twilio-waba` was dropped (ADR 0002).
+   */
+  transport?: "baileys" | "kapso";
 };
 
 export type WhatsAppAccountConfig = {
