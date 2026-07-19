@@ -10,6 +10,13 @@
  * The compliance classifier + the durable opt-out store are REUSED from the
  * B-Twilio-1 rails (one opt-out keyspace across SMS + WhatsApp — a STOP on either
  * channel opts out the same E.164). Only the send is Kapso-specific.
+ *
+ * Compliance recording (opt-out/opt-in persistence) happens inside
+ * `handleInboundCompliance` and is NEVER gated on send-target resolution: a STOP
+ * is recorded even when the sender phone-number-id is unresolved (QG M4) — we
+ * only skip the ack SEND in that case. Send failures are logged, never swallowed
+ * (QG M2); the logged text carries the HTTP status but never a secret (the send
+ * scrubs its error text of the api key).
  */
 
 import type { OpenClawConfig } from "openclaw/plugin-sdk";
@@ -20,7 +27,7 @@ import { buildAgentPeerSessionKey, DEFAULT_AGENT_ID } from "../../../src/routing
 import { handleInboundCompliance, type OptOutStore } from "../../twilio/src/compliance.js";
 import { type ResolvedKapsoConfig } from "./kapso-config.js";
 import { sendKapsoMessage, type KapsoFetch } from "./kapso-send.js";
-import { type KapsoInbound } from "./kapso-webhook.js";
+import { type KapsoInbound, type KapsoLogger } from "./kapso-webhook.js";
 
 const WHATSAPP_CHANNEL_ID = "whatsapp";
 
@@ -32,6 +39,8 @@ export function kapsoInboundAllowed(config: ResolvedKapsoConfig, from: string): 
     case "disabled":
       return false;
     case "allowlist":
+      // `from` is canonical +E164 (normalized at the webhook parse boundary) and
+      // allowFrom entries are +E164-validated — so this compares like-for-like.
       return config.allowFrom.includes(from);
     case "pairing":
       return true;
@@ -48,6 +57,7 @@ export async function guardedSendKapso(params: {
   body: string;
   store: OptOutStore;
   fetchImpl?: KapsoFetch;
+  logger?: KapsoLogger;
 }): Promise<{ ok: boolean } | SuppressedSend> {
   let optedOut: boolean;
   try {
@@ -63,6 +73,13 @@ export async function guardedSendKapso(params: {
     body: params.body,
     fetchImpl: params.fetchImpl,
   });
+  if (!r.ok) {
+    // QG M2: never swallow a send failure. Status only — the send guarantees its
+    // error text carries no api key.
+    params.logger?.warn?.(
+      `kapso: agent-reply send failed (status ${r.status ?? "n/a"}): ${r.error}`,
+    );
+  }
   return { ok: r.ok };
 }
 
@@ -73,6 +90,7 @@ export function createKapsoReplyDeliver(params: {
   to: string;
   store: OptOutStore;
   fetchImpl?: KapsoFetch;
+  logger?: KapsoLogger;
 }) {
   return async (payload: ReplyPayload): Promise<void> => {
     const text = payload.text?.trim();
@@ -87,6 +105,7 @@ export type RouteKapsoParams = {
   phoneNumberId: string;
   store: OptOutStore;
   fetchImpl?: KapsoFetch;
+  logger?: KapsoLogger;
 };
 
 export async function routeKapsoInboundToAgent(params: RouteKapsoParams): Promise<void> {
@@ -115,12 +134,24 @@ export async function routeKapsoInboundToAgent(params: RouteKapsoParams): Promis
         to: params.inbound.from,
         store: params.store,
         fetchImpl: params.fetchImpl,
+        logger: params.logger,
       }),
     },
   });
 }
 
-export type HandleKapsoInboundDeps = RouteKapsoParams & {
+export type HandleKapsoInboundDeps = {
+  inbound: KapsoInbound;
+  cfg: OpenClawConfig;
+  config: ResolvedKapsoConfig;
+  /**
+   * Resolved sender phone-number-id, or null when it could not be derived.
+   * Compliance is still recorded when null (QG M4); only the SEND is skipped.
+   */
+  phoneNumberId: string | null;
+  store: OptOutStore;
+  fetchImpl?: KapsoFetch;
+  logger?: KapsoLogger;
   dispatch?: (params: RouteKapsoParams) => Promise<void>;
 };
 
@@ -128,29 +159,60 @@ export type HandleKapsoInboundDeps = RouteKapsoParams & {
 export async function handleKapsoInbound(
   deps: HandleKapsoInboundDeps,
 ): Promise<KapsoInboundOutcome> {
+  // Compliance runs (and PERSISTS opt-out/opt-in) before anything else — including
+  // before send-target resolution. A STOP is recorded even if we can't ack it.
   const outcome = await handleInboundCompliance(deps.inbound.from, deps.inbound.body, deps.store);
   if (outcome.kind !== "passthrough") {
-    // UNGUARDED mandated ack — must reach the recipient despite a just-recorded opt-out.
-    await sendKapsoMessage({
-      config: deps.config,
-      phoneNumberId: deps.phoneNumberId,
-      to: deps.inbound.from,
-      body: outcome.reply,
-      fetchImpl: deps.fetchImpl,
-    });
+    if (deps.phoneNumberId) {
+      // UNGUARDED mandated ack — must reach the recipient despite a just-recorded opt-out.
+      const r = await sendKapsoMessage({
+        config: deps.config,
+        phoneNumberId: deps.phoneNumberId,
+        to: deps.inbound.from,
+        body: outcome.reply,
+        fetchImpl: deps.fetchImpl,
+      });
+      if (!r.ok) {
+        // QG M2: the mandated STOP/HELP/START ack failing is operationally important — log it.
+        deps.logger?.error?.(
+          `kapso: mandated '${outcome.kind}' compliance ack send failed (status ${r.status ?? "n/a"}): ${r.error}`,
+        );
+      }
+    } else {
+      // QG M4: opt-out already recorded; we simply cannot send the ack right now.
+      deps.logger?.warn?.(
+        `kapso: '${outcome.kind}' compliance recorded but ack NOT sent — phone-number-id unresolved`,
+      );
+    }
     return outcome.kind;
   }
 
   if (!kapsoInboundAllowed(deps.config, deps.inbound.from)) return "blocked";
 
+  if (!deps.phoneNumberId) {
+    // No sender resolvable → an agent reply could never be delivered; don't run it.
+    deps.logger?.warn?.(
+      "kapso: inbound allowed but phone-number-id unresolved — agent dispatch skipped",
+    );
+    return "blocked";
+  }
+
   const dispatch = deps.dispatch ?? routeKapsoInboundToAgent;
-  await dispatch({
-    inbound: deps.inbound,
-    cfg: deps.cfg,
-    config: deps.config,
-    phoneNumberId: deps.phoneNumberId,
-    store: deps.store,
-    fetchImpl: deps.fetchImpl,
-  });
+  try {
+    await dispatch({
+      inbound: deps.inbound,
+      cfg: deps.cfg,
+      config: deps.config,
+      phoneNumberId: deps.phoneNumberId,
+      store: deps.store,
+      fetchImpl: deps.fetchImpl,
+      logger: deps.logger,
+    });
+  } catch (err) {
+    // Agent dispatch is NOT compliance-critical: swallow-and-log so the webhook
+    // still 200s (a poison message must not drive infinite Meta redelivery). Only
+    // the compliance-store write above is allowed to propagate → webhook 5xx/retry.
+    deps.logger?.error?.(`kapso: agent dispatch failed: ${String(err)}`);
+  }
   return "agent";
 }

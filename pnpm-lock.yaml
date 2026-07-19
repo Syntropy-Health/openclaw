@@ -367,6 +367,19 @@ importers:
         specifier: workspace:*
         version: link:../..
 
+  extensions/kapso:
+    dependencies:
+      '@openclaw/twilio':
+        specifier: workspace:*
+        version: link:../twilio
+      postgres:
+        specifier: ^3.4.5
+        version: 3.4.8
+    devDependencies:
+      openclaw:
+        specifier: workspace:*
+        version: link:../..
+
   extensions/line:
     devDependencies:
       openclaw:

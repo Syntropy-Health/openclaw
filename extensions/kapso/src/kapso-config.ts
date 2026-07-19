@@ -3,7 +3,8 @@
  * WhatsApp Cloud API via Kapso (ADR 0002).
  *
  * Kapso is a thin layer over Meta's official WhatsApp Cloud API:
- *  - REST send authenticates with the **project API key** (Bearer) against the
+ *  - REST send authenticates with the **project API key** in the `X-API-Key`
+ *    header (Kapso's Meta-proxy auth — NOT `Authorization: Bearer`) against the
  *    Kapso base URL, posting to `{baseUrl}/{phoneNumberId}/messages`.
  *  - Inbound webhook validation (slice 2) uses the **app secret** as the HMAC key
  *    for the standard Meta `x-hub-signature-256` header — the one place the app

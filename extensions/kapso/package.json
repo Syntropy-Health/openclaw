@@ -4,6 +4,10 @@
   "private": true,
   "description": "WhatsApp transport via Kapso (Meta WhatsApp Cloud API) — signed inbound webhook, TCPA opt-out rail (reuses the B-Twilio-1 rails)",
   "type": "module",
+  "dependencies": {
+    "@openclaw/twilio": "workspace:*",
+    "postgres": "^3.4.5"
+  },
   "devDependencies": {
     "openclaw": "workspace:*"
   },

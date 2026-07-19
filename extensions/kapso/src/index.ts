@@ -13,23 +13,71 @@
  * the enum landing.
  */
 
-import type { OpenClawPluginApi } from "openclaw/plugin-sdk";
+import type { OpenClawConfig, OpenClawPluginApi } from "openclaw/plugin-sdk";
 import { type OptOutStore } from "../../twilio/src/compliance.js";
 import { asSqlTag, createSmsPgClient, type SmsPgClient } from "../../twilio/src/db.js";
 import { createPgOptOutStore, ensureOptOutSchema } from "../../twilio/src/optout-store.js";
-import { resolveKapsoConfig } from "./kapso-config.js";
-import { handleKapsoInbound } from "./kapso-inbound.js";
+import { type ResolvedKapsoConfig, resolveKapsoConfig } from "./kapso-config.js";
+import { handleKapsoInbound, type RouteKapsoParams } from "./kapso-inbound.js";
 import { resolveKapsoPhoneNumberId } from "./kapso-phone.js";
-import { createKapsoWebhookHandler } from "./kapso-webhook.js";
+import { type KapsoFetch } from "./kapso-send.js";
+import { createKapsoWebhookHandler, type KapsoInbound, type KapsoLogger } from "./kapso-webhook.js";
 
-/** Fail-closed store — throws on read so a missing DB suppresses all guarded sends. */
-const FAIL_CLOSED_STORE: OptOutStore = {
-  isOptedOut: () => {
-    throw new Error("kapso opt-out store unavailable");
-  },
-  optOut: () => {},
-  optIn: () => {},
-};
+/**
+ * Fail-closed store — throws on READ so a missing DB suppresses all guarded sends.
+ * The writes are no-ops (there is nowhere to persist), but they LOG so a dropped
+ * compliance write is observable rather than silent (review finding). Safe in
+ * aggregate only because the throwing read suppresses every send fail-closed.
+ */
+export function makeFailClosedStore(logger?: KapsoLogger): OptOutStore {
+  return {
+    isOptedOut: () => {
+      throw new Error("kapso opt-out store unavailable");
+    },
+    optOut: () =>
+      logger?.error?.("kapso: opt-out NOT persisted — store unavailable (no DATABASE_URL)"),
+    optIn: () =>
+      logger?.warn?.("kapso: opt-in NOT persisted — store unavailable (no DATABASE_URL)"),
+  };
+}
+
+/** No-logger fail-closed store — the throwing-read contract the guarded send relies on. */
+export const FAIL_CLOSED_STORE: OptOutStore = makeFailClosedStore();
+
+/**
+ * The `onInbound` composition, extracted so the QG-M4 wiring (a null
+ * phone-number-id must NOT early-return before compliance) is directly testable
+ * without a live gateway. Resolves config + send-target per message, then hands
+ * off to the compliance-first handler.
+ */
+export function createKapsoOnInbound(deps: {
+  resolveConfig: () => ResolvedKapsoConfig | null;
+  resolvePhoneNumberId: () => Promise<string | null>;
+  store: OptOutStore;
+  cfg: OpenClawConfig;
+  logger?: KapsoLogger;
+  fetchImpl?: KapsoFetch;
+  dispatch?: (params: RouteKapsoParams) => Promise<void>;
+}): (inbound: KapsoInbound) => Promise<void> {
+  return async (inbound) => {
+    const config = deps.resolveConfig();
+    if (!config) return;
+    // QG M4: resolve the send target but DO NOT early-return on null — a null
+    // phone-number-id must not drop a STOP. handleKapsoInbound records compliance
+    // regardless and only skips the (unsendable) ack.
+    const phoneNumberId = await deps.resolvePhoneNumberId();
+    await handleKapsoInbound({
+      inbound,
+      cfg: deps.cfg,
+      config,
+      phoneNumberId,
+      store: deps.store,
+      logger: deps.logger,
+      fetchImpl: deps.fetchImpl,
+      dispatch: deps.dispatch,
+    });
+  };
+}
 
 const kapsoWhatsappPlugin = {
   id: "kapso",
@@ -41,7 +89,7 @@ const kapsoWhatsappPlugin = {
     // Durable opt-out store — REUSE the B-Twilio-1 pg store (ADR 0001: OpenClaw's own DB).
     const databaseUrl =
       (api.pluginConfig?.databaseUrl as string | undefined) ?? process.env.DATABASE_URL ?? "";
-    let store: OptOutStore = FAIL_CLOSED_STORE;
+    let store: OptOutStore = makeFailClosedStore(api.logger);
     let sql: SmsPgClient | null = null;
     if (databaseUrl) {
       sql = createSmsPgClient(databaseUrl);
@@ -66,23 +114,25 @@ const kapsoWhatsappPlugin = {
       return cachedPhoneNumberId;
     }
 
+    // QG M3 (coupling — deferred to slice-3b, B-Kapso slice 3b): once the `transport`
+    // enum lands on the CORE whatsapp channel, the onInbound composition must
+    // short-circuit unless transport==="kapso", so Kapso creds + an active
+    // Baileys/WABA transport can't both drive inbound on the same `whatsapp` session
+    // namespace. The core whatsapp transport-selection site (where the enum is read)
+    // MUST mirror this gate. Latent today (enum not yet on main); credential-presence
+    // is the only gate for now.
     api.registerHttpRoute({
       path: "/kapso/whatsapp",
       handler: createKapsoWebhookHandler({
         resolveConfig: () => resolveKapsoConfig(undefined, process.env),
-        onInbound: async (inbound) => {
-          const config = resolveKapsoConfig(undefined, process.env);
-          if (!config) return;
-          const pnid = await phoneNumberId();
-          if (!pnid) return; // no send target resolvable → drop (channel effectively inert)
-          await handleKapsoInbound({
-            inbound,
-            cfg: api.config,
-            config,
-            phoneNumberId: pnid,
-            store,
-          });
-        },
+        logger: api.logger,
+        onInbound: createKapsoOnInbound({
+          resolveConfig: () => resolveKapsoConfig(undefined, process.env),
+          resolvePhoneNumberId: phoneNumberId,
+          store,
+          cfg: api.config,
+          logger: api.logger,
+        }),
       }),
     });
 
