@@ -1,6 +1,13 @@
 export { createAccountListHelpers } from "../channels/plugins/account-helpers.js";
 export { CHANNEL_MESSAGE_ACTION_NAMES } from "../channels/plugins/message-action-names.js";
 export {
+  clearWhatsAppOutboundTransports,
+  registerWhatsAppOutboundTransport,
+  selectWhatsAppOutboundTransport,
+  WhatsAppTransportUnavailableError,
+  type WhatsAppOutboundTransport,
+} from "../channels/plugins/outbound/whatsapp-transport.js";
+export {
   BLUEBUBBLES_ACTIONS,
   BLUEBUBBLES_ACTION_NAMES,
   BLUEBUBBLES_GROUP_ACTIONS,
