@@ -1,5 +1,10 @@
 {
   "id": "kapso",
+  "configSchema": {
+    "type": "object",
+    "additionalProperties": true,
+    "properties": {}
+  },
   "uiHints": {
     "apiKey": {
       "label": "Kapso API Key",

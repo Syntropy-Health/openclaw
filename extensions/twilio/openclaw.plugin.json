@@ -1,5 +1,10 @@
 {
   "id": "twilio",
+  "configSchema": {
+    "type": "object",
+    "additionalProperties": true,
+    "properties": {}
+  },
   "uiHints": {
     "accountSid": {
       "label": "Twilio Subaccount SID",
