@@ -30,6 +30,10 @@ function memStore(seed: string[] = []): OptOutStore & { set: Set<string> } {
   };
 }
 
+const KAPSO_CFG = {
+  channels: { whatsapp: { transport: "kapso" } },
+} as unknown as OpenClawConfig;
+
 describe("createKapsoOnInbound — QG-M4 wiring (the actual regression site)", () => {
   it("★ a null phone-number-id does NOT drop a STOP — compliance is recorded, dispatch not called", async () => {
     const store = memStore();
@@ -38,13 +42,43 @@ describe("createKapsoOnInbound — QG-M4 wiring (the actual regression site)", (
       resolveConfig: () => RESOLVED,
       resolvePhoneNumberId: async () => null, // send target unresolved
       store,
-      cfg: {} as OpenClawConfig,
+      cfg: KAPSO_CFG,
       logger: { warn: () => {}, error: () => {} },
       dispatch,
     });
     await onInbound({ from: "+15557654321", body: "STOP" });
     expect(store.set.has("+15557654321")).toBe(true); // NOT dropped despite null pnid
     expect(dispatch).not.toHaveBeenCalled();
+  });
+
+  it("★ QG-M3 gate: inbound is a NO-OP when whatsapp transport is not 'kapso'", async () => {
+    const store = memStore();
+    const dispatch = vi.fn(async () => {});
+    const onInbound = createKapsoOnInbound({
+      resolveConfig: () => RESOLVED,
+      resolvePhoneNumberId: async () => "PN_1",
+      store,
+      cfg: { channels: { whatsapp: { transport: "baileys" } } } as unknown as OpenClawConfig,
+      logger: { info: () => {} },
+      dispatch,
+    });
+    await onInbound({ from: "+15557654321", body: "STOP" });
+    expect(store.set.size).toBe(0); // gated out — not processed
+    expect(dispatch).not.toHaveBeenCalled();
+  });
+
+  it("QG-M3 gate: inbound is a NO-OP when transport is OMITTED (undefined ≠ kapso)", async () => {
+    const store = memStore();
+    const onInbound = createKapsoOnInbound({
+      resolveConfig: () => RESOLVED,
+      resolvePhoneNumberId: async () => "PN_1",
+      store,
+      cfg: {} as OpenClawConfig, // no channels.whatsapp.transport
+      logger: { info: () => {} },
+      dispatch: vi.fn(async () => {}),
+    });
+    await onInbound({ from: "+15557654321", body: "STOP" });
+    expect(store.set.size).toBe(0);
   });
 
   it("an inert config (resolveConfig → null) is a silent no-op", async () => {

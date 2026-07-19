@@ -1,5 +1,9 @@
-import type { OpenClawConfig } from "openclaw/plugin-sdk";
-import { describe, it, expect, vi, beforeEach } from "vitest";
+import {
+  clearWhatsAppOutboundTransports,
+  type OpenClawConfig,
+  registerWhatsAppOutboundTransport,
+} from "openclaw/plugin-sdk";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { whatsappPlugin } from "./channel.js";
 
 // Mock runtime
@@ -57,5 +61,68 @@ describe("whatsappPlugin.outbound.sendText", () => {
         linkPreview: undefined,
       }),
     );
+  });
+});
+
+describe("whatsappPlugin.outbound.sendText — transport selection (B-Kapso slice 3b)", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    clearWhatsAppOutboundTransports();
+  });
+  afterEach(() => clearWhatsAppOutboundTransports());
+
+  const kapsoCfg = {
+    channels: { whatsapp: { transport: "kapso" } },
+  } as unknown as OpenClawConfig;
+
+  it("★ RUNTIME adapter routes to the registered kapso transport, NOT Baileys", async () => {
+    const kapso = vi.fn(async () => ({ channel: "whatsapp" as const, messageId: "kapso-1" }));
+    registerWhatsAppOutboundTransport("kapso", kapso);
+    const res = await whatsappPlugin.outbound!.sendText!({
+      cfg: kapsoCfg,
+      to: "15557654321@s.whatsapp.net",
+      text: "nudge",
+    });
+    expect(kapso).toHaveBeenCalledTimes(1);
+    expect(mockSendMessageWhatsApp).not.toHaveBeenCalled();
+    expect(res.messageId).toBe("kapso-1");
+  });
+
+  it("★ RUNTIME adapter uses Baileys on the default transport — unchanged", async () => {
+    const kapso = vi.fn(async () => ({ channel: "whatsapp" as const, messageId: "kapso-1" }));
+    registerWhatsAppOutboundTransport("kapso", kapso);
+    await whatsappPlugin.outbound!.sendText!({
+      cfg: {} as OpenClawConfig, // default → baileys
+      to: "1234567890",
+      text: "hello",
+    });
+    expect(mockSendMessageWhatsApp).toHaveBeenCalledTimes(1);
+    expect(kapso).not.toHaveBeenCalled();
+  });
+
+  it("★ RUNTIME adapter FAILS CLOSED when kapso selected but unregistered (no silent Baileys)", async () => {
+    await expect(
+      whatsappPlugin.outbound!.sendText!({
+        cfg: kapsoCfg,
+        to: "15557654321@s.whatsapp.net",
+        text: "nudge",
+      }),
+    ).rejects.toThrow(/no provider is registered/);
+    expect(mockSendMessageWhatsApp).not.toHaveBeenCalled();
+  });
+
+  it("sendMedia is NOT transport-routed in slice 3b (text-only) — still Baileys even in kapso mode", async () => {
+    // Pins the deliberate slice-3b boundary: Kapso v1 is text-only, so media stays
+    // on Baileys. Slice-4's cutover checklist must revisit media/poll parity.
+    const kapso = vi.fn(async () => ({ channel: "whatsapp" as const, messageId: "kapso-1" }));
+    registerWhatsAppOutboundTransport("kapso", kapso);
+    await whatsappPlugin.outbound!.sendMedia!({
+      cfg: kapsoCfg,
+      to: "15557654321@s.whatsapp.net",
+      text: "caption",
+      mediaUrl: "https://example.com/a.jpg",
+    });
+    expect(mockSendMessageWhatsApp).toHaveBeenCalledTimes(1);
+    expect(kapso).not.toHaveBeenCalled();
   });
 });

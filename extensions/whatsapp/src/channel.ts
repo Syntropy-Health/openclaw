@@ -19,6 +19,7 @@ import {
   readStringParam,
   resolveDefaultWhatsAppAccountId,
   resolveWhatsAppOutboundTarget,
+  selectWhatsAppOutboundTransport,
   resolveWhatsAppAccount,
   resolveWhatsAppGroupRequireMention,
   resolveWhatsAppGroupToolPolicy,
@@ -291,6 +292,14 @@ export const whatsappPlugin: ChannelPlugin<ResolvedWhatsAppAccount> = {
     resolveTarget: ({ to, allowFrom, mode }) =>
       resolveWhatsAppOutboundTarget({ to, allowFrom, mode }),
     sendText: async (params) => {
+      // B-Kapso slice 3b: route the TEXT send through a registered alternate
+      // transport (kapso) when channels.whatsapp.transport selects it; null
+      // (default baileys) → the unchanged Baileys path below. Throws fail-closed
+      // if a non-baileys transport is selected but unregistered.
+      const viaTransport = selectWhatsAppOutboundTransport(params.cfg);
+      if (viaTransport) {
+        return viaTransport(params);
+      }
       const { to, text, accountId, deps, gifPlayback } = params;
       const linkPreview = (params as { linkPreview?: boolean }).linkPreview;
       const send = deps?.sendWhatsApp ?? getWhatsAppRuntime().channel.whatsapp.sendMessageWhatsApp;
