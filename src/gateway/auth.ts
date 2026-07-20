@@ -317,6 +317,33 @@ function resolveClerkAuth(
 }
 
 /**
+ * Boot-assert (G-lane [G3], A&D §7 should-fix ii): the three Clerk gateway settings
+ * (OPENCLAW_CLERK_JWKS_URL / _ISSUER / _AUDIENCE, or gateway.auth.clerk.*) must be
+ * ALL-set or ALL-unset. A PARTIAL config (1 or 2 of 3) silently collapses to
+ * "unconfigured" in {@link resolveClerkAuth} → Clerk verification is disabled →
+ * the clerk-jwt-mode `shrinemobile` channel net-401s by absence, masking a real
+ * operator misconfig. Fail boot LOUDLY instead of silent-disable. Zero-configured
+ * (Clerk off) and fully-configured (Clerk on) both pass.
+ */
+export function assertClerkConfigAllOrNone(
+  clerkConfig: GatewayAuthConfig["clerk"],
+  env: NodeJS.ProcessEnv,
+): void {
+  const present = [
+    (clerkConfig?.jwksUrl ?? env.OPENCLAW_CLERK_JWKS_URL ?? "").trim(),
+    (clerkConfig?.issuer ?? env.OPENCLAW_CLERK_ISSUER ?? "").trim(),
+    (clerkConfig?.audience ?? env.OPENCLAW_CLERK_AUDIENCE ?? "").trim(),
+  ].filter(Boolean).length;
+  if (present !== 0 && present !== 3) {
+    throw new Error(
+      "Clerk gateway auth is partially configured: set ALL of OPENCLAW_CLERK_JWKS_URL, " +
+        "OPENCLAW_CLERK_ISSUER, OPENCLAW_CLERK_AUDIENCE (or gateway.auth.clerk.{jwksUrl,issuer,audience}) " +
+        "— or NONE. A partial config silently disables Clerk verification (fail-closed → 401 on the mobile channel).",
+    );
+  }
+}
+
+/**
  * Whether a bearer token is JWS-shaped (exactly three non-empty dot segments).
  * Used to decide if the chat path should attempt Clerk verification — a
  * non-JWS bearer (e.g. the legacy shared secret) is NOT a failed Clerk attempt.
