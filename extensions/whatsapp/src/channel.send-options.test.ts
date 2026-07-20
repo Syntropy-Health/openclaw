@@ -1,9 +1,10 @@
-import {
-  clearWhatsAppOutboundTransports,
-  type OpenClawConfig,
-  registerWhatsAppOutboundTransport,
-} from "openclaw/plugin-sdk";
+import { type ChannelOutboundTransport, type OpenClawConfig } from "openclaw/plugin-sdk";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+// Registry test-harness helpers are deliberately NOT on the public plugin-sdk
+// (setActivePluginRegistry swaps the whole registry — a production footgun); a
+// test may deep-import them directly.
+import { createEmptyPluginRegistry } from "../../../src/plugins/registry.js";
+import { getActivePluginRegistry, setActivePluginRegistry } from "../../../src/plugins/runtime.js";
 import { whatsappPlugin } from "./channel.js";
 
 // Mock runtime
@@ -64,20 +65,34 @@ describe("whatsappPlugin.outbound.sendText", () => {
   });
 });
 
-describe("whatsappPlugin.outbound.sendText — transport selection (B-Kapso slice 3b)", () => {
+describe("whatsappPlugin.outbound.sendText — transport selection (B-Kapso, registry-backed)", () => {
+  let saved: ReturnType<typeof getActivePluginRegistry>;
   beforeEach(() => {
     vi.clearAllMocks();
-    clearWhatsAppOutboundTransports();
+    saved = getActivePluginRegistry();
+    setActivePluginRegistry(createEmptyPluginRegistry());
   });
-  afterEach(() => clearWhatsAppOutboundTransports());
+  afterEach(() => setActivePluginRegistry(saved ?? createEmptyPluginRegistry()));
 
   const kapsoCfg = {
     channels: { whatsapp: { transport: "kapso" } },
   } as unknown as OpenClawConfig;
 
+  function registerKapso(send: ChannelOutboundTransport) {
+    const reg = createEmptyPluginRegistry();
+    reg.channelTransports.push({
+      pluginId: "kapso",
+      channel: "whatsapp",
+      transport: "kapso",
+      send,
+      source: "test",
+    });
+    setActivePluginRegistry(reg);
+  }
+
   it("★ RUNTIME adapter routes to the registered kapso transport, NOT Baileys", async () => {
     const kapso = vi.fn(async () => ({ channel: "whatsapp" as const, messageId: "kapso-1" }));
-    registerWhatsAppOutboundTransport("kapso", kapso);
+    registerKapso(kapso);
     const res = await whatsappPlugin.outbound!.sendText!({
       cfg: kapsoCfg,
       to: "15557654321@s.whatsapp.net",
@@ -90,7 +105,7 @@ describe("whatsappPlugin.outbound.sendText — transport selection (B-Kapso slic
 
   it("★ RUNTIME adapter uses Baileys on the default transport — unchanged", async () => {
     const kapso = vi.fn(async () => ({ channel: "whatsapp" as const, messageId: "kapso-1" }));
-    registerWhatsAppOutboundTransport("kapso", kapso);
+    registerKapso(kapso);
     await whatsappPlugin.outbound!.sendText!({
       cfg: {} as OpenClawConfig, // default → baileys
       to: "1234567890",
@@ -115,7 +130,7 @@ describe("whatsappPlugin.outbound.sendText — transport selection (B-Kapso slic
     // Pins the deliberate slice-3b boundary: Kapso v1 is text-only, so media stays
     // on Baileys. Slice-4's cutover checklist must revisit media/poll parity.
     const kapso = vi.fn(async () => ({ channel: "whatsapp" as const, messageId: "kapso-1" }));
-    registerWhatsAppOutboundTransport("kapso", kapso);
+    registerKapso(kapso);
     await whatsappPlugin.outbound!.sendMedia!({
       cfg: kapsoCfg,
       to: "15557654321@s.whatsapp.net",

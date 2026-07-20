@@ -122,6 +122,7 @@ const createRegistry = (channels: PluginRegistry["channels"]): PluginRegistry =>
   plugins: [],
   tools: [],
   channels,
+  channelTransports: [],
   providers: [],
   gatewayHandlers: {},
   httpHandlers: [],

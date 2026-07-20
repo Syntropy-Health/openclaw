@@ -14,11 +14,10 @@
  */
 
 import {
+  type ChannelOutboundTransport,
   normalizeE164,
   type OpenClawConfig,
   type OpenClawPluginApi,
-  registerWhatsAppOutboundTransport,
-  type WhatsAppOutboundTransport,
 } from "openclaw/plugin-sdk";
 import { type OptOutStore } from "../../twilio/src/compliance.js";
 import { asSqlTag, createSmsPgClient, type SmsPgClient } from "../../twilio/src/db.js";
@@ -81,7 +80,7 @@ export function createKapsoOutboundTransport(deps: {
   store: OptOutStore;
   logger?: KapsoLogger;
   fetchImpl?: KapsoFetch;
-}): WhatsAppOutboundTransport {
+}): ChannelOutboundTransport {
   return async (ctx) => {
     const config = deps.resolveConfig();
     if (!config) throw new Error("kapso transport: config unavailable (credentials incomplete)");
@@ -213,16 +212,16 @@ const kapsoWhatsappPlugin = {
     // never receive a proactive WhatsApp message — TCPA); fail-closed if the store
     // is down. WhatsApp targets are JIDs (…@s.whatsapp.net) → normalized to +E164
     // (the shared opt-out + Cloud API keyspace).
-    registerWhatsAppOutboundTransport(
-      "kapso",
-      createKapsoOutboundTransport({
+    api.registerChannelTransport({
+      channel: "whatsapp",
+      transport: "kapso",
+      send: createKapsoOutboundTransport({
         resolveConfig: () => resolveKapsoConfig(undefined, process.env),
         resolvePhoneNumberId: phoneNumberId,
         store,
         logger: api.logger,
       }),
-      api.logger,
-    );
+    });
 
     // QG M3 (coupling) — INBOUND gate mirrors the outbound selection: createKapsoOnInbound
     // short-circuits unless channels.whatsapp.transport === "kapso", so Kapso creds + an

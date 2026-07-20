@@ -70,6 +70,7 @@ const createStubPluginRegistry = (): PluginRegistry => ({
   tools: [],
   hooks: [],
   typedHooks: [],
+  channelTransports: [],
   channels: [
     {
       pluginId: "whatsapp",

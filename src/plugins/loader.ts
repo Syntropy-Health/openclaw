@@ -161,6 +161,7 @@ function createPluginRecord(params: {
     toolNames: [],
     hookNames: [],
     channelIds: [],
+    channelTransports: [],
     providerIds: [],
     gatewayMethods: [],
     cliCommands: [],

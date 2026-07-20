@@ -90,6 +90,15 @@ export type ChannelOutboundPayloadContext = ChannelOutboundContext & {
   payload: ReplyPayload;
 };
 
+/**
+ * An alternate outbound send registered by an extension for a channel+transport
+ * (e.g. whatsapp/kapso), same contract as the adapter's `sendText`. Selected by
+ * the core outbound adapter via the plugin registry (see registerChannelTransport).
+ */
+export type ChannelOutboundTransport = (
+  ctx: ChannelOutboundContext,
+) => Promise<OutboundDeliveryResult>;
+
 export type ChannelOutboundAdapter = {
   deliveryMode: "direct" | "gateway" | "hybrid";
   chunker?: ((text: string, limit: number) => string[]) | null;

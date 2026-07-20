@@ -1,6 +1,7 @@
 import path from "node:path";
 import type { AnyAgentTool } from "../agents/tools/common.js";
 import type { ChannelDock } from "../channels/dock.js";
+import type { ChannelOutboundTransport } from "../channels/plugins/types.adapters.js";
 import type { ChannelPlugin } from "../channels/plugins/types.js";
 import type {
   GatewayRequestHandler,
@@ -15,6 +16,7 @@ import type { PluginRuntime } from "./runtime/types.js";
 import type {
   OpenClawPluginApi,
   OpenClawPluginChannelRegistration,
+  OpenClawPluginChannelTransportRegistration,
   OpenClawPluginCliRegistrar,
   OpenClawPluginCommandDefinition,
   OpenClawPluginHttpHandler,
@@ -69,6 +71,14 @@ export type PluginChannelRegistration = {
   source: string;
 };
 
+export type PluginChannelTransportRegistration = {
+  pluginId: string;
+  channel: string;
+  transport: string;
+  send: ChannelOutboundTransport;
+  source: string;
+};
+
 export type PluginProviderRegistration = {
   pluginId: string;
   provider: ProviderPlugin;
@@ -109,6 +119,7 @@ export type PluginRecord = {
   toolNames: string[];
   hookNames: string[];
   channelIds: string[];
+  channelTransports: string[];
   providerIds: string[];
   gatewayMethods: string[];
   cliCommands: string[];
@@ -127,6 +138,7 @@ export type PluginRegistry = {
   hooks: PluginHookRegistration[];
   typedHooks: TypedPluginHookRegistration[];
   channels: PluginChannelRegistration[];
+  channelTransports: PluginChannelTransportRegistration[];
   providers: PluginProviderRegistration[];
   gatewayHandlers: GatewayRequestHandlers;
   httpHandlers: PluginHttpRegistration[];
@@ -150,6 +162,7 @@ export function createEmptyPluginRegistry(): PluginRegistry {
     hooks: [],
     typedHooks: [],
     channels: [],
+    channelTransports: [],
     providers: [],
     gatewayHandlers: {},
     httpHandlers: [],
@@ -386,6 +399,48 @@ export function createPluginRegistry(registryParams: PluginRegistryParams) {
     });
   };
 
+  const registerChannelTransport = (
+    record: PluginRecord,
+    registration: OpenClawPluginChannelTransportRegistration,
+  ) => {
+    const channel = typeof registration?.channel === "string" ? registration.channel.trim() : "";
+    const transport =
+      typeof registration?.transport === "string" ? registration.transport.trim() : "";
+    if (!channel || !transport || typeof registration?.send !== "function") {
+      pushDiagnostic({
+        level: "error",
+        pluginId: record.id,
+        source: record.source,
+        message: "channel transport registration requires channel, transport, and send",
+      });
+      return;
+    }
+    const existing = registry.channelTransports.find(
+      (entry) => entry.channel === channel && entry.transport === transport,
+    );
+    if (existing) {
+      // FIRST-WINS reject (mirrors registerProvider / registerHttpRoute): a second
+      // plugin claiming the same channel/transport must NOT silently override the
+      // first plugin's (opt-out-guarded) send. Reload rebuilds a fresh registry, so
+      // an in-pass duplicate is a genuine collision, not a re-register.
+      pushDiagnostic({
+        level: "error",
+        pluginId: record.id,
+        source: record.source,
+        message: `channel transport already registered: ${channel}/${transport} (${existing.pluginId})`,
+      });
+      return;
+    }
+    record.channelTransports.push(`${channel}/${transport}`);
+    registry.channelTransports.push({
+      pluginId: record.id,
+      channel,
+      transport,
+      send: registration.send,
+      source: record.source,
+    });
+  };
+
   const registerCli = (
     record: PluginRecord,
     registrar: OpenClawPluginCliRegistrar,
@@ -492,6 +547,7 @@ export function createPluginRegistry(registryParams: PluginRegistryParams) {
       registerHttpHandler: (handler) => registerHttpHandler(record, handler),
       registerHttpRoute: (params) => registerHttpRoute(record, params),
       registerChannel: (registration) => registerChannel(record, registration),
+      registerChannelTransport: (registration) => registerChannelTransport(record, registration),
       registerProvider: (provider) => registerProvider(record, provider),
       registerGatewayMethod: (method, handler) => registerGatewayMethod(record, method, handler),
       registerCli: (registrar, opts) => registerCli(record, registrar, opts),
