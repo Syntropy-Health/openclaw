@@ -877,6 +877,7 @@ export async function runEmbeddedAttempt(
                     messageProvider: params.messageProvider ?? undefined,
                     senderE164: params.senderE164,
                     externalId: params.externalId,
+                    deviceId: params.deviceId,
                   },
                 )
                 .catch((hookErr: unknown) => {
@@ -1127,6 +1128,7 @@ export async function runEmbeddedAttempt(
                 messageProvider: params.messageProvider ?? undefined,
                 senderE164: params.senderE164,
                 externalId: params.externalId,
+                deviceId: params.deviceId,
               },
             )
             .catch((err) => {

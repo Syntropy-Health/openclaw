@@ -339,6 +339,15 @@ export type PluginHookAgentContext = {
    * the same graph as the same person on other channels (#834/#836).
    */
   externalId?: string | null;
+  /**
+   * The caller's stable device identifier (the `X-OpenClaw-Device-Id` header —
+   * shrinemobile's install-UUID); null/absent when the caller sent none. Like
+   * `senderE164`/`externalId`, threaded on ctx because the session key is NOT a
+   * reliable peer source (it partitions by user scope, not device). The
+   * identity extensions use it as the canonical `channel_peer_id` for the
+   * mobile channel (G-lane [G1] auto-bind / [G2] unbind — A&D §7).
+   */
+  deviceId?: string | null;
 };
 
 // before_agent_start hook

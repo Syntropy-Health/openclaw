@@ -48,6 +48,8 @@ export type RunEmbeddedPiAgentParams = {
    * (#834/#836).
    */
   externalId?: string | null;
+  /** Stable device id (X-OpenClaw-Device-Id) — the mobile channel peer (G-lane [G1]). */
+  deviceId?: string | null;
   /** Whether the sender is an owner (required for owner-only tools). */
   senderIsOwner?: boolean;
   /** Current channel ID for auto-threading (Slack). */

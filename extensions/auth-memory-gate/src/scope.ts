@@ -38,7 +38,7 @@ type IdentityRow = {
 // persist-user-identity, syntropy, and this extension — and so existing
 // importers of `deriveChannel`/`derivePeerId` from "./scope.js" (index.ts,
 // scope.test.ts) keep working unchanged.
-export { deriveChannel, derivePeerId } from "../../shared/session-key.js";
+export { deriveChannel, deriveIdentityPeer, derivePeerId } from "../../shared/session-key.js";
 
 // ---------------------------------------------------------------------------
 // Identity query — reads from persist-user-identity's lp_users table
@@ -70,6 +70,34 @@ export async function findUserByChannelPeer(
 // ---------------------------------------------------------------------------
 // Scope resolution
 // ---------------------------------------------------------------------------
+
+/**
+ * Cross-check a peer-row identity against the turn's VERIFIED caller identity
+ * (G-lane security review — defense-in-depth for the [G1] auto-bind).
+ *
+ * The peer row is keyed by a CLIENT-supplied device id; cross-user isolation
+ * must NEVER depend on the auto-bind write having succeeded first. On a
+ * verified turn (`ctxExternalId` present — the server-verified Clerk `sub`),
+ * a row whose `external_id` differs is STALE or CONTESTED (e.g. a device id
+ * supplied by a different account while the reconciling bind write failed):
+ * return `null` → the caller treats the peer as UNIDENTIFIED (fail-closed;
+ * the turn is gated rather than keyed onto another user's memory scope).
+ * Unverified turns (no ctxExternalId — channel callers) pass through: their
+ * rows were created by the channel pairing flow, not the auto-bind.
+ */
+export function reconcileVerifiedIdentity(
+  identity: IdentityRow | null,
+  ctxExternalId: string | null | undefined,
+): IdentityRow | null {
+  if (!identity) {
+    return null;
+  }
+  const verifiedSub = ctxExternalId?.trim();
+  if (verifiedSub && identity.external_id !== verifiedSub) {
+    return null;
+  }
+  return identity;
+}
 
 /**
  * Resolve the memory scope for a given session.

@@ -224,6 +224,7 @@ export async function runEmbeddedPiAgent(
               messageProvider: params.messageProvider ?? undefined,
               senderE164: params.senderE164,
               externalId: params.externalId,
+              deviceId: params.deviceId,
             },
           );
           if (earlyHookResult?.providerOverride) {

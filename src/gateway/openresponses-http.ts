@@ -44,6 +44,7 @@ import { sendJson, sendRateLimited, setSseHeaders, writeDone } from "./http-comm
 import { handleGatewayPostJsonEndpoint } from "./http-endpoint-helpers.js";
 import {
   deriveUserScopeFromSub,
+  getHeader,
   resolveAgentIdForRequest,
   resolveChannelFromHeader,
   resolveSessionKey,
@@ -486,6 +487,8 @@ async function runResponsesAgentCommand(params: {
   sessionKey: string;
   /** Verified external caller identity (Clerk JWT `sub`); threaded to memory-graphiti (#834/#836). */
   externalId: string | null;
+  /** Stable device id (X-OpenClaw-Device-Id) — mobile channel peer (G-lane [G1]). */
+  deviceId: string | null;
   runId: string;
   /** Presentation-only channel (allowlisted; defaults to "webchat"). */
   channel?: string;
@@ -500,6 +503,7 @@ async function runResponsesAgentCommand(params: {
       streamParams: params.streamParams ?? undefined,
       sessionKey: params.sessionKey,
       externalId: params.externalId,
+      deviceId: params.deviceId,
       runId: params.runId,
       deliver: false,
       messageChannel: params.channel ?? "webchat",
@@ -668,6 +672,8 @@ export async function handleOpenResponsesHttpRequest(
   // Presentation-only channel (allowlisted). Feeds messageChannel ONLY — never
   // auth/externalId/userScope/sessionKey (A&D §S10). Unknown/absent ⇒ webchat.
   const channel = resolveChannelFromHeader(req) ?? "webchat";
+  // Stable device peer (X-OpenClaw-Device-Id) — mobile channel_peer_id (G-lane [G1]).
+  const deviceId = getHeader(req, "x-openclaw-device-id")?.trim() || null;
 
   // τ-metering (§9): per-user_scope budget. No-op for non-Clerk requests
   // (userScope undefined). On exhaustion → 429 + Retry-After, before any agent
@@ -723,6 +729,7 @@ export async function handleOpenResponsesHttpRequest(
           streamParams,
           sessionKey,
           externalId: handled.externalId ?? null,
+          deviceId,
           runId: responseId,
           channel,
           deps,
@@ -1069,6 +1076,7 @@ export async function handleOpenResponsesHttpRequest(
           streamParams,
           sessionKey,
           externalId: handled.externalId ?? null,
+          deviceId,
           runId: responseId,
           channel,
           deps,

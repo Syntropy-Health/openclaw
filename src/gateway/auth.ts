@@ -12,6 +12,7 @@ import {
   type RateLimitCheckResult,
 } from "./auth-rate-limit.js";
 import { verifyClerkJwt, type VerifyClerkJwtOptions } from "./clerk-jwt.js";
+import { isClerkSessionDenied } from "./clerk-session-denylist.js";
 import {
   isLoopbackAddress,
   isTrustedProxyAddress,
@@ -303,7 +304,7 @@ function parsePositiveIntEnv(raw: string | undefined): number | undefined {
  * otherwise undefined (Clerk verification disabled — legacy path unchanged).
  * Partial config (e.g. JWKS URL but no issuer) is treated as unconfigured.
  */
-function resolveClerkAuth(
+export function resolveClerkAuth(
   clerkConfig: GatewayAuthConfig["clerk"],
   env: NodeJS.ProcessEnv,
 ): ResolvedClerkAuth | undefined {
@@ -355,13 +356,15 @@ export function looksLikeJws(token: string): boolean {
 
 /**
  * Verify a Clerk JWS on the chat path. Fail-closed: any verification failure
- * yields `{ ok: false }`. On success returns the verified `sub` as externalId.
+ * yields `{ ok: false }`. On success returns the verified `sub` as externalId,
+ * plus the Clerk session id (`sid` claim) when present — the revocation handle
+ * for the G-lane [G2b] session deny-list.
  */
 export async function authorizeClerkJwt(
   token: string,
   clerk: ResolvedClerkAuth,
   options?: Pick<VerifyClerkJwtOptions, "now" | "fetchJwks">,
-): Promise<{ ok: true; externalId: string } | { ok: false }> {
+): Promise<{ ok: true; externalId: string; sid?: string } | { ok: false }> {
   const verified = await verifyClerkJwt(token, {
     jwksUrl: clerk.jwksUrl,
     issuer: clerk.issuer,
@@ -372,7 +375,8 @@ export async function authorizeClerkJwt(
   if (!verified) {
     return { ok: false };
   }
-  return { ok: true, externalId: verified.sub };
+  const sid = typeof verified.claims.sid === "string" ? verified.claims.sid : undefined;
+  return { ok: true, externalId: verified.sub, sid };
 }
 
 export function assertGatewayAuthConfigured(auth: ResolvedGatewayAuth): void {
@@ -510,6 +514,13 @@ export async function authorizeGatewayConnect(params: {
       fetchJwks: params.fetchClerkJwks,
     });
     if (clerkResult.ok) {
+      // G-lane [G2b]: a signed-out (revoked) Clerk session is rejected even
+      // while its JWT is still within TTL — a replayed token must never reach
+      // an agent turn (which would re-run the [G1] auto-bind). Fail-closed 401.
+      if (isClerkSessionDenied(clerkResult.sid)) {
+        limiter?.recordFailure(ip, rateLimitScope);
+        return { ok: false, reason: "clerk_session_revoked" };
+      }
       limiter?.reset(ip, rateLimitScope);
       return { ok: true, method: "clerk-jwt", externalId: clerkResult.externalId };
     }

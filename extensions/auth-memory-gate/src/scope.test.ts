@@ -206,3 +206,41 @@ describe("formatHardGateReplyAppend", () => {
     expect(result).toContain("---");
   });
 });
+
+// ---------------------------------------------------------------------------
+// reconcileVerifiedIdentity (G-lane security fix — fail-closed cross-check)
+// ---------------------------------------------------------------------------
+
+describe("reconcileVerifiedIdentity", () => {
+  const row = {
+    id: "uuid-a",
+    external_id: "user_A",
+    first_name: "A",
+    last_name: null,
+    channel: "shrinemobile",
+    channel_peer_id: "device-1",
+    verified: true,
+  } as never;
+
+  test("★ VERIFIED turn + row bound to a DIFFERENT user → null (fail-closed — never another user's scope)", async () => {
+    const { reconcileVerifiedIdentity } = await import("./scope.js");
+    expect(reconcileVerifiedIdentity(row, "user_B")).toBeNull();
+  });
+
+  test("verified turn + row bound to the SAME user → passes through", async () => {
+    const { reconcileVerifiedIdentity } = await import("./scope.js");
+    expect(reconcileVerifiedIdentity(row, "user_A")).toBe(row);
+  });
+
+  test("unverified turn (no ctx externalId — channel callers) → passes through unchanged", async () => {
+    const { reconcileVerifiedIdentity } = await import("./scope.js");
+    expect(reconcileVerifiedIdentity(row, undefined)).toBe(row);
+    expect(reconcileVerifiedIdentity(row, null)).toBe(row);
+    expect(reconcileVerifiedIdentity(row, "  ")).toBe(row);
+  });
+
+  test("null identity stays null", async () => {
+    const { reconcileVerifiedIdentity } = await import("./scope.js");
+    expect(reconcileVerifiedIdentity(null, "user_A")).toBeNull();
+  });
+});
