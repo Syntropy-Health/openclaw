@@ -16,6 +16,7 @@ import { sendJson, sendRateLimited, setSseHeaders, writeDone } from "./http-comm
 import { handleGatewayPostJsonEndpoint } from "./http-endpoint-helpers.js";
 import {
   deriveUserScopeFromSub,
+  getHeader,
   resolveAgentIdForRequest,
   resolveChannelFromHeader,
   resolveSessionKey,
@@ -181,6 +182,8 @@ export async function handleOpenAiHttpRequest(
   // Presentation-only channel (allowlisted). Feeds messageChannel ONLY — never
   // auth/externalId/userScope/sessionKey (A&D §S10). Unknown/absent ⇒ webchat.
   const channel = resolveChannelFromHeader(req) ?? "webchat";
+  // Stable device peer (X-OpenClaw-Device-Id) — mobile channel_peer_id (G-lane [G1]).
+  const deviceId = getHeader(req, "x-openclaw-device-id")?.trim() || null;
   const prompt = buildAgentPrompt(payload.messages);
   if (!prompt.message) {
     sendJson(res, 400, {
@@ -211,6 +214,7 @@ export async function handleOpenAiHttpRequest(
           extraSystemPrompt: prompt.extraSystemPrompt,
           sessionKey,
           externalId: handled.externalId ?? null,
+          deviceId,
           runId,
           deliver: false,
           messageChannel: channel,
@@ -335,6 +339,7 @@ export async function handleOpenAiHttpRequest(
           extraSystemPrompt: prompt.extraSystemPrompt,
           sessionKey,
           externalId: handled.externalId ?? null,
+          deviceId,
           runId,
           deliver: false,
           messageChannel: channel,

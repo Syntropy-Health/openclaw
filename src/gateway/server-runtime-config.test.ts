@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { resolveGatewayRuntimeConfig } from "./server-runtime-config.js";
 
 describe("resolveGatewayRuntimeConfig", () => {
@@ -114,6 +114,68 @@ describe("resolveGatewayRuntimeConfig", () => {
 
       expect(result.authMode).toBe("token");
       expect(result.bindHost).toBe("0.0.0.0");
+    });
+  });
+
+  describe("Clerk all-or-none boot assert wiring (G-lane [G3])", () => {
+    const CLERK_ENV = [
+      "OPENCLAW_CLERK_JWKS_URL",
+      "OPENCLAW_CLERK_ISSUER",
+      "OPENCLAW_CLERK_AUDIENCE",
+    ] as const;
+    let saved: Record<string, string | undefined>;
+    beforeEach(() => {
+      saved = {};
+      for (const k of CLERK_ENV) {
+        saved[k] = process.env[k];
+        delete process.env[k];
+      }
+    });
+    afterEach(() => {
+      for (const k of CLERK_ENV) {
+        if (saved[k] === undefined) {
+          delete process.env[k];
+        } else {
+          process.env[k] = saved[k];
+        }
+      }
+    });
+
+    const base = {
+      bind: "loopback" as const,
+      auth: { mode: "token" as const, token: "test-token-123" },
+    };
+
+    it("★ a PARTIAL clerk config fails boot LOUDLY (the [G3] wiring, not just the fn)", async () => {
+      const cfg = {
+        gateway: {
+          ...base,
+          auth: { ...base.auth, clerk: { jwksUrl: "https://x/jwks.json" } },
+        },
+      };
+      await expect(resolveGatewayRuntimeConfig({ cfg, port: 18789 })).rejects.toThrow(
+        /partially configured/,
+      );
+    });
+
+    it("a FULL clerk config boots; zero clerk config boots (all-or-none both pass)", async () => {
+      const full = {
+        gateway: {
+          ...base,
+          auth: {
+            ...base.auth,
+            clerk: {
+              jwksUrl: "https://x/jwks.json",
+              issuer: "clerk.example.test",
+              audience: "openclaw",
+            },
+          },
+        },
+      };
+      await expect(resolveGatewayRuntimeConfig({ cfg: full, port: 18789 })).resolves.toBeTruthy();
+      await expect(
+        resolveGatewayRuntimeConfig({ cfg: { gateway: base }, port: 18790 }),
+      ).resolves.toBeTruthy();
     });
   });
 });

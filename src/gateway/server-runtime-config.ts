@@ -5,6 +5,7 @@ import type {
   loadConfig,
 } from "../config/config.js";
 import {
+  assertClerkConfigAllOrNone,
   assertGatewayAuthConfigured,
   type ResolvedGatewayAuth,
   resolveGatewayAuth,
@@ -97,6 +98,8 @@ export async function resolveGatewayRuntimeConfig(params: {
   const trustedProxies = params.cfg.gateway?.trustedProxies ?? [];
 
   assertGatewayAuthConfigured(resolvedAuth);
+  // G-lane [G3]: fail boot on a PARTIAL Clerk config (silent-disable guard).
+  assertClerkConfigAllOrNone(authConfig.clerk, process.env);
   if (tailscaleMode === "funnel" && authMode !== "password") {
     throw new Error(
       "tailscale funnel requires gateway auth mode=password (set gateway.auth.password or OPENCLAW_GATEWAY_PASSWORD)",

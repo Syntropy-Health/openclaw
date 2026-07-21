@@ -58,6 +58,8 @@ export type AgentCommandOpts = {
    * params → agent hook ctx so memory-graphiti keys the graph on it (#834/#836).
    */
   externalId?: string | null;
+  /** Stable device id (X-OpenClaw-Device-Id) — mobile channel peer (G-lane [G1]). */
+  deviceId?: string | null;
   /** Message channel context (webchat|voicewake|whatsapp|...). */
   messageChannel?: string;
   channel?: string; // delivery channel (whatsapp|telegram|...)

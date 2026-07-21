@@ -202,3 +202,65 @@ export async function listUserChannels(
   `;
   return rows as unknown as UserChannelRow[];
 }
+
+/**
+ * G-lane [G1] auto-bind (A&D §7 [G1]): on a VERIFIED first-party turn, ensure the
+ * `lp_users` row for the caller's Clerk identity and UPSERT the device link.
+ *
+ * - `externalId` is the SERVER-verified Clerk `sub` (never client-sent — the
+ *   gateway only threads it after JWT verification). The user row is found by
+ *   external_id or created carrying it; the channel leg NEVER writes
+ *   external_id onto some other user (spine pin R1f — no forked writer).
+ * - The link upsert rides `linkChannelToUser`'s `ON CONFLICT (channel,
+ *   channel_peer_id)` — re-binding the same device is idempotent; a device that
+ *   changes owners (user B signs in on user A's phone) re-points to B, which is
+ *   the correct device-session semantics.
+ * Idempotent per turn; throws only on DB failure (caller logs, never fails the turn).
+ */
+export async function autoBindVerifiedPeer(
+  sql: postgres.Sql,
+  params: { externalId: string; channel: string; channelPeerId: string },
+): Promise<UserRow> {
+  const existing = await findUserByExternalId(sql, params.externalId);
+  let user = existing;
+  if (!user) {
+    try {
+      user = await createUser(sql, { externalId: params.externalId });
+    } catch (err) {
+      // Concurrent first-turns race: external_id is UNIQUE, so a parallel turn
+      // may have inserted between our find and create. Re-find; only rethrow if
+      // the row truly isn't there (a genuine DB failure).
+      user = await findUserByExternalId(sql, params.externalId);
+      if (!user) {
+        throw err;
+      }
+    }
+  }
+  await linkChannelToUser(sql, user.id, params.channel, params.channelPeerId);
+  return user;
+}
+
+/**
+ * G-lane [G2] unbind (A&D §7 must-fix #1): DELETE exactly one device LINK row —
+ * NEVER `lp_users.external_id`. Ownership is enforced IN the SQL: the row is
+ * deleted only when it belongs to the user whose verified external_id is given
+ * (you can only unbind your own device; a mismatched or absent row is a no-op).
+ * Blast radius = one `(channel, channel_peer_id)` link; the user's other
+ * channels (WhatsApp pairing!) and other devices stay verified. Idempotent —
+ * returns the number of rows deleted (0 or 1).
+ */
+export async function unlinkChannelPeerForUser(
+  sql: postgres.Sql,
+  params: { externalId: string; channel: string; channelPeerId: string },
+): Promise<number> {
+  const rows = await sql`
+    DELETE FROM lp_user_channels uc
+    USING lp_users u
+    WHERE uc.user_id = u.id
+      AND u.external_id = ${params.externalId}
+      AND uc.channel = ${params.channel}
+      AND uc.channel_peer_id = ${params.channelPeerId}
+    RETURNING uc.id
+  `;
+  return rows.length;
+}

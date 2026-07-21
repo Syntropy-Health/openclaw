@@ -2,8 +2,9 @@ import type { OpenClawPluginApi } from "openclaw/plugin-sdk";
 import postgres from "postgres";
 import {
   deriveChannel,
-  derivePeerId,
+  deriveIdentityPeer,
   findUserByChannelPeer,
+  reconcileVerifiedIdentity,
   resolveScope,
   formatScopeBlock,
   formatHardGateSystemPrompt,
@@ -81,14 +82,24 @@ const authMemoryGatePlugin = {
           await ensureReady();
           const sessionKey = ctx?.sessionKey ?? "";
           const channel = ctx?.messageProvider ?? deriveChannel(sessionKey);
-          const peerId = derivePeerId(sessionKey);
+          // Canonical peer via the SHARED helper (device-id when threaded, else
+          // session-key-derived) — MUST match persist-user-identity's [G1] bind
+          // key, or the gate would miss the just-bound mobile row (A&D §7).
+          const peerId = deriveIdentityPeer(ctx);
 
           if (!peerId || peerId === "main" || peerId === "unknown") {
             return {};
           }
 
           const gateKey = `${channel}:${peerId}`;
-          const identity = await findUserByChannelPeer(sql, channel, peerId);
+          // Cross-check the peer row against the turn's VERIFIED identity
+          // (fail-closed defense-in-depth): on a verified turn a stale/contested
+          // row keyed by the client-supplied device id must NEVER key this turn
+          // onto another user's scope — treat it as unidentified instead.
+          const identity = reconcileVerifiedIdentity(
+            await findUserByChannelPeer(sql, channel, peerId),
+            ctx?.externalId,
+          );
 
           if (!identity) {
             // User not registered

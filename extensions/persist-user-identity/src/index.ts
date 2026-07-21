@@ -1,11 +1,29 @@
 import type { OpenClawPluginApi } from "openclaw/plugin-sdk";
+// Gateway Clerk-verify + session deny-list — extension→src deep import per the
+// established convention (kapso precedent); src never imports extensions.
+import { authorizeClerkJwt, resolveClerkAuth } from "../../../src/gateway/auth.js";
+import { denyClerkSession } from "../../../src/gateway/clerk-session-denylist.js";
 // Session-key parsing is shared with auth-memory-gate + syntropy so the
 // convention can't drift across the three identity hooks (oc-hygiene #7).
-import { deriveChannel, derivePeerId } from "../../shared/session-key.js";
+import { deriveChannel, deriveIdentityPeer } from "../../shared/session-key.js";
 import { registerIdentityCommands } from "./commands.js";
 import { formatIdentityContext, formatUnknownUserContext } from "./context.js";
-import { createPgClient, ensureUserSchema, findUserByChannelPeer } from "./db.js";
+import {
+  autoBindVerifiedPeer,
+  createPgClient,
+  ensureUserSchema,
+  findUserByChannelPeer,
+  unlinkChannelPeerForUser,
+} from "./db.js";
 import type { AuthConfig } from "./jwt.js";
+import { createMobileSignoutHandler, SIGNOUT_ROUTE_PATH } from "./signout-route.js";
+
+/**
+ * Channels whose peers AUTO-BIND on a verified first-party turn (G-lane [G1]).
+ * Scoped to the mobile channel per the approved A&D §7 — external channels
+ * (WhatsApp) keep the one-time pairing flow; webchat is out of G1 scope.
+ */
+const AUTO_BIND_CHANNELS = new Set(["shrinemobile"]);
 
 // ---------------------------------------------------------------------------
 // Plugin
@@ -68,7 +86,31 @@ const persistUserIdentityPlugin = {
           await ensureReady();
           const sessionKey = ctx?.sessionKey ?? "";
           const channel = ctx?.messageProvider ?? deriveChannel(sessionKey);
-          const peerId = derivePeerId(sessionKey);
+          // Canonical peer: the threaded device id when present (mobile), else
+          // the session-key-derived peer — MUST match auth-memory-gate (shared fn).
+          const peerId = deriveIdentityPeer(ctx);
+
+          // G-lane [G1] auto-bind: a VERIFIED first-party turn (server-verified
+          // Clerk sub on ctx.externalId) on an auto-bind channel ensures the
+          // lp_users row + the (channel, device-id) link BEFORE the identity
+          // lookup below and before auth-memory-gate (priority 40) runs — so the
+          // signed-in mobile user is verified from their FIRST message and the
+          // gate never fires (A&D R1a). Bind failures log and fall through:
+          // the turn proceeds; the gate then treats the peer as unverified
+          // (fail-closed, never fail-open).
+          const externalId = ctx?.externalId?.trim();
+          const deviceId = ctx?.deviceId?.trim();
+          if (externalId && deviceId && AUTO_BIND_CHANNELS.has(channel)) {
+            try {
+              await autoBindVerifiedPeer(sql, {
+                externalId,
+                channel,
+                channelPeerId: deviceId,
+              });
+            } catch (err) {
+              api.logger.error(`persist-user-identity: [G1] auto-bind failed: ${err}`);
+            }
+          }
 
           if (!peerId || peerId === "main" || peerId === "unknown") {
             return {};
@@ -93,6 +135,29 @@ const persistUserIdentityPlugin = {
     // -------------------------------------------------------------------
 
     registerIdentityCommands(api, { sql, authConfig, ensureReady, pendingIdentify });
+
+    // -------------------------------------------------------------------
+    // G-lane [G2]: POST /gateway/mobile/signout — unbind the caller's OWN
+    // (shrinemobile, device-id) link + deny the session id ([G2b]).
+    // Registered here because this plugin owns the pg client + lp_* schema.
+    // -------------------------------------------------------------------
+
+    api.registerHttpRoute({
+      path: SIGNOUT_ROUTE_PATH,
+      handler: createMobileSignoutHandler({
+        // Same config sources as the CHAT verify path (config-file clerk block
+        // OR OPENCLAW_CLERK_* env) — an operator configuring via the config
+        // file must not end up with working chat but a permanently-401 unbind.
+        resolveClerk: () => resolveClerkAuth(api.config.gateway?.auth?.clerk, process.env),
+        verifyJwt: (token, clerk) => authorizeClerkJwt(token, clerk),
+        unlink: async (params) => {
+          await ensureReady();
+          return unlinkChannelPeerForUser(sql, params);
+        },
+        denySession: (sid) => denyClerkSession(sid),
+        logger: api.logger,
+      }),
+    });
 
     // -------------------------------------------------------------------
     // Shutdown: close DB pool

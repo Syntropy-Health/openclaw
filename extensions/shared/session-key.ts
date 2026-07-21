@@ -54,3 +54,27 @@ export function derivePeerId(sessionKey: string): string {
   }
   return rest[0] ?? sessionKey;
 }
+
+/**
+ * The canonical identity peer for a hook ctx (G-lane [G1], A&D §7).
+ *
+ * Prefers `ctx.deviceId` (the `X-OpenClaw-Device-Id` header the host threads on
+ * the hook ctx — shrinemobile's stable install-UUID) over the session-key-derived
+ * peer: the HTTP session key partitions by USER scope (`openresponses-user:<sub>`
+ * plus a volatile conversation hint), so its derived "peer" is neither stable nor
+ * a device — while `lp_user_channels.channel_peer_id` for the mobile channel is
+ * PINNED to the device id (auto-bind writes it, sign-out unbind deletes it).
+ * Both identity hooks (persist-user-identity, auth-memory-gate) MUST derive the
+ * peer through this ONE function so bind, gate-lookup, and unbind can never
+ * disagree (oc-hygiene #7: single source of truth).
+ */
+export function deriveIdentityPeer(ctx?: {
+  sessionKey?: string;
+  deviceId?: string | null;
+}): string {
+  const deviceId = ctx?.deviceId?.trim();
+  if (deviceId) {
+    return deviceId;
+  }
+  return derivePeerId(ctx?.sessionKey ?? "");
+}
