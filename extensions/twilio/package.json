@@ -1,6 +1,6 @@
 {
   "name": "@openclaw/twilio",
-  "version": "2026.2.1",
+  "version": "2026.2.16",
   "private": true,
   "description": "Twilio SMS channel for OpenClaw — outbound send, X-Twilio-Signature inbound webhook, TCPA opt-out rail",
   "type": "module",
