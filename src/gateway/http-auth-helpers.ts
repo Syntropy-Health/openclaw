@@ -1,4 +1,5 @@
 import type { IncomingMessage, ServerResponse } from "node:http";
+import { logError, logInfo, logWarn } from "../logger.js";
 import type { AuthRateLimiter } from "./auth-rate-limit.js";
 import {
   authorizeGatewayConnect,
@@ -28,6 +29,12 @@ export async function authorizeGatewayBearerRequestOrReply(params: {
     req: params.req,
     trustedProxies: params.trustedProxies,
     rateLimiter: params.rateLimiter,
+    // §7.4b-A: wire the session-validation logger + metric so every revocation
+    // DECISION (revoked / sub-mismatch / no-handle / fail-open) is an OBSERVABLE
+    // server-side line — required for the QA evidence bundle, and so a
+    // misconfigured/inert path can never be silent.
+    sessionLogger: { info: logInfo, warn: logWarn, error: logError },
+    sessionMetric: (name) => logInfo(`[metric] ${name}`),
   });
   if (!authResult.ok) {
     sendGatewayAuthFailure(params.res, authResult);

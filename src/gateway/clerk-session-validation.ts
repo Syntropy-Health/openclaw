@@ -144,9 +144,12 @@ export async function validateClerkSession(
   const cached = store.get(sessionId);
   if (cached && cached.expiresAt > params.now) {
     if (cached.userId !== params.sub) {
-      params.logger?.warn?.("clerk-session: cached session belongs to a DIFFERENT sub → 401");
+      params.logger?.warn?.(
+        "clerk-session: sub-MISMATCH (cached session belongs to a DIFFERENT sub) → 401",
+      );
       return { ok: false, reason: "sub-mismatch" };
     }
+    params.logger?.info?.("clerk-session: ACTIVE (cache hit) → allow");
     return { ok: true, reason: "active-cached" };
   }
 
@@ -169,6 +172,7 @@ export async function validateClerkSession(
         return { ok: false, reason: "sub-mismatch" };
       }
       store.set(sessionId, { userId: resolved.userId, expiresAt: params.now + ttl });
+      params.logger?.info?.("clerk-session: resolved ACTIVE (sub-match) → allow");
       return { ok: true, reason: "active" };
     }
     case "revoked":
