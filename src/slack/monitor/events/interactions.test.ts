@@ -1,4 +1,4 @@
-import { describe, expect, it, vi } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 import { registerSlackInteractionEvents } from "./interactions.js";
 
 const enqueueSystemEventMock = vi.fn();
@@ -97,8 +97,18 @@ function createContext() {
 }
 
 describe("registerSlackInteractionEvents", () => {
-  it("enqueues structured events and updates button rows", async () => {
+  // TEST ISOLATION: `enqueueSystemEventMock` is module-scoped and therefore
+  // SHARED across every test in this file. It used to be reset ad-hoc at the top
+  // of *some* tests, which meant any test lacking that line inherited the
+  // previous test's call count — and the "ignores malformed action payloads"
+  // case (which asserts `not.toHaveBeenCalled()`) is exactly one that lacked it.
+  // That test passes ALONE and fails IN-SUITE: order-dependent, not a product
+  // bug. Reset centrally so a call can never leak across a test boundary again.
+  beforeEach(() => {
     enqueueSystemEventMock.mockReset();
+  });
+
+  it("enqueues structured events and updates button rows", async () => {
     const { ctx, app, getHandler, resolveSessionKey } = createContext();
     registerSlackInteractionEvents({ ctx: ctx as never });
 
