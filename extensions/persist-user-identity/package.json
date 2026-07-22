@@ -1,6 +1,6 @@
 {
   "name": "@openclaw/persist-user-identity",
-  "version": "2026.2.1",
+  "version": "2026.2.16",
   "private": true,
   "description": "Cross-channel user identity persistence with optional token verification for OpenClaw",
   "type": "module",
