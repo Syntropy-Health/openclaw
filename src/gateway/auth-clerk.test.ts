@@ -131,11 +131,15 @@ describe("resolveGatewayAuth — clerk config", () => {
         OPENCLAW_CLERK_AUDIENCE: AUDIENCE,
       } as NodeJS.ProcessEnv,
     });
-    expect(auth.clerk).toEqual({
+    expect(auth.clerk).toMatchObject({
       jwksUrl: "https://jwks.test/keys",
       issuer: ISSUER,
       audience: AUDIENCE,
     });
+    // §7.4b-A: no backend secret configured → session validation is OFF
+    // (JWT-verify-only), but the config-knob TTL still resolves to its default.
+    expect(auth.clerk?.sessionResolver).toBeUndefined();
+    expect(auth.clerk?.sessionCacheTtlMs).toBe(30_000);
   });
 
   it("explicit authConfig.clerk takes precedence over env", () => {
@@ -149,7 +153,7 @@ describe("resolveGatewayAuth — clerk config", () => {
         OPENCLAW_CLERK_AUDIENCE: "aud-env",
       } as NodeJS.ProcessEnv,
     });
-    expect(auth.clerk).toEqual({
+    expect(auth.clerk).toMatchObject({
       jwksUrl: "https://cfg/keys",
       issuer: "iss-cfg",
       audience: "aud-cfg",
@@ -325,68 +329,6 @@ describe("authorizeGatewayConnect — clerk wiring (fail-closed invariants)", ()
 // G-lane [G2b] — session revocation (sid deny-list) on the chat auth path
 // ---------------------------------------------------------------------------
 
-describe("clerk session revocation (G-lane [G2b])", () => {
-  it("authorizeClerkJwt threads the sid claim through on success", async () => {
-    const token = mintToken(validClaims({ sid: "sess_123" }), { kid: KID, privateKey });
-    const res = await authorizeClerkJwt(token, CLERK, { now: NOW, fetchJwks: jwksFetcher() });
-    expect(res.ok).toBe(true);
-    if (res.ok) {
-      expect(res.externalId).toBe("user_2abc");
-      expect(res.sid).toBe("sess_123");
-    }
-  });
-
-  it("a token without a sid claim still verifies (sid undefined)", async () => {
-    const token = mintToken(validClaims(), { kid: KID, privateKey });
-    const res = await authorizeClerkJwt(token, CLERK, { now: NOW, fetchJwks: jwksFetcher() });
-    expect(res.ok).toBe(true);
-    if (res.ok) {
-      expect(res.sid).toBeUndefined();
-    }
-  });
-
-  it("★ a DENIED sid is rejected on the chat path even while the JWT is still valid (replay → 401, no turn, no re-bind)", async () => {
-    const { denyClerkSession, clearClerkSessionDenylist } =
-      await import("./clerk-session-denylist.js");
-    try {
-      const token = mintToken(freshClaims({ sid: "sess_revoked" }), { kid: KID, privateKey });
-      // Before revocation: authorized.
-      const before = await authorizeGatewayConnect({
-        auth: { mode: "token", token: "shared", allowTailscale: false, clerk: CLERK },
-        connectAuth: { token },
-        fetchClerkJwks: jwksFetcher(),
-      });
-      expect(before.ok).toBe(true);
-      // Sign-out denies the session; the SAME still-valid token now fails closed.
-      denyClerkSession("sess_revoked");
-      const after = await authorizeGatewayConnect({
-        auth: { mode: "token", token: "shared", allowTailscale: false, clerk: CLERK },
-        connectAuth: { token },
-        fetchClerkJwks: jwksFetcher(),
-      });
-      expect(after.ok).toBe(false);
-      expect(after.reason).toBe("clerk_session_revoked");
-      expect(after.externalId).toBeUndefined();
-    } finally {
-      clearClerkSessionDenylist();
-    }
-  });
-
-  it("a different (non-denied) session is unaffected by another session's revocation", async () => {
-    const { denyClerkSession, clearClerkSessionDenylist } =
-      await import("./clerk-session-denylist.js");
-    try {
-      denyClerkSession("sess_other");
-      const token = mintToken(freshClaims({ sid: "sess_alive" }), { kid: KID, privateKey });
-      const res = await authorizeGatewayConnect({
-        auth: { mode: "token", token: "shared", allowTailscale: false, clerk: CLERK },
-        connectAuth: { token },
-        fetchClerkJwks: jwksFetcher(),
-      });
-      expect(res.ok).toBe(true);
-      expect(res.externalId).toBe("user_2abc");
-    } finally {
-      clearClerkSessionDenylist();
-    }
-  });
-});
+// NOTE: the sid deny-list revocation tests were REMOVED — that control is
+// WITHDRAWN (A&D §7.4b-A). Revocation is now server-side session validation,
+// covered by clerk-session-validation.test.ts + the live QA harness.

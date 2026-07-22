@@ -2,7 +2,7 @@ import type { OpenClawPluginApi } from "openclaw/plugin-sdk";
 // Gateway Clerk-verify + session deny-list — extension→src deep import per the
 // established convention (kapso precedent); src never imports extensions.
 import { authorizeClerkJwt, resolveClerkAuth } from "../../../src/gateway/auth.js";
-import { denyClerkSession } from "../../../src/gateway/clerk-session-denylist.js";
+import { evictClerkSessionCache } from "../../../src/gateway/clerk-session-validation.js";
 // Session-key parsing is shared with auth-memory-gate + syntropy so the
 // convention can't drift across the three identity hooks (oc-hygiene #7).
 import { deriveChannel, deriveIdentityPeer } from "../../shared/session-key.js";
@@ -154,7 +154,7 @@ const persistUserIdentityPlugin = {
           await ensureReady();
           return unlinkChannelPeerForUser(sql, params);
         },
-        denySession: (sid) => denyClerkSession(sid),
+        evictSession: (sessionId) => evictClerkSessionCache(sessionId),
         logger: api.logger,
       }),
     });

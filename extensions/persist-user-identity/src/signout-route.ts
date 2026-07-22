@@ -42,7 +42,9 @@ export type SignoutRouteDeps = {
     channelPeerId: string;
   }) => Promise<number>;
   /** Deny the session id ([G2b]); injectable for tests. */
-  denySession: (sid: string) => void;
+  /** Evict the session's positive-cache entry ([G2b] §7.4b-A) so the ≤TTL
+   * window closes immediately on unbind. Injectable. */
+  evictSession: (sessionId: string) => void;
   logger?: { info?: (m: string) => void; warn?: (m: string) => void; error?: (m: string) => void };
 };
 
@@ -130,13 +132,15 @@ export function createMobileSignoutHandler(deps: SignoutRouteDeps) {
       return;
     }
 
-    // [G2b] FIRST: close the replay window — deny this session id (chat path
-    // rejects it → 401 → no agent turn → no re-bind). Denying BEFORE the DB
-    // unlink means consent-kill holds even when the unlink 500s (the client
-    // retries sign-out; the session is already dead either way). Also runs on a
-    // no-op unbind so a second sign-out still revokes a still-live session.
-    if (verified.sid) {
-      deps.denySession(verified.sid);
+    // [G2b] §7.4b-A: revocation itself is Clerk-authoritative — the app's own
+    // signOut revokes the session server-side, and the chat path re-resolves it.
+    // The gateway's job here is to CLOSE THE POSITIVE-CACHE WINDOW immediately:
+    // evict any cached "active" for this session so the next chat turn re-resolves
+    // (and sees revoked) without waiting out the ≤TTL. Keyed on the session-id
+    // header (a lookup key). Runs before the DB unlink so it holds even on a 500.
+    const sessionId = headerValue(req, "x-openclaw-clerk-session-id");
+    if (sessionId) {
+      deps.evictSession(sessionId);
     }
 
     // Ownership enforced in SQL: only the caller's own link row can match.
