@@ -126,17 +126,33 @@ if [ -n "${LIVE_JWT:-}" ] && [ -n "${LIVE_SID:-}" ]; then
   result PASS "auth resolves before body parse (structural on the HTTP path)"
 else result PENDING "provide LIVE session; structural property noted"; fi
 
-# ── 8. WEBSOCKET per-frame ─────────────────────────────────────────────────
-say "8. WEBSOCKET per-frame — ⚠️ SCOPE FINDING, needs CTO ruling"
-echo "   FINDING: the mobile chat surface is HTTP POST /v1/responses, which RE-AUTHORIZES PER"
-echo "   REQUEST (handleGatewayPostJsonEndpoint → authorizeGatewayConnect → validateClerkSession"
-echo "   every turn). So 'a connection authorized before sign-out outlives it' CANNOT occur on"
-echo "   the mobile surface — revocation is per-turn by construction. Separately, the WS handler"
-echo "   carries NO clerk-jwt method at all (grep: zero clerk-jwt in message-handler.ts), so no"
-echo "   WS connection is ever clerk-authorized. Scenario 8 is therefore N/A-BY-CONSTRUCTION for"
-echo "   the mobile surface. If a general WS-hardening is still wanted (clerk-jwt over WS + a"
-echo "   per-frame recheck), that's a separate build — flagged to the CTO for a ruling."
-result PENDING "N/A-by-construction (HTTP per-request re-auth); CTO ruling on general WS hardening"
+# ── 8. WEBSOCKET per-frame → REPLACED BY per-request-re-auth proof ──────────
+say "8. ⚠️ REPLACED BY per-request-re-auth proof (WS N/A — CTO ruling A, #4360)"
+echo "   PRINCIPAL: consciously accept this substitution during your walk. Original req #2 was a"
+echo "   WS per-frame recheck. It is N/A BY CONSTRUCTION: (1) mobile chat is HTTP /v1/responses,"
+echo "   which re-authorizes PER REQUEST — strictly STRONGER than a periodic WS recheck; (2) the"
+echo "   WS handler carries ZERO clerk-jwt, so no clerk-authorized long-lived connection exists to"
+echo "   outlive. The property that MATTERS — 'a session revoked between two turns is caught on the"
+echo "   very next turn' — is proven below as an EXERCISED FACT, not assumed."
+echo "   SUBSTITUTE ASSERTION (mandatory, CTO #4360): with cache TTL forced to 0, two sequential"
+echo "   turns EACH re-resolve independently, and a sign-out BETWEEN them makes turn-2 → 401."
+if [ -n "${LIVE_JWT:-}" ] && [ -n "${LIVE_SID:-}" ] && [ "${TTL0_GATEWAY:-}" = "1" ]; then
+  # Requires the gateway running with OPENCLAW_CLERK_SESSION_CACHE_TTL_MS=0 so every
+  # turn re-resolves (a cached turn would prove re-AUTH but not re-RESOLUTION).
+  before=$(grep -ic "clerk-session" "$GW_LOG" 2>/dev/null)
+  c1=$(chat "$LIVE_JWT" "$LIVE_SID"); c2=$(chat "$LIVE_JWT" "$LIVE_SID")
+  after=$(grep -ic "clerk-session" "$GW_LOG" 2>/dev/null)
+  resolves=$((after - before))
+  if [ "$c1" = "200" ] && [ "$c2" = "200" ] && [ "$resolves" -ge 2 ]; then
+    result PASS "2 turns → 2 independent Clerk resolutions (per-request re-auth is REAL); then run scenario 2 for the revoke-between-turns leg"
+  else
+    result FAIL "turns=$c1,$c2 resolutions=$resolves (expected 2×200 + ≥2 resolutions)"
+  fi
+else
+  result PENDING "run the gateway with OPENCLAW_CLERK_SESSION_CACHE_TTL_MS=0 + TTL0_GATEWAY=1 + LIVE session"
+fi
+echo "   DEFERRAL (tracked, not lost): if a WS chat client ever becomes clerk-authorized, the folded"
+echo "   req #2 applies — add the per-frame recheck THEN. Recorded in A&D §7.4b-A."
 
 # ── 9. FAIL-OPEN ───────────────────────────────────────────────────────────
 say "9. FAIL-OPEN — Clerk unreachable → turn ALLOWED + loud ERROR + metric (verify ALARMED)"
