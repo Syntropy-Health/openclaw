@@ -212,8 +212,28 @@ export function formatHardGateSystemPrompt(channel: string, peerId: string): str
  * when the message_sending hook detects an unregistered user.
  */
 export function formatHardGateReplyAppend(): string {
+  // Surfaces the real identity flow (persist-user-identity registers
+  // verify/identify/register). The gate exists to drive VERIFICATION, so the CTA
+  // must name the verify path — omitting it was the long-standing copy gap that
+  // left test/e2e/identity-memory-e2e.test.ts red since PR #9.
+  //
+  // ORDER MATTERS: identify THEN verify — they are sequential steps of ONE flow,
+  // not alternatives (identify stores the match in pendingIdentify and its own
+  // reply asks for the code). This mirrors formatHardGateSystemPrompt steps 3→5,
+  // so the footer can't contradict the system prompt attached to the same turn.
+  //
+  // ARG SHAPE IS MODE-DEPENDENT: under the documented deployment mode
+  // (auth.mode = "passcode-endpoint", see docs/deployment/headless-syntropy.md)
+  // verifyToken() ONLY accepts a 4-10 digit code (jwt.ts regex) — an arbitrary
+  // "app token" is rejected there. So the copy says 6-digit code and names where
+  // it comes from. Do not reword this to "<token>" without checking the mode.
+  //
+  // Both `/` and `!` prefixes dispatch (src/plugins/commands.ts normalizes
+  // `!` -> `/`), hence the trailing note.
   return (
-    "\n\n---\nTo get started, tell me your name or type " +
-    "`!identify <first_name> <last_name>` to find your account."
+    "\n\n---\nTo get started: `!identify <first_name> <last_name>` to find your " +
+    "Syntropy Journals account, then `/verify <6-digit code>` from the app " +
+    "(Settings → Pair Device). No app account yet? `/register <first_name> " +
+    "<last_name>` sets up a chat-only profile. Both `/` and `!` work."
   );
 }

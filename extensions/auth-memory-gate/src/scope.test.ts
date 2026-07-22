@@ -201,9 +201,33 @@ describe("formatHardGateReplyAppend", () => {
     expect(result).toContain("!identify <first_name> <last_name>");
   });
 
+  // ★ REGRESSION PIN (the 4-month red): the ONLY previous guard on the
+  // verification path was the DB-gated e2e suite, which the extensions unit lane
+  // never runs — so dropping "/verify" from this CTA passed every unit test
+  // silently. Pin all three live commands HERE, in the cheap lane that always
+  // runs. Command tokens only (not prose), so wording stays free to evolve.
+  test("★ names ALL THREE live identity commands — verify path can never be silently dropped", () => {
+    const result = formatHardGateReplyAppend();
+    expect(result).toContain("/verify"); // the gate exists to drive THIS
+    expect(result).toContain("!identify <first_name> <last_name>");
+    expect(result).toContain("/register <first_name> <last_name>");
+  });
+
+  // Arg shape is mode-dependent: the documented deployment runs
+  // auth.mode="passcode-endpoint", where verifyToken() accepts ONLY a 4-10 digit
+  // code. Telling users to paste an arbitrary "token" there is unfollowable, so
+  // pin that the CTA advertises the passcode shape.
+  test("★ advertises the 6-digit passcode shape verifyToken actually accepts", () => {
+    expect(formatHardGateReplyAppend()).toContain("6-digit");
+  });
+
   test("starts with separator", () => {
     const result = formatHardGateReplyAppend();
     expect(result).toContain("---");
+    // The CTA is concatenated onto arbitrary agent output; losing the leading
+    // blank lines would glue it onto the last sentence. toContain("---") alone
+    // would not catch that.
+    expect(result.startsWith("\n\n---\n")).toBe(true);
   });
 });
 
