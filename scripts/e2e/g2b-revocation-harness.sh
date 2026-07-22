@@ -88,14 +88,28 @@ if [ -n "${LIVE_JWT:-}" ] && [ -n "${LIVE_SID:-}" ] && [ -t 0 ]; then
   [ "$code" = "401" ] && result PASS "401 after Clerk sign-out; $obs" || result FAIL "expected 401, got $code — session still resolving active? $obs"
 else result PENDING "interactive + LIVE session required"; fi
 
-# ── 3. RE-MINT SURVIVAL ────────────────────────────────────────────────────
-say "3. RE-MINT SURVIVAL — after sign-out, a FRESH token (new jti) → 401 (jti could not do this)"
-echo "   MANUAL STEP: after the sign-out above, mint a NEW token for the SAME (signed-out) session"
-echo "   and pass it as LIVE_JWT_REMINT. Expect 401 — the SESSION is dead, not just the token."
-if [ -n "${LIVE_JWT_REMINT:-}" ] && [ -n "${LIVE_SID:-}" ]; then
-  code=$(chat "$LIVE_JWT_REMINT" "$LIVE_SID")
-  [ "$code" = "401" ] && result PASS "401 on a freshly-minted token for a dead session" || result FAIL "expected 401, got $code — REVOCATION BYPASS via re-mint"
-else result PENDING "provide LIVE_JWT_REMINT + LIVE_SID"; fi
+# ── 3. RE-MINT SURVIVAL (corrected — CTO #4367) ────────────────────────────
+say "3. RE-MINT SURVIVAL — after sign-out, a fresh token CANNOT be obtained (revoked AT THE SOURCE)"
+echo "   CORRECTED (CTO #4367): the original 'mint a fresh token for the signed-out session → 401'"
+echo "   is UNOBTAINABLE by construction — a real sign-out REVOKES the session at Clerk, so the FAPI"
+echo "   re-mint FAILS at the mint step (comes back EMPTY). The empty mint IS the pass: it proves the"
+echo "   re-mint threat (v2/jti's exact failure: 'holder re-mints a token the denylist never saw') is"
+echo "   closed AT THE SOURCE, not just at the gateway. This is STRONGER than the original."
+echo "   PASS = BOTH: (a) the post-sign-out re-mint returns EMPTY (LIVE_JWT_REMINT empty); AND"
+echo "               (b) the pre-sign-out captured token (LIVE_JWT, now for a REVOKED session) → 401."
+echo "   INVERSE = FAIL-ESCALATE: a NON-EMPTY re-mint means Clerk did NOT revoke — do not score green."
+if [ -n "${LIVE_JWT:-}" ] && [ -n "${LIVE_SID:-}" ] && [ "${REMINT_ATTEMPTED:-}" = "1" ]; then
+  if [ -n "${LIVE_JWT_REMINT:-}" ]; then
+    # A token WAS minted for a supposedly signed-out session → Clerk did not revoke.
+    codeR=$(chat "$LIVE_JWT_REMINT" "$LIVE_SID")
+    result FAIL "ESCALATE: re-mint SUCCEEDED post-sign-out (non-empty) — Clerk did NOT revoke the session (gateway said $codeR); this is a revocation failure at the SOURCE, not the gateway"
+  else
+    # (a) empty mint ✓. Now (b): the pre-sign-out captured token must 401 (revoked session).
+    codeB=$(chat "$LIVE_JWT" "$LIVE_SID")
+    [ "$codeB" = "401" ] && result PASS "(a) re-mint EMPTY (Clerk refused to mint for the revoked session) + (b) captured token → 401" \
+      || result FAIL "(a) re-mint empty ✓ but (b) captured token got $codeB, expected 401"
+  fi
+else result PENDING "run after scenario 2's sign-out with REMINT_ATTEMPTED=1 (+ LIVE_JWT_REMINT if Clerk wrongly minted one)"; fi
 
 # ── 4. CACHE BOUND ─────────────────────────────────────────────────────────
 say "4. CACHE BOUND — after sign-out, first-401 within the configured TTL (MEASURED)"
