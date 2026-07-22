@@ -51,7 +51,7 @@ import { resolveGlobalLane, resolveSessionLane } from "./lanes.js";
 import { log } from "./logger.js";
 import { resolveModel } from "./model.js";
 import { runEmbeddedAttempt } from "./run/attempt.js";
-import type { RunEmbeddedPiAgentParams } from "./run/params.js";
+import { resolveHookChannel, type RunEmbeddedPiAgentParams } from "./run/params.js";
 import { buildEmbeddedRunPayloads } from "./run/payloads.js";
 import {
   truncateOversizedToolResultsInSession,
@@ -221,7 +221,7 @@ export async function runEmbeddedPiAgent(
               sessionKey: params.sessionKey,
               sessionId: params.sessionId,
               workspaceDir: params.workspaceDir,
-              messageProvider: params.messageProvider ?? undefined,
+              messageProvider: resolveHookChannel(params),
               senderE164: params.senderE164,
               externalId: params.externalId,
               deviceId: params.deviceId,
@@ -461,7 +461,7 @@ export async function runEmbeddedPiAgent(
             sessionId: params.sessionId,
             sessionKey: params.sessionKey,
             messageChannel: params.messageChannel,
-            messageProvider: params.messageProvider,
+            messageProvider: resolveHookChannel(params),
             agentAccountId: params.agentAccountId,
             messageTo: params.messageTo,
             messageThreadId: params.messageThreadId,
@@ -612,7 +612,7 @@ export async function runEmbeddedPiAgent(
                 sessionId: params.sessionId,
                 sessionKey: params.sessionKey,
                 messageChannel: params.messageChannel,
-                messageProvider: params.messageProvider,
+                messageProvider: resolveHookChannel(params),
                 agentAccountId: params.agentAccountId,
                 authProfileId: lastProfileId,
                 sessionFile: params.sessionFile,

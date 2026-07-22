@@ -100,6 +100,7 @@ import {
   shouldFlagCompactionTimeout,
 } from "./compaction-timeout.js";
 import { detectAndLoadPromptImages } from "./images.js";
+import { resolveHookChannel } from "./params.js";
 import type { EmbeddedRunAttemptParams, EmbeddedRunAttemptResult } from "./types.js";
 
 export function injectHistoryImagesIntoMessages(
@@ -290,7 +291,7 @@ export async function runEmbeddedAttempt(
             elevated: params.bashElevated,
           },
           sandbox,
-          messageProvider: params.messageChannel ?? params.messageProvider,
+          messageProvider: resolveHookChannel(params),
           agentAccountId: params.agentAccountId,
           messageTo: params.messageTo,
           messageThreadId: params.messageThreadId,
@@ -874,7 +875,7 @@ export async function runEmbeddedAttempt(
                     sessionKey: params.sessionKey,
                     sessionId: params.sessionId,
                     workspaceDir: params.workspaceDir,
-                    messageProvider: params.messageProvider ?? undefined,
+                    messageProvider: resolveHookChannel(params),
                     senderE164: params.senderE164,
                     externalId: params.externalId,
                     deviceId: params.deviceId,
@@ -992,7 +993,7 @@ export async function runEmbeddedAttempt(
                   sessionKey: params.sessionKey,
                   sessionId: params.sessionId,
                   workspaceDir: params.workspaceDir,
-                  messageProvider: params.messageProvider ?? undefined,
+                  messageProvider: resolveHookChannel(params),
                 },
               )
               .catch((err) => {
@@ -1125,7 +1126,7 @@ export async function runEmbeddedAttempt(
                 sessionKey: params.sessionKey,
                 sessionId: params.sessionId,
                 workspaceDir: params.workspaceDir,
-                messageProvider: params.messageProvider ?? undefined,
+                messageProvider: resolveHookChannel(params),
                 senderE164: params.senderE164,
                 externalId: params.externalId,
                 deviceId: params.deviceId,
@@ -1188,7 +1189,7 @@ export async function runEmbeddedAttempt(
               sessionKey: params.sessionKey,
               sessionId: params.sessionId,
               workspaceDir: params.workspaceDir,
-              messageProvider: params.messageProvider ?? undefined,
+              messageProvider: resolveHookChannel(params),
             },
           )
           .catch((err) => {
