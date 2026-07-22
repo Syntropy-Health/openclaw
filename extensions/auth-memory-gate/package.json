@@ -1,6 +1,6 @@
 {
   "name": "@openclaw/auth-memory-gate",
-  "version": "2026.2.1",
+  "version": "2026.2.16",
   "private": true,
   "description": "Identity-scoped memory retrieval gate for OpenClaw",
   "type": "module",
