@@ -117,3 +117,27 @@ export type RunEmbeddedPiAgentParams = {
   ownerNumbers?: string[];
   enforceFinalTag?: boolean;
 };
+
+/**
+ * Channel the PLUGIN HOOKS should see for a run (`ctx.messageProvider`).
+ *
+ * ⚠️ WHY THIS EXISTS (T1.4.1 §1a defect): the two field names are populated by
+ * DIFFERENT entry points — channel-originated runs set `messageProvider`, while
+ * the HTTP chat path (`/v1/responses`, `/v1/chat/completions`) sets ONLY
+ * `messageChannel`, from the allowlisted `X-OpenClaw-Channel` header. The
+ * hook-ctx builds used the bare `params.messageProvider`, so on the HTTP path
+ * `ctx.messageProvider` was UNDEFINED: the identity hooks fell back to
+ * `deriveChannel(sessionKey)` (yielding e.g. "openresponses-user") and the [G1]
+ * auto-bind channel guard could never match "shrinemobile" — a signed-in mobile
+ * user got the onboarding verify-CTA and no binding row was ever written.
+ *
+ * This was a DUPLICATED inline expression at 7 call sites, which is how the two
+ * that mattered drifted. One function, one precedence, one place to test —
+ * matching the pre-existing `channelHint` (run.ts) and attempt.ts:293.
+ */
+export function resolveHookChannel(params: {
+  messageChannel?: string;
+  messageProvider?: string;
+}): string | undefined {
+  return params.messageChannel ?? params.messageProvider ?? undefined;
+}

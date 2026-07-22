@@ -120,6 +120,48 @@ describe("OpenResponses HTTP API (e2e)", () => {
     }
   });
 
+  // ★ T1.4.1 §1a REGRESSION — drives the ACTUAL HTTP handler, not a hand-fed ctx.
+  // The [G1] auto-bind guard reads the channel from the plugin-hook ctx. Every
+  // prior test fed that ctx directly, so the guard passed in tests while it could
+  // NEVER fire in production: the HTTP path populates `messageChannel` only, and
+  // the hook ctx was built from `messageProvider`. A signed-in mobile user got the
+  // onboarding verify-CTA and no binding row was written. This test pins the seam
+  // an inline-expression drift can actually break.
+  it("threads X-OpenClaw-Channel + X-OpenClaw-Device-Id from the REQUEST into the agent command", async () => {
+    const port = enabledPort;
+    agentCommand.mockReset();
+    agentCommand.mockResolvedValueOnce({ payloads: [{ text: "hello" }] } as never);
+
+    const res = await postResponses(
+      port,
+      { model: "openclaw", input: "hi" },
+      {
+        "x-openclaw-channel": "shrinemobile",
+        "x-openclaw-device-id": "device-abc-123",
+      },
+    );
+    expect(res.status).toBe(200);
+
+    const [opts] = agentCommand.mock.calls[0] ?? [];
+    const params = opts as { messageChannel?: string; deviceId?: string | null } | undefined;
+    // The channel must survive as the value the identity hooks gate on.
+    expect(params?.messageChannel).toBe("shrinemobile");
+    // The device id is the [G1] channel_peer_id / [G2] unbind key.
+    expect(params?.deviceId).toBe("device-abc-123");
+    await ensureResponseConsumed(res);
+  });
+
+  it("omits the device id when the header is absent (no fabricated peer)", async () => {
+    const port = enabledPort;
+    agentCommand.mockReset();
+    agentCommand.mockResolvedValueOnce({ payloads: [{ text: "hello" }] } as never);
+    const res = await postResponses(port, { model: "openclaw", input: "hi" });
+    expect(res.status).toBe(200);
+    const [opts] = agentCommand.mock.calls[0] ?? [];
+    expect((opts as { deviceId?: string | null } | undefined)?.deviceId ?? null).toBeNull();
+    await ensureResponseConsumed(res);
+  });
+
   it("handles OpenResponses request parsing and validation", async () => {
     const port = enabledPort;
     const mockAgentOnce = (payloads: Array<{ text: string }>, meta?: unknown) => {
