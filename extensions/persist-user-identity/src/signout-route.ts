@@ -67,7 +67,26 @@ function sendJson(res: ServerResponse, status: number, body: Record<string, unkn
 /** Node handler factory — testable with injected deps (no network, no pg). */
 export function createMobileSignoutHandler(deps: SignoutRouteDeps) {
   return async (req: IncomingMessage, res: ServerResponse): Promise<void> => {
+    // ── OBSERVABILITY (T1.2.2 post-mortem) ──────────────────────────────────
+    // Every outcome below is logged, not just success. Rationale, learned the
+    // hard way: after a live sign-out the link row was still present, and it was
+    // IMPOSSIBLE to tell server-side whether the app never called this route or
+    // called it and was rejected — because v1 logged ONLY the success path and
+    // the gateway logs no HTTP requests at all. A route whose failures are
+    // invisible is the same "silent control reports success" defect we keep
+    // hitting: a best-effort client sees its own green while the server did
+    // nothing. `unbind attempt` is emitted on ARRIVAL so a call is provable even
+    // when it is later rejected. NEVER log the token (only its presence).
+    deps.logger?.info?.(
+      `mobile-signout: unbind attempt method=${(req.method ?? "").toUpperCase()} ` +
+        `bearer=${bearerToken(req) ? "present" : "absent"} ` +
+        `deviceIdHeader=${headerValue(req, "x-openclaw-device-id") ? "present" : "absent"}`,
+    );
+
     if ((req.method ?? "").toUpperCase() !== "POST") {
+      deps.logger?.warn?.(
+        `mobile-signout: REJECTED 405 reason=wrong-method method=${(req.method ?? "").toUpperCase()} — NO unbind performed`,
+      );
       sendJson(res, 405, { error: "method not allowed" });
       return;
     }
@@ -76,22 +95,37 @@ export function createMobileSignoutHandler(deps: SignoutRouteDeps) {
     const clerk = deps.resolveClerk();
     const token = bearerToken(req);
     if (!clerk || !token) {
+      deps.logger?.warn?.(
+        `mobile-signout: REJECTED 401 reason=${!clerk ? "clerk-not-configured" : "no-bearer"} — NO unbind performed`,
+      );
       sendJson(res, 401, { error: "unauthorized" });
       return;
     }
     let verified: Awaited<ReturnType<SignoutRouteDeps["verifyJwt"]>>;
+    let verifyThrew = false;
     try {
       verified = await deps.verifyJwt(token, clerk);
     } catch {
       verified = { ok: false };
+      verifyThrew = true;
     }
     if (!verified.ok) {
+      deps.logger?.warn?.(
+        `mobile-signout: REJECTED 401 reason=${verifyThrew ? "verify-threw" : "invalid-token"} — NO unbind performed`,
+      );
       sendJson(res, 401, { error: "unauthorized" });
       return;
     }
 
     const deviceId = headerValue(req, "x-openclaw-device-id");
     if (!deviceId) {
+      // Token was VALID — so this is a client that authenticated and still could
+      // not be unbound. Loudest of the rejections: it means a real sign-out
+      // silently left the link in place (see the ordering requirement in
+      // A&D §7.4b-A: revocation must not depend on unrelated input).
+      deps.logger?.warn?.(
+        "mobile-signout: REJECTED 400 reason=missing-device-id (token WAS valid) — NO unbind performed",
+      );
       sendJson(res, 400, { error: "missing X-OpenClaw-Device-Id" });
       return;
     }
@@ -119,8 +153,14 @@ export function createMobileSignoutHandler(deps: SignoutRouteDeps) {
       return;
     }
 
+    // Success path logs the ROW COUNT, not a boolean: "200 rowsDeleted=0" is the
+    // signature of a real-but-ineffective unbind (device-id mismatch, already
+    // unbound, or another user's row) — indistinguishable from a true no-op in
+    // the response body, which returns 200 either way by idempotency design.
+    // That number is what makes an ineffective unbind diagnosable at all.
     deps.logger?.info?.(
-      `mobile-signout: unbind ${unbound > 0 ? "removed" : "no-op"} for device link`,
+      `mobile-signout: OK 200 rowsDeleted=${unbound} channel=${SIGNOUT_CHANNEL}` +
+        (unbound === 0 ? " (NO-OP — nothing matched this user+device)" : ""),
     );
     sendJson(res, 200, { ok: true, unbound: unbound > 0 });
   };

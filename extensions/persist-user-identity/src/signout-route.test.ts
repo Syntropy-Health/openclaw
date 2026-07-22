@@ -177,3 +177,97 @@ describe("POST /gateway/mobile/signout (G-lane [G2])", () => {
     expect(verifyJwt).toHaveBeenCalledWith("aaa.bbb.ccc", CLERK);
   });
 });
+
+// ---------------------------------------------------------------------------
+// OBSERVABILITY (T1.2.2 post-mortem): every outcome must be visible server-side.
+// v1 logged ONLY success, so after a live sign-out left the row in place it was
+// undecidable whether the app never called or called-and-was-rejected.
+// ---------------------------------------------------------------------------
+
+describe("mobile-signout observability", () => {
+  function withLogs(overrides: Partial<SignoutRouteDeps> = {}) {
+    const info: string[] = [];
+    const warn: string[] = [];
+    const error: string[] = [];
+    const deps = makeDeps({
+      ...overrides,
+      logger: {
+        info: (m: string) => info.push(m),
+        warn: (m: string) => warn.push(m),
+        error: (m: string) => error.push(m),
+      },
+    });
+    return { deps, info, warn, error, all: () => [...info, ...warn, ...error].join(" | ") };
+  }
+
+  it("★ logs ARRIVAL before any validation — a call is provable even when later rejected", async () => {
+    const { deps, info } = withLogs();
+    const { res } = fakeRes();
+    // Wrong method: rejected at the very first gate, yet arrival must be logged.
+    await createMobileSignoutHandler(deps)(fakeReq({ method: "GET", headers: AUTHED }), res);
+    expect(info.join(" ")).toContain("unbind attempt");
+  });
+
+  it("★ every rejection names a REASON and says NO unbind performed", async () => {
+    const cases: Array<[string, Parameters<typeof fakeReq>[0], Partial<SignoutRouteDeps>, RegExp]> =
+      [
+        ["wrong method", { method: "GET", headers: AUTHED }, {}, /405.*wrong-method/],
+        ["no bearer", { headers: { "x-openclaw-device-id": "d1" } }, {}, /401.*no-bearer/],
+        [
+          "clerk unconfigured",
+          { headers: AUTHED },
+          { resolveClerk: () => undefined },
+          /401.*clerk-not-configured/,
+        ],
+        [
+          "invalid token",
+          { headers: AUTHED },
+          { verifyJwt: async () => ({ ok: false as const }) },
+          /401.*invalid-token/,
+        ],
+        [
+          "missing device id",
+          { headers: { authorization: "Bearer a.b.c" } },
+          {},
+          /400.*missing-device-id/,
+        ],
+      ];
+    for (const [label, reqOpts, overrides, pattern] of cases) {
+      const { deps, warn } = withLogs(overrides);
+      const { res } = fakeRes();
+      await createMobileSignoutHandler(deps)(fakeReq(reqOpts), res);
+      const joined = warn.join(" | ");
+      expect(joined, `case: ${label}`).toMatch(pattern);
+      expect(joined, `case: ${label}`).toContain("NO unbind performed");
+    }
+  });
+
+  it("★ success logs the ROW COUNT — 200-with-rowsDeleted=0 is the ineffective-unbind signature", async () => {
+    const effective = withLogs();
+    const r1 = fakeRes();
+    await createMobileSignoutHandler(effective.deps)(fakeReq({ headers: AUTHED }), r1.res);
+    expect(effective.info.join(" ")).toContain("rowsDeleted=1");
+
+    const noop = withLogs({ unlink: async () => 0 });
+    const r2 = fakeRes();
+    await createMobileSignoutHandler(noop.deps)(fakeReq({ headers: AUTHED }), r2.res);
+    const joined = noop.info.join(" ");
+    expect(joined).toContain("rowsDeleted=0");
+    // Both return 200 by idempotency design, so the log is the ONLY way to tell
+    // an effective unbind from one that matched nothing.
+    expect(joined).toContain("NO-OP");
+    expect(r2.state.status).toBe(200);
+  });
+
+  it("★ NEVER echoes the bearer token in any log line (presence only)", async () => {
+    const secret = "supersecret.jwt.value";
+    const { deps, all } = withLogs();
+    const { res } = fakeRes();
+    await createMobileSignoutHandler(deps)(
+      fakeReq({ headers: { authorization: `Bearer ${secret}`, "x-openclaw-device-id": "d1" } }),
+      res,
+    );
+    expect(all()).not.toContain(secret);
+    expect(all()).toContain("bearer=present");
+  });
+});
