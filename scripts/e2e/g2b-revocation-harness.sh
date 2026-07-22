@@ -56,6 +56,18 @@ chat() {
     -d '{"model":"openclaw","input":"harness turn","stream":false}' --max-time 60
 }
 greplog() { grep -iE "clerk-session|mobile-signout" "$GW_LOG" 2>/dev/null | tail -"${1:-3}" | sed 's/\x1b\[[0-9;]*m//g'; }
+# Decode a JWT's exp and echo the seconds remaining (negative = already expired).
+# Keeps a timing failure LEGIBLE («token expired, re-mint») instead of a misleading
+# [G3]-expiry-401 that looks like a control failure.
+jwt_ttl() {
+  python3 - "$1" <<'PYEOF' 2>/dev/null || echo "-9999"
+import base64,json,sys,time
+try:
+    p=sys.argv[1].split(".")[1]; d=json.loads(base64.urlsafe_b64decode(p+"="*(-len(p)%4)))
+    print(int(d.get("exp",0))-int(time.time()))
+except Exception: print("-9999")
+PYEOF
+}
 
 echo "[G2b] §7.4b-A revocation harness — gateway $GW, log $GW_LOG"
 [ -n "${LIVE_JWT:-}" ] && echo "LIVE session provided: scenarios 1-4,6-8 armed." || echo "NO live session: real-Clerk scenarios marked PENDING."
@@ -64,9 +76,14 @@ hr
 # ── 1. HAPPY PATH ──────────────────────────────────────────────────────────
 say "1. HAPPY PATH — valid token + active session → 200, resolved ACTIVE"
 if [ -n "${LIVE_JWT:-}" ] && [ -n "${LIVE_SID:-}" ]; then
-  code=$(chat "$LIVE_JWT" "$LIVE_SID")
-  obs=$(greplog 1)
-  [ "$code" = "200" ] && result PASS "200; observable: $obs" || result FAIL "expected 200, got $code; $obs"
+  ttl=$(jwt_ttl "$LIVE_JWT")
+  if [ "$ttl" -lt 3 ]; then
+    result FAIL "LIVE_JWT already expired/expiring (${ttl}s) — the window was lost to round-trip; RE-MINT and rerun A. (A 401 here is [G3] expiry, NOT a control failure.)"
+  else
+    code=$(chat "$LIVE_JWT" "$LIVE_SID")
+    obs=$(greplog 1)
+    [ "$code" = "200" ] && result PASS "200 active (ttl was ${ttl}s); observable: $obs" || result FAIL "expected 200, got $code (ttl ${ttl}s); $obs"
+  fi
 else result PENDING "provide LIVE_JWT + LIVE_SID"; fi
 
 # ── 5. NO-HANDLE FAIL-CLOSED ───────────────────────────────────────────────
@@ -139,9 +156,21 @@ if [ -n "${LIVE_JWT:-}" ]; then result PENDING "measured during scenario 2's sig
 # ── 6. SUB-MATCH (THE residual verify) ─────────────────────────────────────
 say "6. SUB-MATCH — a DIFFERENT user's token + this session id → 401 (self-attack can't go cross-user)"
 if [ -n "${LIVE_JWT_2:-}" ] && [ -n "${LIVE_SID:-}" ]; then
-  code=$(chat "$LIVE_JWT_2" "$LIVE_SID")   # user B's token naming user A's live session id
-  obs=$(greplog 1)
-  [ "$code" = "401" ] && result PASS "401 sub-mismatch — the header is a lookup key, not identity; $obs" || result FAIL "expected 401, got $code — CROSS-USER via header; $obs"
+  ttl=$(jwt_ttl "$LIVE_JWT_2")
+  if [ "$ttl" -lt 3 ]; then
+    result FAIL "LIVE_JWT_2 already expired/expiring (${ttl}s) — a 401 here would be [G3] EXPIRY, not sub-mismatch. RE-MINT before scoring."
+  else
+    b6=$(grep -ic "sub-MISMATCH" "$GW_LOG" 2>/dev/null)
+    code=$(chat "$LIVE_JWT_2" "$LIVE_SID")   # user B's token naming user A's live session id
+    a6=$(grep -ic "sub-MISMATCH" "$GW_LOG" 2>/dev/null)
+    if [ "$code" = "401" ] && [ "$a6" -gt "$b6" ]; then
+      result PASS "401 with a NEW 'sub-MISMATCH' line — the header is a lookup key, resolution rejected cross-user (not expiry)"
+    elif [ "$code" = "401" ]; then
+      result FAIL "401 but NO sub-MISMATCH line — likely [G3] expiry (ttl was ${ttl}s), not the self-attack bound. RE-MINT."
+    else
+      result FAIL "expected 401, got $code — CROSS-USER via header would be a BREACH; $(greplog 1)"
+    fi
+  fi
 else result PENDING "provide LIVE_JWT_2 (a different Clerk user) + LIVE_SID"; fi
 
 # ── 7. REVOKE-BEFORE-VALIDATION (chat path is inherently per-request) ──────
