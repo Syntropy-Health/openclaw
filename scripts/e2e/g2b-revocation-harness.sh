@@ -33,6 +33,9 @@ GW_LOG="${GW_LOG:-/tmp/gw-main.log}"
 export PGPASSWORD="${PGPASSWORD:-postgres}"
 DB="${DB_URL:-postgresql://postgres:postgres@localhost:5432/openclaw_test}"
 RESP="$GW/v1/responses"
+# Revoked-session token for the sign-out legs (2/3); falls back to LIVE_JWT.
+CJWT="${LIVE_JWT_C:-${LIVE_JWT:-}}"
+CSID="${LIVE_SID_C:-${LIVE_SID:-}}"
 PASS=0; FAIL=0; PEND=0
 
 hr() { printf '─%.0s' {1..76}; echo; }
@@ -98,17 +101,17 @@ else result PENDING "provide LIVE_JWT"; fi
 say "2. CORE REVOKE — sign in→works→SIGN OUT (Clerk)→chat → 401 that is REVOKED, not expiry"
 echo "   ⚠️ EVIDENCE INTEGRITY (shrinemobile #4377): the ~60s token means a 401 could be a [G3]"
 echo "   EXPIRY, not a [G2b] REVOCATION — same status, different reason. A 401 alone is a VACUOUS"
-echo "   pass. PASS requires the SERVER-SIDE observable: a 'clerk-session: REVOKED' log line for"
+echo "   pass. PASS requires the SERVER-SIDE observable: a 'clerk-session] REVOKED' log line for"
 echo "   THIS turn. An expiry fails at JWT-verify BEFORE validation runs, so it produces NO"
 echo "   clerk-session line — that's the discriminator. 401-without-REVOKED → re-mint & retry."
 echo "   MANUAL STEP: sign the QA user OUT (Clerk signOut) WITHIN the token window, then continue."
-if [ -n "${LIVE_JWT:-}" ] && [ -n "${LIVE_SID:-}" ] && [ "${SIGNED_OUT:-}" = "1" ]; then
-  before=$(grep -ic "clerk-session: REVOKED" "$GW_LOG" 2>/dev/null)
-  code=$(chat "$LIVE_JWT" "$LIVE_SID")
-  after=$(grep -ic "clerk-session: REVOKED" "$GW_LOG" 2>/dev/null)
+if [ -n "${CJWT:-}" ] && [ -n "${CSID:-}" ] && [ "${SIGNED_OUT:-}" = "1" ]; then
+  before=$(grep -ic "REVOKED" "$GW_LOG" 2>/dev/null)
+  code=$(chat "$CJWT" "$CSID")
+  after=$(grep -ic "REVOKED" "$GW_LOG" 2>/dev/null)
   obs=$(greplog 2)
   if [ "$code" = "401" ] && [ "$after" -gt "$before" ]; then
-    result PASS "401 with a NEW 'clerk-session: REVOKED' line (revocation, NOT expiry); $obs"
+    result PASS "401 with a NEW 'clerk-session] REVOKED' line (revocation, NOT expiry); $obs"
   elif [ "$code" = "401" ]; then
     result FAIL "401 but NO new REVOKED line — likely [G3] EXPIRY, not [G2b] revocation. RE-MINT and rerun this leg inside the window; $obs"
   else
@@ -126,17 +129,17 @@ echo "   closed AT THE SOURCE, not just at the gateway. This is STRONGER than th
 echo "   PASS = BOTH: (a) the post-sign-out re-mint returns EMPTY (LIVE_JWT_REMINT empty); AND"
 echo "               (b) the pre-sign-out captured token (LIVE_JWT, now for a REVOKED session) → 401."
 echo "   INVERSE = FAIL-ESCALATE: a NON-EMPTY re-mint means Clerk did NOT revoke — do not score green."
-if [ -n "${LIVE_JWT:-}" ] && [ -n "${LIVE_SID:-}" ] && [ "${REMINT_ATTEMPTED:-}" = "1" ]; then
+if [ -n "${CJWT:-}" ] && [ -n "${CSID:-}" ] && [ "${REMINT_ATTEMPTED:-}" = "1" ]; then
   if [ -n "${LIVE_JWT_REMINT:-}" ]; then
     # A token WAS minted for a supposedly signed-out session → Clerk did not revoke.
     codeR=$(chat "$LIVE_JWT_REMINT" "$LIVE_SID")
     result FAIL "ESCALATE: re-mint SUCCEEDED post-sign-out (non-empty) — Clerk did NOT revoke the session (gateway said $codeR); this is a revocation failure at the SOURCE, not the gateway"
   else
     # (a) empty mint ✓. Now (b): the captured token must 401 for REVOCATION, not expiry —
-    # same reason-discriminator as scenario 2 (a 'clerk-session: REVOKED' log line for this turn).
-    b3=$(grep -ic "clerk-session: REVOKED" "$GW_LOG" 2>/dev/null)
-    codeB=$(chat "$LIVE_JWT" "$LIVE_SID")
-    a3=$(grep -ic "clerk-session: REVOKED" "$GW_LOG" 2>/dev/null)
+    # same reason-discriminator as scenario 2 (a 'clerk-session] REVOKED' log line for this turn).
+    b3=$(grep -ic "REVOKED" "$GW_LOG" 2>/dev/null)
+    codeB=$(chat "$CJWT" "$CSID")
+    a3=$(grep -ic "REVOKED" "$GW_LOG" 2>/dev/null)
     if [ "$codeB" = "401" ] && [ "$a3" -gt "$b3" ]; then
       result PASS "(a) re-mint EMPTY at Clerk + (b) captured token → 401 with a REVOKED observable (not expiry)"
     elif [ "$codeB" = "401" ]; then
