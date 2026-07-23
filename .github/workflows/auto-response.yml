@@ -16,26 +16,39 @@ jobs:
   # every issue/PR event; resumes the moment the real org App is provisioned and
   # GH_APP_PRIVATE_KEY is set (#29 — org App 'syntropy-community-bot' 4276364 now live;
   # the guard remains as resilience if the secret is ever rotated/absent).
+  # PROBE the real capability (secret present AND App 4276364 installed on this
+  # repo), not just secret-presence — presence alone was a false-green gate that
+  # greenlit the job, which then 404'd in create-github-app-token because the App
+  # was not installed here. Gate on the probe step's OUTCOME so a missing key OR
+  # missing installation makes auto-response SKIP cleanly (green + notice), never
+  # fail red on every issue/PR event and never falsely report ready (#29).
   gate:
     runs-on: ubuntu-latest
     outputs:
-      has_app_key: ${{ steps.check.outputs.has_app_key }}
+      app_ready: ${{ steps.probe.outputs.app_ready }}
     steps:
-      - name: Check GH App key presence
-        id: check
+      - name: Probe GH App token (secret present AND app installed)
+        id: token
+        continue-on-error: true
+        uses: actions/create-github-app-token@d72941d797fd3113feb6b93fd0dec494b13a2547 # v1
+        with:
+          app-id: "4276364"
+          private-key: ${{ secrets.GH_APP_PRIVATE_KEY }}
+      - name: Resolve gate from probe outcome
+        id: probe
         env:
-          APP_KEY: ${{ secrets.GH_APP_PRIVATE_KEY }}
+          PROBE_OUTCOME: ${{ steps.token.outcome }}
         run: |
-          if [ -n "$APP_KEY" ]; then
-            echo "has_app_key=true" >> "$GITHUB_OUTPUT"
+          if [ "$PROBE_OUTCOME" = "success" ]; then
+            echo "app_ready=true" >> "$GITHUB_OUTPUT"
           else
-            echo "has_app_key=false" >> "$GITHUB_OUTPUT"
-            echo "::notice::GH_APP_PRIVATE_KEY not provisioned — skipping auto-response. Resumes when the real org App is provisioned (#29)."
+            echo "app_ready=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::GH App 4276364 not usable (private-key secret missing OR app not installed on this repo) — skipping auto-response. Resumes when the App is installed and the key is set (#29)."
           fi
 
   auto-response:
     needs: [gate]
-    if: needs.gate.outputs.has_app_key == 'true'
+    if: needs.gate.outputs.app_ready == 'true'
     permissions:
       issues: write
       pull-requests: write
