@@ -227,7 +227,13 @@ describe("sendBlueBubblesMedia local-path hardening", () => {
   it("rejects relative mediaLocalRoots entries", async () => {
     const allowedRoot = await makeTempDir();
     const allowedFile = path.join(allowedRoot, "allowed.txt");
-    const relativeRoot = path.relative(process.cwd(), allowedRoot);
+    // Use a LITERAL relative root, not `path.relative(process.cwd(), allowedRoot)`:
+    // on Windows the temp dir (C:) and the CI checkout (D:) are on different drives,
+    // so path.relative() returns the ABSOLUTE target (there is no cross-drive relative
+    // form), which wrongly satisfies the absolute-path guard and makes this assertion
+    // pass on POSIX but fail on Windows. A literal relative path exercises the
+    // "must be absolute paths" rejection deterministically on every platform.
+    const relativeRoot = path.join(".", "relative-media-root");
     await fs.writeFile(allowedFile, "allowed", "utf8");
 
     await expect(
