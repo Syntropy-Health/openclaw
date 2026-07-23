@@ -12,7 +12,12 @@ import {
   type RateLimitCheckResult,
 } from "./auth-rate-limit.js";
 import { verifyClerkJwt, type VerifyClerkJwtOptions } from "./clerk-jwt.js";
-import { isClerkSessionDenied } from "./clerk-session-denylist.js";
+import { createClerkSessionResolver } from "./clerk-session-resolver.js";
+import {
+  type ClerkSessionResolver,
+  resolveSessionCacheTtlMs,
+  validateClerkSession,
+} from "./clerk-session-validation.js";
 import {
   isLoopbackAddress,
   isTrustedProxyAddress,
@@ -32,6 +37,16 @@ export type ResolvedClerkAuth = {
   jwksUrl: string;
   issuer: string;
   audience: string;
+  /**
+   * Server-side session validation (A&D §7.4b-A). Present ONLY when the Clerk
+   * BACKEND SECRET is configured. When present, a verified clerk-jwt turn is
+   * additionally checked against Clerk's live session state (revoked → 401);
+   * when ABSENT the turn is JWT-verified only (behavior-preserving for the many
+   * gateway deployments that have no revocation requirement). Boot logs which.
+   */
+  sessionResolver?: ClerkSessionResolver;
+  /** Positive-cache TTL for session validation (ms). Config knob. */
+  sessionCacheTtlMs?: number;
 };
 
 /**
@@ -314,7 +329,25 @@ export function resolveClerkAuth(
   if (!jwksUrl || !issuer || !audience) {
     return undefined;
   }
-  return { jwksUrl, issuer, audience };
+
+  // §7.4b-A: server-side session validation activates ONLY when the Clerk BACKEND
+  // SECRET is configured. Absent → JWT-verify-only (behavior-preserving). The
+  // secret is read here and closed over by the resolver; it is never stored on
+  // the returned config object and never logged.
+  const secretKey = (clerkConfig?.secretKey ?? env.OPENCLAW_CLERK_SECRET_KEY ?? "").trim();
+  let sessionResolver: ClerkSessionResolver | undefined;
+  if (secretKey) {
+    sessionResolver = createClerkSessionResolver({
+      secretKey,
+      apiBaseUrl: clerkConfig?.backendApiUrl ?? env.OPENCLAW_CLERK_API_URL,
+    });
+  }
+  const sessionCacheTtlMs = resolveSessionCacheTtlMs(
+    { sessionCacheTtlMs: clerkConfig?.sessionCacheTtlMs },
+    env,
+  );
+
+  return { jwksUrl, issuer, audience, sessionResolver, sessionCacheTtlMs };
 }
 
 /**
@@ -462,6 +495,14 @@ export async function authorizeGatewayConnect(params: {
   rateLimitScope?: string;
   /** Injectable JWKS fetcher for Clerk verification (tests); real fetch by default. */
   fetchClerkJwks?: VerifyClerkJwtOptions["fetchJwks"];
+  /** Logger for §7.4b-A session validation (fail-open ERROR etc.). */
+  sessionLogger?: {
+    info?: (m: string) => void;
+    warn?: (m: string) => void;
+    error?: (m: string) => void;
+  };
+  /** Metric sink for the fail-open alarm. */
+  sessionMetric?: (name: string) => void;
 }): Promise<GatewayAuthResult> {
   const { auth, connectAuth, req, trustedProxies } = params;
   const tailscaleWhois = params.tailscaleWhois ?? readTailscaleWhoisIdentity;
@@ -514,12 +555,30 @@ export async function authorizeGatewayConnect(params: {
       fetchJwks: params.fetchClerkJwks,
     });
     if (clerkResult.ok) {
-      // G-lane [G2b]: a signed-out (revoked) Clerk session is rejected even
-      // while its JWT is still within TTL — a replayed token must never reach
-      // an agent turn (which would re-run the [G1] auto-bind). Fail-closed 401.
-      if (isClerkSessionDenied(clerkResult.sid)) {
-        limiter?.recordFailure(ip, rateLimitScope);
-        return { ok: false, reason: "clerk_session_revoked" };
+      // G-lane [G2b] §7.4b-A: server-side Clerk session validation. Active ONLY
+      // when a session resolver is configured (the Clerk backend secret is set);
+      // when absent, JWT-verify-only (behavior-preserving for deployments with no
+      // revocation requirement — boot logs which mode). The session id is the
+      // X-OpenClaw-Clerk-Session-Id header — a LOOKUP KEY, never an assertion: we
+      // resolve it against Clerk and trust the RESOLUTION (+ sub-match), never the
+      // header. Revoked/not-found/no-handle/sub-mismatch → 401; Clerk-unreachable →
+      // fail-open (ratified). This is what survives token RE-MINTING, which the
+      // withdrawn jti/sid deny-lists could not.
+      if (auth.clerk.sessionResolver) {
+        const sessionId = headerValue(req?.headers?.["x-openclaw-clerk-session-id"]);
+        const decision = await validateClerkSession({
+          sub: clerkResult.externalId,
+          sessionId,
+          resolve: auth.clerk.sessionResolver,
+          cacheTtlMs: auth.clerk.sessionCacheTtlMs,
+          now: Date.now(),
+          logger: params.sessionLogger,
+          metric: params.sessionMetric,
+        });
+        if (!decision.ok) {
+          limiter?.recordFailure(ip, rateLimitScope);
+          return { ok: false, reason: `clerk_session_${decision.reason.replace(/-/g, "_")}` };
+        }
       }
       limiter?.reset(ip, rateLimitScope);
       return { ok: true, method: "clerk-jwt", externalId: clerkResult.externalId };

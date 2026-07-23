@@ -146,6 +146,16 @@ export type GatewayClerkAuthConfig = {
   issuer?: string;
   /** Expected `aud` claim (the mobile JWT template audience). */
   audience?: string;
+  /**
+   * Clerk BACKEND secret (sk_test_/sk_live_). Enables §7.4b-A server-side session
+   * validation (revocation that survives token re-minting). Absent → JWT-verify
+   * only. Sourced from OPENCLAW_CLERK_SECRET_KEY when unset; never logged.
+   */
+  secretKey?: string;
+  /** Clerk backend API base (default https://api.clerk.com). Test override. */
+  backendApiUrl?: string;
+  /** Positive session-validation cache TTL (ms). Config knob; default 30000. */
+  sessionCacheTtlMs?: number;
 };
 
 export type GatewayTauConfig = {

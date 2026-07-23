@@ -4,6 +4,7 @@ import type {
   GatewayTailscaleConfig,
   loadConfig,
 } from "../config/config.js";
+import { logInfo } from "../logger.js";
 import {
   assertClerkConfigAllOrNone,
   assertGatewayAuthConfigured,
@@ -100,6 +101,16 @@ export async function resolveGatewayRuntimeConfig(params: {
   assertGatewayAuthConfigured(resolvedAuth);
   // G-lane [G3]: fail boot on a PARTIAL Clerk config (silent-disable guard).
   assertClerkConfigAllOrNone(authConfig.clerk, process.env);
+  // G-lane [G2b] §7.4b-A: make the session-validation MODE visible at boot, so a
+  // misconfigured (secret-absent) deploy that silently skips revocation is caught
+  // by eye instead of only at the next §2.5 failure. Never logs the secret.
+  if (resolvedAuth.clerk) {
+    logInfo(
+      resolvedAuth.clerk.sessionResolver
+        ? `[gateway] clerk session validation: ACTIVE (server-side revocation; cache ${resolvedAuth.clerk.sessionCacheTtlMs ?? 30000}ms)`
+        : "[gateway] clerk session validation: INACTIVE (no backend secret) — JWT-verify only, NO revocation",
+    );
+  }
   if (tailscaleMode === "funnel" && authMode !== "password") {
     throw new Error(
       "tailscale funnel requires gateway auth mode=password (set gateway.auth.password or OPENCLAW_GATEWAY_PASSWORD)",
