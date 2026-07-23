@@ -19,32 +19,43 @@ on:
 permissions: {}
 
 jobs:
-  # Gate the App-token jobs on the GH App private key being provisioned. The
-  # `secrets` context is NOT available in `if:` conditions (job or step), so we
-  # surface presence as a job output (`secrets` IS available in step `env`) and
-  # gate the real jobs via `needs` + a `needs`-context `if:`. Absent key => the
-  # labeler jobs SKIP cleanly (green) instead of failing red on every PR;
-  # auto-labeling resumes the moment GH_APP_PRIVATE_KEY (App 4276364) is set (#29).
+  # Gate the App-token jobs on the GH App being USABLE — which means the
+  # private key secret is present AND App 4276364 is actually installed on this
+  # repo. Checking only secret-presence was a FALSE-GREEN gate: the gate job went
+  # green and greenlit the downstream jobs, which then 404'd inside
+  # create-github-app-token ("get-a-repository-installation") because the App was
+  # never installed. We now PROBE the real capability (create the token here,
+  # continue-on-error) and gate on that step's OUTCOME — so a missing key OR a
+  # missing installation makes the labeler jobs SKIP cleanly (green + notice),
+  # never fail red and never falsely report ready. Resumes the moment the App is
+  # installed and GH_APP_PRIVATE_KEY is set (#29).
   gate:
     runs-on: ubuntu-latest
     outputs:
-      has_app_key: ${{ steps.check.outputs.has_app_key }}
+      app_ready: ${{ steps.probe.outputs.app_ready }}
     steps:
-      - name: Check GH App key presence
-        id: check
+      - name: Probe GH App token (secret present AND app installed)
+        id: token
+        continue-on-error: true
+        uses: actions/create-github-app-token@d72941d797fd3113feb6b93fd0dec494b13a2547 # v1
+        with:
+          app-id: "4276364"
+          private-key: ${{ secrets.GH_APP_PRIVATE_KEY }}
+      - name: Resolve gate from probe outcome
+        id: probe
         env:
-          APP_KEY: ${{ secrets.GH_APP_PRIVATE_KEY }}
+          PROBE_OUTCOME: ${{ steps.token.outcome }}
         run: |
-          if [ -n "$APP_KEY" ]; then
-            echo "has_app_key=true" >> "$GITHUB_OUTPUT"
+          if [ "$PROBE_OUTCOME" = "success" ]; then
+            echo "app_ready=true" >> "$GITHUB_OUTPUT"
           else
-            echo "has_app_key=false" >> "$GITHUB_OUTPUT"
-            echo "::notice::GH_APP_PRIVATE_KEY (App 4276364) not provisioned — skipping labeler jobs. Auto-labeling resumes when the .pem is set (#29)."
+            echo "app_ready=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::GH App 4276364 not usable (private-key secret missing OR app not installed on this repo) — skipping labeler jobs. Auto-labeling resumes when the App is installed and the key is set (#29)."
           fi
 
   label:
     needs: [gate]
-    if: needs.gate.outputs.has_app_key == 'true'
+    if: needs.gate.outputs.app_ready == 'true'
     permissions:
       contents: read
       pull-requests: write
@@ -222,7 +233,7 @@ jobs:
 
   backfill-pr-labels:
     needs: [gate]
-    if: github.event_name == 'workflow_dispatch' && needs.gate.outputs.has_app_key == 'true'
+    if: github.event_name == 'workflow_dispatch' && needs.gate.outputs.app_ready == 'true'
     permissions:
       contents: read
       pull-requests: write
@@ -465,7 +476,7 @@ jobs:
 
   label-issues:
     needs: [gate]
-    if: needs.gate.outputs.has_app_key == 'true'
+    if: needs.gate.outputs.app_ready == 'true'
     permissions:
       issues: write
     runs-on: ubuntu-latest
