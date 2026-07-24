@@ -13,7 +13,7 @@ import { getCliSessionId } from "../agents/cli-session.js";
 import { DEFAULT_MODEL, DEFAULT_PROVIDER } from "../agents/defaults.js";
 import { AGENT_LANE_SUBAGENT } from "../agents/lanes.js";
 import { loadModelCatalog } from "../agents/model-catalog.js";
-import { runWithModelFallback } from "../agents/model-fallback.js";
+import { resolveModelCandidateTimeoutMs, runWithModelFallback } from "../agents/model-fallback.js";
 import {
   buildAllowedModelSet,
   isCliProvider,
@@ -535,17 +535,13 @@ export async function agentCommand(
       // Track model fallback attempts so retries on an existing session don't
       // re-inject the original prompt as a duplicate user message.
       let fallbackAttemptIndex = 0;
-      // Per-candidate timeout (issue #112i, opt-in via env): cap a slow/throttled
-      // candidate so we fail over to the next model fast instead of waiting out
-      // its inner provider retries. Unset/<=0 = disabled (no behavior change).
-      const perCandidateTimeoutMs = (() => {
-        const raw = process.env.OPENCLAW_MODEL_CANDIDATE_TIMEOUT_MS?.trim();
-        if (!raw) {
-          return undefined;
-        }
-        const parsed = Number.parseInt(raw, 10);
-        return Number.isFinite(parsed) && parsed > 0 ? parsed : undefined;
-      })();
+      // Per-candidate timeout (issue #112): DEFAULT-ON — cap a slow/throttled
+      // candidate so the chat path fails over to the next model fast instead of
+      // dead-waiting its inner provider retries out to the 120s turn timeout.
+      // `OPENCLAW_MODEL_CANDIDATE_TIMEOUT_MS` stays the operator override
+      // (positive tunes, explicit 0 disables). Chat-path only; other
+      // runWithModelFallback callers pass nothing and are unaffected.
+      const perCandidateTimeoutMs = resolveModelCandidateTimeoutMs(process.env);
       const fallbackResult = await runWithModelFallback({
         cfg,
         provider,
