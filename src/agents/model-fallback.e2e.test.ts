@@ -140,7 +140,13 @@ describe("runWithModelFallback", () => {
       },
       usageStats: {
         [profileId]: {
-          cooldownUntil: Date.now() + 60_000,
+          // #115: put the cooldown expiry FAR beyond PROBE_MARGIN_MS (2min) so
+          // shouldProbePrimaryDuringCooldown never treats it as "about to expire"
+          // and probes the primary. The old 60s expiry fell INSIDE the 2min margin
+          // (now >= (now+60s) - 2min is always true), so the primary was probed
+          // instead of skipped — intermittently, depending on wall-clock. A far
+          // expiry makes the skip unconditional and the test deterministic.
+          cooldownUntil: Date.now() + 24 * 60 * 60_000,
         },
       },
     };
