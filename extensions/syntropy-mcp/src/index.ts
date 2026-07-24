@@ -13,10 +13,14 @@
  *   token request. A missing/empty env at register time excludes the server
  *   from the catalog entirely (zero tools, ONE structured log, no throw);
  *   other servers are unaffected.
- * - `m2m-exchange` — the TokenExchangeClient is a later task (B2). Until
- *   then these servers register with a `getToken` that ALWAYS rejects
- *   (`exchange-not-implemented (B2)`): fail-closed, zero tools, one
- *   structured plugin log. Not faked.
+ * - `m2m-exchange` — discovery uses the M2M actor token
+ *   ({@link ServiceAuthProvider}, `CLERK_MACHINE_SECRET_KEY`); per-user tool
+ *   execution uses a short-lived RFC-8693 exchanged token via
+ *   {@link TokenExchangeClient} (Tier-1 user JWT / Tier-2 `<channel>:<externalId>`),
+ *   RS256-JWKS-validated before use. Fail-closed: an incomplete config (absent
+ *   machine secret / issuer / resource) disables the server (zero tools, one
+ *   structured log), and execution with no verified user identity rejects —
+ *   never a faked or M2M-as-user fallback.
  *
  * Priority ordering (mirrors extensions/syntropy):
  *   35  syntropy (identity gate + profile injection)
