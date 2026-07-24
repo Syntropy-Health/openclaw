@@ -264,6 +264,37 @@ export const _probeThrottleInternals = {
 } as const;
 
 /**
+ * Default per-candidate timeout for the chat path (issue #112). A throttled
+ * primary (e.g. a 429 that pi-agent-core retries internally) otherwise
+ * dead-waits to the gateway's 120s turn timeout with NO failover; capping each
+ * candidate makes failover fire fast. Sized with headroom so a 2-3 candidate
+ * chain can WALK before the 120s turn deadline (25s x 3 = 75s < 120s).
+ */
+export const DEFAULT_MODEL_CANDIDATE_TIMEOUT_MS = 25_000;
+
+/**
+ * Resolve the per-candidate timeout for the chat path from the environment.
+ * Default-ON (issue #112): an unset or malformed override yields the default so
+ * failover always fires fast; `OPENCLAW_MODEL_CANDIDATE_TIMEOUT_MS` remains the
+ * operator override — a positive value tunes it, an explicit `0` disables it.
+ * Only the gateway chat caller (`agentCommand`) reads this; other
+ * `runWithModelFallback` callers pass nothing and stay unaffected.
+ */
+export function resolveModelCandidateTimeoutMs(env: NodeJS.ProcessEnv): number {
+  const raw = env.OPENCLAW_MODEL_CANDIDATE_TIMEOUT_MS?.trim();
+  if (!raw) {
+    return DEFAULT_MODEL_CANDIDATE_TIMEOUT_MS;
+  }
+  const parsed = Number.parseInt(raw, 10);
+  // Explicit 0 = operator opt-out; any other non-negative value tunes it;
+  // malformed/negative falls back to the default (never silently disabled).
+  if (Number.isFinite(parsed) && parsed >= 0) {
+    return parsed;
+  }
+  return DEFAULT_MODEL_CANDIDATE_TIMEOUT_MS;
+}
+
+/**
  * A cancelable timer that rejects with a `timeout` FailoverError after `ms`
  * (issue #112i per-candidate timeout). Raced against a candidate run; when it
  * wins, the existing catch treats it as a failover → next candidate.
