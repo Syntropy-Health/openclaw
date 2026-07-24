@@ -211,6 +211,13 @@ jobs:
           # Default heap limits have been too low on Linux CI (V8 OOM near 4GB).
           echo "OPENCLAW_TEST_WORKERS=2" >> "$GITHUB_ENV"
           echo "OPENCLAW_TEST_MAX_OLD_SPACE_SIZE_MB=6144" >> "$GITHUB_ENV"
+          # Probe (#153 follow-on): bound each vitest run so a worker that finishes
+          # its tests but cannot exit fails fast with a NAMED process-tree dump +
+          # open-handle report, instead of a silent ~20-min pool-hang whose logs
+          # are lost to the runner shutdown. 7 min >> the ~min-scale healthy run,
+          # << the runner job cap.
+          echo "OPENCLAW_TEST_WATCHDOG_MS=420000" >> "$GITHUB_ENV"
+          echo "OPENCLAW_TEST_HANG_DUMP=1" >> "$GITHUB_ENV"
 
       - name: Run ${{ matrix.task }} (${{ matrix.runtime }})
         run: ${{ matrix.command }}

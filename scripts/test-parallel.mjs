@@ -1,4 +1,4 @@
-import { spawn } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -257,8 +257,43 @@ function buildReporterArgs(entry, extraArgs) {
     : "";
 
   const outputFile = path.join(reportDir, `vitest-${entry.name}${shardSuffix}.json`);
-  return ["--reporter=default", "--reporter=json", "--outputFile", outputFile];
+  const base = ["--reporter=default", "--reporter=json", "--outputFile", outputFile];
+  // Diagnostic: when a worker finishes its tests but won't exit, this reporter
+  // (why-is-node-running under the hood) prints the open handle / timer / child
+  // keeping the process alive — turning "something hangs" into "THIS handle".
+  // Opt-in via OPENCLAW_TEST_HANG_DUMP=1 (set on the CI node lane while chasing
+  // the #153 node-test hang; harmless otherwise).
+  if (process.env.OPENCLAW_TEST_HANG_DUMP === "1") {
+    base.push("--reporter=hanging-process");
+  }
+  return base;
 }
+
+// Per-run watchdog. A vitest fork-worker that finishes its tests but cannot
+// EXIT (lingering handle / un-reaped child) hangs `child.on("exit")` forever;
+// the pool never resolves, the runner kills the job ~20 min later, and the logs
+// are lost. Bound each spawned run: on budget-exceed, snapshot the process tree
+// (names the stuck descendant), then SIGKILL the process GROUP and fail fast
+// with a NAMED diagnostic instead of a silent hang. Culprit-AGNOSTIC — it
+// catches the next reap-failure too. Off unless OPENCLAW_TEST_WATCHDOG_MS is a
+// positive integer (the CI node lane sets it). Not applied on Windows, where
+// process-group signalling differs.
+const watchdogMs = Number.parseInt(process.env.OPENCLAW_TEST_WATCHDOG_MS ?? "", 10);
+const watchdogEnabled = Number.isFinite(watchdogMs) && watchdogMs > 0 && !isWindows;
+
+const dumpProcessTree = () => {
+  try {
+    const ps = spawnSync("ps", ["-o", "pid,ppid,pgid,etimes,stat,comm,args", "-ax"], {
+      encoding: "utf8",
+      maxBuffer: 8 * 1024 * 1024,
+    });
+    if (ps.stdout) {
+      console.error(`[test-parallel] process tree at watchdog fire:\n${ps.stdout}`);
+    }
+  } catch (err) {
+    console.error(`[test-parallel] process-tree dump failed: ${String(err)}`);
+  }
+};
 
 const runOnce = (entry, extraArgs = []) =>
   new Promise((resolve) => {
@@ -293,6 +328,9 @@ const runOnce = (entry, extraArgs = []) =>
         stdio: "inherit",
         env: { ...process.env, VITEST_GROUP: entry.name, NODE_OPTIONS: resolvedNodeOptions },
         shell: isWindows,
+        // Own process group so the watchdog can SIGKILL the whole vitest tree
+        // (parent + stuck fork workers), not just the pnpm launcher.
+        detached: watchdogEnabled,
       });
     } catch (err) {
       console.error(`[test-parallel] spawn failed: ${String(err)}`);
@@ -300,10 +338,44 @@ const runOnce = (entry, extraArgs = []) =>
       return;
     }
     children.add(child);
+
+    let watchdog;
+    if (watchdogEnabled) {
+      const label = extraArgs.length ? `${entry.name} ${extraArgs.join(" ")}`.trim() : entry.name;
+      watchdog = setTimeout(() => {
+        console.error(
+          `\n[test-parallel] WATCHDOG: run "${label}" exceeded ${watchdogMs}ms without exiting — ` +
+            "a vitest worker likely finished its tests but cannot exit (lingering handle / " +
+            "un-reaped child). Dumping process tree, then killing the group.",
+        );
+        dumpProcessTree();
+        try {
+          if (child.pid) {
+            process.kill(-child.pid, "SIGKILL");
+          } else {
+            child.kill("SIGKILL");
+          }
+        } catch (err) {
+          console.error(`[test-parallel] watchdog kill failed: ${String(err)}`);
+          try {
+            child.kill("SIGKILL");
+          } catch {
+            // Best-effort: the process may already be gone; nothing left to do.
+          }
+        }
+      }, watchdogMs);
+      if (typeof watchdog.unref === "function") {
+        watchdog.unref();
+      }
+    }
+
     child.on("error", (err) => {
       console.error(`[test-parallel] child error: ${String(err)}`);
     });
     child.on("exit", (code, signal) => {
+      if (watchdog) {
+        clearTimeout(watchdog);
+      }
       children.delete(child);
       resolve(code ?? (signal ? 1 : 0));
     });
