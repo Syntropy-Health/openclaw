@@ -220,12 +220,17 @@ jobs:
           # this is the same class on Node 22 on the runner. Force the stable `forks`
           # pool on CI (the pool that passes locally). Local dev keeps vmForks.
           echo "OPENCLAW_TEST_VM_FORKS=0" >> "$GITHUB_ENV"
-          # Probe (#153 follow-on): bound each vitest run so a worker that finishes
-          # its tests but cannot exit fails fast with a NAMED process-tree dump +
-          # open-handle report, instead of a silent ~20-min pool-hang whose logs
-          # are lost to the runner shutdown. 7 min >> the ~min-scale healthy run,
-          # << the runner job cap.
-          echo "OPENCLAW_TEST_WATCHDOG_MS=420000" >> "$GITHUB_ENV"
+          # Watchdog (#153): bound each vitest run so a worker that finishes its
+          # tests but cannot EXIT (lingering handle / un-reaped child / pool-runtime
+          # deadlock) fails fast with a NAMED process-tree dump + open-handle report,
+          # instead of a silent pool-hang whose logs are lost to the runner shutdown.
+          # Budget sizing: with vmForks disabled (#85) the suite runs as one larger
+          # `forks` group and is slower — a HEALTHY run on 4778db461-forks completed
+          # 799 files in 6.9 min at a steady ~116 files/min (no stall, workers in
+          # R-state), i.e. ~10-12 min total. The prior 7-min budget FALSE-FIRED on
+          # that slow-but-healthy run. 20 min clears it with ~2x margin while still
+          # catching a TRUE deadlock (which is infinite) well under the runner cap.
+          echo "OPENCLAW_TEST_WATCHDOG_MS=1200000" >> "$GITHUB_ENV"
           echo "OPENCLAW_TEST_HANG_DUMP=1" >> "$GITHUB_ENV"
 
       - name: Run ${{ matrix.task }} (${{ matrix.runtime }})
