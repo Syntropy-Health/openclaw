@@ -76,9 +76,19 @@ export type AdminIdentity = {
 /**
  * Build the USER-scoped context (the default; also the WhatsApp/partner path).
  * `is_admin` is `false` BY CONSTRUCTION — there is no admin identity here.
+ *
+ * `phi_cleared` for a user = the platform BAA flag (`GRAPHITI_PHI_ENABLED`) ALONE
+ * (CTO ruling #5334, cleared by #5339): a signed-in user may read their OWN PHI
+ * when the platform BAA is active. This is safe ONLY because every
+ * `all_of[auth_required, phi]` tool is clerk_id-SELF-SCOPED by construction — the
+ * gate does not confine cross-user reach, the TOOL does (SJ self-scoping rail,
+ * PR #1624 / origin/test `c06bbbb6`, CI-enforced RED-first). The user path is NOT
+ * admin-audited (you don't audit someone reading their own record). If
+ * `graphitiPhiEnabled` is omitted, `phi_cleared` stays `false` (fail-closed).
  */
 export function buildUserGateContext(params: {
   externalId: string | undefined;
+  graphitiPhiEnabled?: boolean;
   subscriptionPlan?: unknown;
 }): GateContext {
   const externalId = params.externalId?.trim() || undefined;
@@ -86,7 +96,8 @@ export function buildUserGateContext(params: {
     is_authenticated: Boolean(externalId),
     subscription_plan: normalizeSubscriptionPlan(params.subscriptionPlan),
     is_admin: false,
-    phi_cleared: false,
+    // A user reads their own PHI iff signed in AND the platform BAA is live.
+    phi_cleared: Boolean(externalId) && params.graphitiPhiEnabled === true,
     user_subject: externalId,
   };
 }

@@ -81,6 +81,42 @@ describe("gate-context — StrictBool + phi conjunction", () => {
     expect(ctx.is_admin).toBe(true);
     expect(ctx.phi_cleared).toBe(false); // conjunction fail-closed
   });
+
+  // User own-PHI flip (CTO #5334 ruling, cleared by SJ self-scoping rail #5339/#1624).
+  it("buildUserGateContext: signed-in user + platform BAA → phi_cleared true (own PHI)", () => {
+    const ctx = buildUserGateContext({ externalId: "user_x", graphitiPhiEnabled: true });
+    expect(ctx.is_admin).toBe(false); // still never admin
+    expect(ctx.phi_cleared).toBe(true);
+  });
+  it("buildUserGateContext: user without BAA → phi_cleared false (fail-closed)", () => {
+    expect(
+      buildUserGateContext({ externalId: "user_x", graphitiPhiEnabled: false }).phi_cleared,
+    ).toBe(false);
+    expect(buildUserGateContext({ externalId: "user_x" }).phi_cleared).toBe(false); // omitted → false
+  });
+  it("buildUserGateContext: anon (no externalId) + BAA → phi_cleared false (must be signed in)", () => {
+    expect(
+      buildUserGateContext({ externalId: undefined, graphitiPhiEnabled: true }).phi_cleared,
+    ).toBe(false);
+  });
+});
+
+describe("evaluateGate — user own-PHI path (all_of[auth_required, phi])", () => {
+  const g: Gate = {
+    kind: "composite",
+    op: "all_of",
+    members: [{ kind: "auth_required" }, { kind: "phi" }],
+  };
+  it("signed-in user + BAA → allowed (their own self-scoped PHI)", () => {
+    const ctx = buildUserGateContext({ externalId: "u", graphitiPhiEnabled: true });
+    expect(evaluateGate(g, ctx).allowed).toBe(true);
+  });
+  it("signed-in user WITHOUT BAA → denied at the phi leg", () => {
+    const ctx = buildUserGateContext({ externalId: "u", graphitiPhiEnabled: false });
+    const d = evaluateGate(g, ctx);
+    expect(d.allowed).toBe(false);
+    expect(d.failing_kind).toBe("phi");
+  });
 });
 
 // ── evaluator (mirror of SJ evaluate_decision) ────────────────────────────────
