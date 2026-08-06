@@ -7,7 +7,11 @@ import type { OpenClawConfig } from "../config/config.js";
 import type { AuthProfileStore } from "./auth-profiles.js";
 import { saveAuthProfileStore } from "./auth-profiles.js";
 import { AUTH_STORE_VERSION } from "./auth-profiles/constants.js";
-import { runWithModelFallback } from "./model-fallback.js";
+import {
+  DEFAULT_MODEL_CANDIDATE_TIMEOUT_MS,
+  resolveModelCandidateTimeoutMs,
+  runWithModelFallback,
+} from "./model-fallback.js";
 
 function makeCfg(overrides: Partial<OpenClawConfig> = {}): OpenClawConfig {
   return {
@@ -136,7 +140,13 @@ describe("runWithModelFallback", () => {
       },
       usageStats: {
         [profileId]: {
-          cooldownUntil: Date.now() + 60_000,
+          // #115: put the cooldown expiry FAR beyond PROBE_MARGIN_MS (2min) so
+          // shouldProbePrimaryDuringCooldown never treats it as "about to expire"
+          // and probes the primary. The old 60s expiry fell INSIDE the 2min margin
+          // (now >= (now+60s) - 2min is always true), so the primary was probed
+          // instead of skipped — intermittently, depending on wall-clock. A far
+          // expiry makes the skip unconditional and the test deterministic.
+          cooldownUntil: Date.now() + 24 * 60 * 60_000,
         },
       },
     };
@@ -520,5 +530,73 @@ describe("runWithModelFallback per-candidate timeout (issue #112i)", () => {
       }),
     ).rejects.toThrow(/All models failed/);
     expect(run).toHaveBeenCalledTimes(2); // primary + fallback both attempted then timed out
+  });
+});
+
+// issue #112 (re-scoped): the real defect was NOT an unbounded hang (the 120s
+// gateway turn timeout already bounds it) but that a THROTTLED PRIMARY dead-waits
+// to that turn timeout with NO failover — because the per-candidate timeout that
+// makes failover fire was opt-in-via-env and DEFAULT-OFF. Fix = default it ON so
+// the chat path fails over fast. Env stays the override knob.
+describe("resolveModelCandidateTimeoutMs — default-on (issue #112)", () => {
+  it("defaults ON (non-zero) when the env override is unset", () => {
+    expect(resolveModelCandidateTimeoutMs({})).toBe(DEFAULT_MODEL_CANDIDATE_TIMEOUT_MS);
+    expect(DEFAULT_MODEL_CANDIDATE_TIMEOUT_MS).toBeGreaterThan(0);
+  });
+
+  it("keeps headroom so a 2-3 candidate chain can WALK before the 120s turn timeout", () => {
+    // per_candidate * candidate-count must be < turnTimeoutMs (120s) or the turn
+    // dies before failover finishes the chain (CTO scope pin #1).
+    expect(DEFAULT_MODEL_CANDIDATE_TIMEOUT_MS * 3).toBeLessThan(120_000);
+  });
+
+  it("honors an explicit env override value (>0)", () => {
+    expect(resolveModelCandidateTimeoutMs({ OPENCLAW_MODEL_CANDIDATE_TIMEOUT_MS: "5000" })).toBe(
+      5000,
+    );
+  });
+
+  it("honors explicit disable via env (0)", () => {
+    expect(resolveModelCandidateTimeoutMs({ OPENCLAW_MODEL_CANDIDATE_TIMEOUT_MS: "0" })).toBe(0);
+  });
+
+  it("falls back to the default on a malformed/negative override (never silently disabled)", () => {
+    expect(resolveModelCandidateTimeoutMs({ OPENCLAW_MODEL_CANDIDATE_TIMEOUT_MS: "abc" })).toBe(
+      DEFAULT_MODEL_CANDIDATE_TIMEOUT_MS,
+    );
+    expect(resolveModelCandidateTimeoutMs({ OPENCLAW_MODEL_CANDIDATE_TIMEOUT_MS: "-1" })).toBe(
+      DEFAULT_MODEL_CANDIDATE_TIMEOUT_MS,
+    );
+  });
+
+  it("FIRES failover at the default timeout: a hung primary hands off to the next model (injected clock)", async () => {
+    vi.useFakeTimers();
+    try {
+      const cfg = makeCfg();
+      const run = vi
+        .fn()
+        .mockImplementationOnce(() => new Promise(() => {})) // primary hangs (throttled/429-retry)
+        .mockResolvedValueOnce("ok-from-fallback");
+
+      const timeout = resolveModelCandidateTimeoutMs({}); // env unset → the new default
+      const promise = runWithModelFallback({
+        cfg,
+        provider: "openai",
+        model: "gpt-4.1-mini",
+        run,
+        perCandidateTimeoutMs: timeout,
+      });
+      // Advance the injected clock past the default → the hung primary is abandoned
+      // and failover MUST fire to the next candidate (not a turn-timeout death).
+      await vi.advanceTimersByTimeAsync(timeout);
+      const result = await promise;
+
+      expect(result.result).toBe("ok-from-fallback");
+      expect(run).toHaveBeenCalledTimes(2);
+      expect(run.mock.calls[1]?.[0]).toBe("anthropic"); // the fallback model was actually invoked
+      expect(result.attempts[0]?.reason).toBe("timeout"); // failover reason surfaced
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });
