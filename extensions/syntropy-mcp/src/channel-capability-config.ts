@@ -54,11 +54,17 @@ const CAPABILITY_TABLE: Record<string, ChannelCapabilities> = {
  * rather than being coerced into a match (a permissive normalization would be a
  * silent access-widening). A fresh copy of the row is returned so a caller that
  * sets `companion_text_channel` per session cannot mutate the shared table.
+ *
+ * The lookup is guarded by {@link Object.hasOwn}: a bare `CAPABILITY_TABLE[key]`
+ * would walk the prototype chain, so a key like `"__proto__"`, `"constructor"`,
+ * `"toString"`, or `"hasOwnProperty"` would hit an `Object.prototype` member and
+ * return a truthy non-row instead of `undefined` — silently NON-null, which
+ * breaks fail-closed. The own-property guard makes every non-row key resolve to
+ * `null`.
  */
 export function capabilitiesFor(channelId: string): ChannelCapabilities | null {
-  const row = CAPABILITY_TABLE[channelId];
-  if (row === undefined) {
+  if (!Object.hasOwn(CAPABILITY_TABLE, channelId)) {
     return null;
   }
-  return { ...row };
+  return { ...CAPABILITY_TABLE[channelId] };
 }

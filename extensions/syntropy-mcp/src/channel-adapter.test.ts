@@ -2,8 +2,10 @@ import { describe, expect, it, vi } from "vitest";
 import {
   type ChannelAdapter,
   type ChannelCapabilities,
+  type ChannelIdentity,
   deliverViaCapabilities,
   type DeliveryPayload,
+  type DeliveryResult,
 } from "./channel-adapter.js";
 
 // ---------------------------------------------------------------------------
@@ -138,6 +140,88 @@ describe("deliverViaCapabilities — fail-closed with no delivery path", () => {
       deliverViaCapabilities(caps({ inline_link: false }), otpPayload, sinks),
     ).resolves.toMatchObject({ ok: false });
   });
+
+  // F5: the fail-closed observable is via:"none" — NEITHER sink fired, so the
+  // route must not misleadingly read as "companion".
+  it("reports via:'none' (not 'companion') for a link that failed closed", async () => {
+    const sinks = makeSinks();
+    const result = await deliverViaCapabilities(
+      caps({ inline_link: false, companion_text_channel: undefined }),
+      linkPayload,
+      sinks,
+    );
+    expect(result).toEqual({ ok: false, via: "none" });
+    expect(sinks.inline).not.toHaveBeenCalled();
+    expect(sinks.companion).not.toHaveBeenCalled();
+  });
+
+  // T5: text-payload fail-closed arm — inline_text=false + no companion.
+  it("text payload with inline_text=false and no companion fails closed via:'none'", async () => {
+    const sinks = makeSinks();
+    const result = await deliverViaCapabilities(
+      caps({ inline_text: false, companion_text_channel: undefined }),
+      textPayload,
+      sinks,
+    );
+    expect(result).toEqual({ ok: false, via: "none" });
+    expect(sinks.inline).not.toHaveBeenCalled();
+    expect(sinks.companion).not.toHaveBeenCalled();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// F2. Whitespace-only companion is NOT a real companion — treat as absent and
+// fail closed (must not "route to companion" on " " or "\t" or "").
+// ---------------------------------------------------------------------------
+
+describe("deliverViaCapabilities — whitespace-only companion is absent (fail-closed)", () => {
+  it.each([" ", "\t", "  \n ", ""])(
+    "inline_link=false + companion=%o + link → fail closed via:'none', neither sink",
+    async (companion) => {
+      const sinks = makeSinks();
+      const result = await deliverViaCapabilities(
+        caps({ inline_link: false, companion_text_channel: companion }),
+        linkPayload,
+        sinks,
+      );
+      expect(result).toEqual({ ok: false, via: "none" });
+      expect(sinks.inline).not.toHaveBeenCalled();
+      expect(sinks.companion).not.toHaveBeenCalled();
+    },
+  );
+});
+
+// ---------------------------------------------------------------------------
+// T1 [HIGH]. Transport failure (a sink resolves false) is DISTINCT from
+// fail-closed: the sink DID fire and reported failure, so via is the real route
+// it attempted, ok is false.
+// ---------------------------------------------------------------------------
+
+describe("deliverViaCapabilities — sink-returns-false is transport failure (not fail-closed)", () => {
+  it("inline sink resolving false → { ok:false, via:'inline' }", async () => {
+    const inline = vi.fn(async (_p: DeliveryPayload): Promise<boolean> => false);
+    const companion = vi.fn(async (_to: string, _p: DeliveryPayload): Promise<boolean> => true);
+    const result = await deliverViaCapabilities(caps({ inline_link: true }), linkPayload, {
+      inline,
+      companion,
+    });
+    expect(result).toEqual({ ok: false, via: "inline" });
+    expect(inline).toHaveBeenCalledTimes(1);
+    expect(companion).not.toHaveBeenCalled();
+  });
+
+  it("companion sink resolving false → { ok:false, via:'companion' }", async () => {
+    const inline = vi.fn(async (_p: DeliveryPayload): Promise<boolean> => true);
+    const companion = vi.fn(async (_to: string, _p: DeliveryPayload): Promise<boolean> => false);
+    const result = await deliverViaCapabilities(
+      caps({ inline_link: false, companion_text_channel: COMPANION_E164 }),
+      linkPayload,
+      { inline, companion },
+    );
+    expect(result).toEqual({ ok: false, via: "companion" });
+    expect(companion).toHaveBeenCalledTimes(1);
+    expect(inline).not.toHaveBeenCalled();
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -161,14 +245,14 @@ class FakeAdapter implements ChannelAdapter {
     this.capabilities = capabilities;
   }
 
-  identity(inbound: unknown): { e164: string; channelId: string } {
+  identity(inbound: unknown): ChannelIdentity {
     // Normalize a native id (e.g. "tel:5551230009" or a bare number) to E.164.
     const raw = String((inbound as { from?: unknown })?.from ?? inbound ?? "");
     const digits = raw.replace(/[^0-9]/g, "");
     return { e164: `+${digits}`, channelId: this.channelId };
   }
 
-  deliver(payload: DeliveryPayload): Promise<{ ok: boolean; via: "inline" | "companion" }> {
+  deliver(payload: DeliveryPayload): Promise<DeliveryResult> {
     return deliverViaCapabilities(this.capabilities, payload, {
       inline: async (p) => {
         this.deliveries.push({ via: "inline", payload: p });

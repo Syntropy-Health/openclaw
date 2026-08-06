@@ -59,4 +59,45 @@ describe("capabilitiesFor — unknown channels fail closed", () => {
       expect(capabilitiesFor(channel)).toBeNull();
     },
   );
+
+  // F1 [CRITICAL]: prototype-chain keys must not leak an Object.prototype hit as
+  // a non-null (and empty/permissive) capability row. Every one of these is an
+  // UNKNOWN channel and MUST fail closed to null.
+  it.each([
+    "__proto__",
+    "constructor",
+    "toString",
+    "valueOf",
+    "hasOwnProperty",
+    "isPrototypeOf",
+    "propertyIsEnumerable",
+    "toLocaleString",
+  ])("returns null for prototype-chain key %o (no Object.prototype leak)", (channel) => {
+    expect(capabilitiesFor(channel)).toBeNull();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// T2 [HIGH]: capabilitiesFor returns a FRESH copy per call — a caller that sets
+// companion_text_channel per session must not mutate the shared table or any
+// other caller's row.
+// ---------------------------------------------------------------------------
+
+describe("capabilitiesFor — fresh-copy isolation", () => {
+  it("two calls for the same channel return distinct objects", () => {
+    const a = capabilitiesFor("voice");
+    const b = capabilitiesFor("voice");
+    expect(a).not.toBeNull();
+    expect(b).not.toBeNull();
+    expect(a).not.toBe(b);
+  });
+
+  it("mutating one result's companion_text_channel does not affect another call", () => {
+    const a = capabilitiesFor("voice")!;
+    const b = capabilitiesFor("voice")!;
+    a.companion_text_channel = "+15551239999";
+    const c = capabilitiesFor("voice")!;
+    expect(b.companion_text_channel).toBeUndefined();
+    expect(c.companion_text_channel).toBeUndefined();
+  });
 });

@@ -51,10 +51,32 @@ export type DeliveryPayload =
   | { kind: "link"; url: string }
   | { kind: "otp"; code: string };
 
-/** The outcome of a delivery: did it succeed, and by which route. */
-export type DeliveryResult = { ok: boolean; via: "inline" | "companion" };
+/**
+ * The outcome of a delivery: did it succeed, and by which route ACTUALLY taken.
+ *
+ * `via` is the real route, not the intended one:
+ *  - `"inline"`    — the inline sink fired (`ok` = what it reported).
+ *  - `"companion"` — the companion sink fired (`ok` = what it reported).
+ *  - `"none"`      — FAILED CLOSED: neither sink fired, nothing was delivered
+ *    (`ok` is always `false`). Distinct from a sink that fired and returned
+ *    `false` (a transport failure) — that keeps its "inline"/"companion" route.
+ */
+export type DeliveryResult = { ok: boolean; via: "inline" | "companion" | "none" };
 
-/** The normalized identity of an inbound sender: an E.164 number + channel id. */
+/**
+ * The normalized identity of an inbound sender: an E.164 number + channel id.
+ *
+ * `channelId` is the channel KIND — `"voice" | "sms" | "whatsapp"` — the D0
+ * lookup key handed to {@link capabilitiesFor}. It is NOT a native per-conversation
+ * / per-session id (a call SID, a WhatsApp wa_id, etc.); the concrete adapter
+ * discards that native id and reports only the kind, because the core resolves
+ * capabilities by kind and must stay channel-agnostic otherwise.
+ *
+ * Naming boundary: the capability rows use snake_case (`inline_link`,
+ * `companion_text_channel`) because they mirror the D0 / SJ wire rows verbatim;
+ * this TS-native identity uses camelCase (`e164`, `channelId`). The two casings
+ * are deliberate and mark the wire-row vs TS-native boundary — do not "unify" them.
+ */
 export type ChannelIdentity = { e164: string; channelId: string };
 
 /**
@@ -64,7 +86,7 @@ export type ChannelIdentity = { e164: string; channelId: string };
  * inline/companion decision is made in exactly one place).
  */
 export interface ChannelAdapter {
-  identity(inbound: unknown): { e164: string; channelId: string };
+  identity(inbound: unknown): ChannelIdentity;
   capabilities: ChannelCapabilities;
   deliver(payload: DeliveryPayload): Promise<DeliveryResult>;
 }
@@ -84,15 +106,20 @@ export interface ChannelAdapter {
  *     rich inline rendering (`inline_link`); `text` needs `inline_text`.
  *  2. Capability TRUE  → send inline via `sinks.inline`; `{ ok, via: "inline" }`.
  *  3. Capability FALSE →
- *       - a non-empty `companion_text_channel` is set → send via
- *         `sinks.companion(companion, payload)`; `{ ok, via: "companion" }`.
- *       - otherwise → FAIL-CLOSED: return `{ ok: false, via: "companion" }`
- *         WITHOUT calling either sink and WITHOUT throwing. A channel that can
- *         neither deliver inline nor fall back must not silently drop or crash —
- *         it reports `ok: false` so the caller can react.
+ *       - a non-blank `companion_text_channel` is set → send via
+ *         `sinks.companion(companion, payload)`; `{ ok, via: "companion" }`. A
+ *         whitespace-only value is treated as ABSENT (an unset companion, not a
+ *         real E.164) and falls through to fail-closed.
+ *       - otherwise → FAIL-CLOSED: return `{ ok: false, via: "none" }` WITHOUT
+ *         calling either sink and WITHOUT throwing. `via: "none"` is the honest
+ *         observable — nothing was delivered, so the route is neither "inline"
+ *         nor "companion". A channel that can neither deliver inline nor fall
+ *         back must not silently drop or crash — it reports `ok: false` so the
+ *         caller can react.
  *
  * Exactly one sink is ever invoked (or neither, in the fail-closed case) — never
- * both.
+ * both. A sink's boolean is coerced with `Boolean(...)` so `ok` is always a real
+ * boolean even if a (contract-violating) sink resolves a truthy non-boolean.
  */
 export async function deliverViaCapabilities(
   caps: ChannelCapabilities,
@@ -106,17 +133,20 @@ export async function deliverViaCapabilities(
   const inlineCapable = payload.kind === "text" ? caps.inline_text : caps.inline_link;
 
   if (inlineCapable) {
-    const ok = await sinks.inline(payload);
+    const ok = Boolean(await sinks.inline(payload));
     return { ok, via: "inline" };
   }
 
-  const companion = caps.companion_text_channel;
-  if (companion !== undefined && companion.length > 0) {
-    const ok = await sinks.companion(companion, payload);
+  // A whitespace-only companion is not a deliverable number — trim then treat an
+  // empty result as "no companion" (fail-closed), never route to it.
+  const companion = caps.companion_text_channel?.trim();
+  if (companion) {
+    const ok = Boolean(await sinks.companion(companion, payload));
     return { ok, via: "companion" };
   }
 
   // Fail-closed: cannot deliver inline and no companion to fall back to. Do not
-  // call either sink; do not throw — report the failure.
-  return { ok: false, via: "companion" };
+  // call either sink; do not throw — report the failure with via:"none" (nothing
+  // was delivered, so neither route was actually taken).
+  return { ok: false, via: "none" };
 }
