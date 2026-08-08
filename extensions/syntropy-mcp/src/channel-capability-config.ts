@@ -21,15 +21,21 @@ import type { ChannelCapabilities } from "./channel-adapter.js";
  * later, deliberate config flip, not something a channel gets by default. Do not
  * flip it here without the BAA in place.
  *
- * `voice` cannot render a link or plain text inline, so link/otp/text must fall
- * back to a paired SMS number. `companion_text_channel` is bound PER SESSION (the
- * paired SMS number is a runtime fact, not a static one) — the static row leaves
- * it `undefined`, but the field exists so the shape is uniform across channels.
+ * `voice` DOES deliver plain text inline: the call's TTS speaks the text to the
+ * caller, so `inline_text` is `true`. What a voice call cannot render is anything
+ * needing rich/visual rendering — a clickable link or a readable OTP code — so
+ * only link/otp fall back to the paired SMS number. This deliberately SUPERSEDES
+ * the `voice` row in the approved A&D §3 D0 table (which had `inline_text: false`)
+ * per CTO ruling flag1 (#5762); do not "restore" it from that table.
+ *
+ * `companion_text_channel` is bound PER SESSION (the paired SMS number is a
+ * runtime fact, not a static one) — the static row leaves it `undefined`, but the
+ * field exists so the shape is uniform across channels.
  */
 const CAPABILITY_TABLE: Record<string, ChannelCapabilities> = {
   voice: {
     inline_link: false,
-    inline_text: false,
+    inline_text: true,
     phi_approved: false,
     companion_text_channel: undefined,
   },
