@@ -74,3 +74,22 @@ export function capabilitiesFor(channelId: string): ChannelCapabilities | null {
   }
   return { ...CAPABILITY_TABLE[channelId] };
 }
+
+/**
+ * Every channel id the D0 table declares, sorted for a stable comparison.
+ *
+ * Exists so a test can lock the row SET rather than only the three rows it already
+ * knows about. Asserting `capabilitiesFor("voice"|"sms"|"whatsapp")` row-by-row —
+ * however tightly — cannot notice a FOURTH row being added, so a new channel could
+ * ship with `phi_approved: true` and fail nothing. Iterating this list instead forces
+ * every present and future row through the PHI invariant (QG finding F18).
+ *
+ * Derived from the table itself, never hand-maintained: a hard-coded duplicate would
+ * be one more thing that can silently drift out of sync with the rows it describes.
+ */
+export function knownChannelIds(): string[] {
+  // toSorted, not sort: `sort` mutates in place, and while `Object.keys` hands back
+  // a fresh array today, a non-mutating call keeps this total-over-the-table helper
+  // free of any in-place step a future refactor could point at the real key source.
+  return Object.keys(CAPABILITY_TABLE).toSorted();
+}
