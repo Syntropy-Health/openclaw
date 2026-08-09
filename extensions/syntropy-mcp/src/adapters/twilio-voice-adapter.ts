@@ -28,21 +28,27 @@
  * This module is a pure CONSUMER of `extensions/twilio` (the TCPA-guarded SMS
  * rail) and `extensions/voice-call` (the TwiML builder). It modifies neither, and
  * it never redeclares its own capability row.
+ *
+ * This file, twilio-sms-adapter.ts, and kapso-whatsapp-adapter.ts are held
+ * DELIBERATELY ISOMORPHIC — same constant names, same error prefix shape, same
+ * exhaustiveness arm, same sink/`deliver` structure, same E.164 gate. Three files
+ * whose entire thesis is uniformity must not diverge cosmetically; if you change
+ * the shape of one, change all three.
  */
 
-import { normalizeE164 } from "openclaw/plugin-sdk";
 import { guardedSendSms, type OptOutStore } from "../../../twilio/src/compliance.js";
 import type { ResolvedTwilioSmsConfig } from "../../../twilio/src/config.js";
 import type { SmsFetch } from "../../../twilio/src/transport.js";
 import { generateNotifyTwiml } from "../../../voice-call/src/manager/twiml.js";
 import {
-  deliverViaCapabilities,
   type ChannelAdapter,
   type ChannelIdentity,
   type DeliveryPayload,
   type DeliveryResult,
+  deliverViaCapabilities,
 } from "../channel-adapter.js";
 import { capabilitiesFor } from "../channel-capability-config.js";
+import { toCanonicalE164 } from "./e164.js";
 import type { AdapterSession } from "./session.js";
 
 /**
@@ -51,8 +57,16 @@ import type { AdapterSession } from "./session.js";
  */
 const VOICE_CHANNEL_ID = "voice";
 
+/** Uniform prefix for every error this adapter throws (see the file header). */
+const ERROR_PREFIX = "voice adapter: ";
+
 /** Twilio's default `<Say>` voice; used when the caller injects no preference. */
 const DEFAULT_VOICE = "alice";
+
+/**
+ * The Twilio inbound-webhook form field carrying the caller's number (the ANI).
+ */
+const TWILIO_FROM_PARAM = "From";
 
 /**
  * Characters that would break out of the `voice="…"` TwiML attribute.
@@ -97,11 +111,21 @@ export type TwilioVoiceAdapterDeps = {
  * above all no PHI (every D0 row is `phi_approved:false`). Any prose added here
  * would ride out over an unapproved channel.
  *
- * The `switch` is exhaustive over the {@link DeliveryPayload} union; the `never`
- * assignment makes a future payload kind a COMPILE error rather than a silent
- * runtime fall-through that would deliver an empty message.
+ * The `default` arm is NOT dead code. The `satisfies never` makes a new
+ * {@link DeliveryPayload} kind a COMPILE error, but `deliver()` is reachable from
+ * NON-TypeScript callers. Throwing here, from INSIDE each sink's `try`, is what
+ * turns an off-contract kind into an honest `{ok:false, via:<the real route>}`
+ * with no provider traffic. All three adapters now behave identically on an
+ * unknown kind — they previously behaved three different ways.
+ *
+ * The message carries NO part of the payload. It previously interpolated
+ * `JSON.stringify(payload)`, which serialized an OTP code or a secure-link URL
+ * into an exception message and thus into logs — contradicting this file's own
+ * rule that a thrown message never quotes the offending value. The `kind` tag is
+ * not interpolated either: for an off-contract payload it is itself unvalidated
+ * caller data.
  */
-function payloadToText(payload: DeliveryPayload): string {
+function bodyFor(payload: DeliveryPayload): string {
   switch (payload.kind) {
     case "text":
       return payload.text;
@@ -109,10 +133,9 @@ function payloadToText(payload: DeliveryPayload): string {
       return payload.url;
     case "otp":
       return payload.code;
-    default: {
-      const unreachable: never = payload;
-      throw new Error(`twilio-voice: unsupported delivery payload ${JSON.stringify(unreachable)}`);
-    }
+    default:
+      payload satisfies never;
+      throw new Error(`${ERROR_PREFIX}unsupported delivery payload kind`);
   }
 }
 
@@ -135,33 +158,32 @@ function payloadToText(payload: DeliveryPayload): string {
  * Error messages deliberately omit the offending value — the caller ANI is an
  * identifier and must not leak into logs or exception traces.
  */
-function identifyVoiceInbound(inbound: unknown): ChannelIdentity {
+function identityFromVoiceWebhook(inbound: unknown): ChannelIdentity {
   // The Twilio voice webhook is an `application/x-www-form-urlencoded` body; the
   // caller is expected to have parsed it into URLSearchParams. Anything else is
   // an unknown shape we must not duck-type our way through.
   if (!(inbound instanceof URLSearchParams)) {
-    throw new Error(
-      "twilio-voice: identity() expects the Twilio voice webhook form body as URLSearchParams",
-    );
+    throw new Error(`${ERROR_PREFIX}inbound must be URLSearchParams (Twilio webhook form body)`);
   }
 
   // `From` is the caller ANI. Missing or blank means Twilio gave us no caller
   // (e.g. a withheld/anonymous ANI) — there is no identity to report.
-  const from = inbound.get("From");
-  if (!from || from.trim() === "") {
-    throw new Error("twilio-voice: inbound webhook has no `From` (caller ANI)");
+  const from = inbound.get(TWILIO_FROM_PARAM);
+  if (from === null || from.trim() === "") {
+    throw new Error(`${ERROR_PREFIX}inbound is missing a non-empty 'From' sender`);
   }
 
-  // `normalizeE164` never throws; it strips non-digits, so a wholly non-numeric
-  // sender collapses to the bare "+". That is a DEGENERATE key, not a number —
-  // without this guard every malformed caller would share one identity (and thus
-  // one session and one opt-out key). Same guard the shipped Kapso parser has.
-  const e164 = normalizeE164(from);
-  if (e164 === "+") {
-    throw new Error("twilio-voice: inbound `From` does not normalize to an E.164 number");
-  }
-
-  return { e164, channelId: VOICE_CHANNEL_ID };
+  // The canonical-E.164 gate REPLACES (and subsumes) the old degenerate-`"+"`
+  // check. That check only caught wholly non-numeric input, and voice is the
+  // channel where that is least sufficient: a Twilio `From` is NOT always E.164 —
+  // Twilio Client sends `client:<identity>` and a Programmable SIP Domain sends a
+  // CALLER-SUPPLIED SIP URI. `normalizeE164` scrapes every digit out of either, so
+  // `sip:alice@1650.555.1234.evil.com` used to canonicalize to the victim's
+  // `+16505551234` on an AUTHENTICATION path. See e164.ts.
+  return {
+    e164: toCanonicalE164(from, `${ERROR_PREFIX}inbound 'From'`),
+    channelId: VOICE_CHANNEL_ID,
+  };
 }
 
 /**
@@ -183,6 +205,7 @@ function identifyVoiceInbound(inbound: unknown): ChannelIdentity {
  * known kinds, but the type admits it, and a missing capability row must never be
  * papered over with a fabricated permissive default — no row means no idea what
  * this channel may carry, so construction fails.
+ * @throws if the session's peer, or a bound companion, is not canonical E.164.
  * @throws if `voice` contains XML-significant characters (see {@link XML_UNSAFE}).
  */
 export function createTwilioVoiceAdapter(deps: TwilioVoiceAdapterDeps): ChannelAdapter {
@@ -194,17 +217,41 @@ export function createTwilioVoiceAdapter(deps: TwilioVoiceAdapterDeps): ChannelA
   if (!capabilities) {
     // Fail closed at CONSTRUCTION — an adapter with no declared capabilities
     // cannot make a safe routing decision later, so it must not exist at all.
-    throw new Error(`twilio-voice: no capability row for channel "${VOICE_CHANNEL_ID}"`);
+    throw new Error(`${ERROR_PREFIX}no capability row for channel "${VOICE_CHANNEL_ID}"`);
   }
 
-  // The one per-session binding: the paired SMS number link/otp fall back to.
-  // Left `undefined` when the session has no companion — the resolver reads that
-  // as "no fallback" and fails closed.
-  capabilities.companion_text_channel = deps.session.companionE164;
+  // The voice leg's peer — the number on the call. Not an SMS destination (the
+  // inline sink speaks TwiML, it does not address a number), but it is still a
+  // session-bound identifier, and the same gate is applied for the same
+  // fail-closed reason and for uniformity with the other two adapters: a session
+  // whose peer is not a canonical E.164 is a malformed session on an
+  // authenticated-access path, whatever the channel.
+  toCanonicalE164(deps.session.toE164, `${ERROR_PREFIX}session peer`);
+
+  // THE OUTBOUND HALF OF THE E.164 GATE (TCPA), and the one per-session binding:
+  // the paired SMS number `link`/`otp` fall back to. `guardedSendSms` hands the
+  // destination straight to `store.isOptedOut(to)` and the durable store matches
+  // `channel_peer_id` with an EXACT SQL comparison, so a companion bound as
+  // "16505551234" or "(650) 555-1234" would MISS a STOP row stored as
+  // "+16505551234" and put an OTP on the wire to someone who opted out.
+  // Canonicalizing BEFORE the value is bound onto the row is what makes the
+  // number the resolver hands the sink already opt-out-comparable.
+  //
+  // A blank/whitespace-only companion is treated as ABSENT rather than as an
+  // error: `deliverViaCapabilities` documents exactly that reading (it trims and
+  // falls through to fail-closed), so "unset" stays expressible and a voice
+  // session with no companion keeps failing closed on link/otp instead of failing
+  // to construct. A NON-blank companion that will not canonicalize is a real
+  // misconfiguration and throws.
+  const companionE164 = deps.session.companionE164?.trim();
+  capabilities.companion_text_channel =
+    companionE164 === undefined || companionE164 === ""
+      ? undefined
+      : toCanonicalE164(companionE164, `${ERROR_PREFIX}session companion`);
 
   const voice = deps.voice ?? DEFAULT_VOICE;
   if (XML_UNSAFE.test(voice)) {
-    throw new Error("twilio-voice: `voice` must not contain XML-significant characters");
+    throw new Error(`${ERROR_PREFIX}\`voice\` must not contain XML-significant characters`);
   }
 
   /**
@@ -221,10 +268,18 @@ export function createTwilioVoiceAdapter(deps: TwilioVoiceAdapterDeps): ChannelA
    * A rejected `emitTwiml` is a non-delivery, which the resolver reports honestly
    * as `{ok:false, via:"inline"}` — the route was really attempted, so it must
    * NOT collapse to `via:"none"` (which means nothing was attempted at all).
+   *
+   * The TwiML is BUILT INSIDE the `try`, which is load-bearing and was the bug:
+   * built outside, a throw from the build escaped `deliver()` and destroyed that
+   * `via` observable. Two real throw sources exist — `bodyFor`'s off-contract
+   * `default` arm, and `escapeXml`, which calls `.replace` on its argument and so
+   * raises a `TypeError` for a non-TS caller's `{kind:"text", text:undefined}`.
+   * Both must land in this `catch`. The sibling adapters build their body inside
+   * the `try` for the same reason.
    */
   const inline = async (payload: DeliveryPayload): Promise<boolean> => {
-    const twiml = generateNotifyTwiml(payloadToText(payload), voice);
     try {
+      const twiml = generateNotifyTwiml(bodyFor(payload), voice);
       return Boolean(await deps.emitTwiml(twiml));
     } catch {
       return false;
@@ -238,15 +293,16 @@ export function createTwilioVoiceAdapter(deps: TwilioVoiceAdapterDeps): ChannelA
    * the companion number is a real US SMS destination and an opted-out number
    * must receive ZERO messages, including voice fallbacks.
    *
-   * The destination is the `toE164` the RESOLVER passes (the trimmed companion),
-   * not `session.toE164` — `session.toE164` is the voice leg's peer and is not
-   * necessarily the SMS-capable number.
+   * The destination is the `toE164` the RESOLVER passes (the trimmed, canonical
+   * companion bound above), not `session.toE164` — `session.toE164` is the voice
+   * leg's peer and is not necessarily the SMS-capable number.
    *
    * Result mapping: only `ok === true` counts as delivered. A suppression
    * (`{ok:false, suppressed:true}`) is a genuine non-delivery, so it maps to
    * `false` — and it must not throw, because a compliant suppression is an
    * expected outcome, not an error. The `try/catch` covers a transport that
-   * rejects outright.
+   * rejects outright, and `bodyFor` is evaluated inside it so an off-contract
+   * payload kind becomes `false` with zero provider traffic.
    */
   const companion = async (toE164: string, payload: DeliveryPayload): Promise<boolean> => {
     try {
@@ -254,11 +310,14 @@ export function createTwilioVoiceAdapter(deps: TwilioVoiceAdapterDeps): ChannelA
         {
           config: deps.smsConfig,
           to: toE164,
-          body: payloadToText(payload),
+          body: bodyFor(payload),
           fetchImpl: deps.fetchImpl,
         },
         deps.store,
       );
+      // `=== true` rather than a truthiness check so a contract-violating truthy
+      // non-boolean cannot sneak through as delivered.
+      // oxlint-disable-next-line no-unnecessary-boolean-literal-compare -- the strict compare is a deliberate runtime guard against a non-boolean `ok` crossing the package boundary; the declared type is not the guarantee here.
       return result.ok === true;
     } catch {
       return false;
@@ -271,9 +330,11 @@ export function createTwilioVoiceAdapter(deps: TwilioVoiceAdapterDeps): ChannelA
   // snapshot captured at construction.
   const adapter: ChannelAdapter = {
     capabilities,
-    identity: identifyVoiceInbound,
-    deliver: (payload: DeliveryPayload): Promise<DeliveryResult> =>
-      deliverViaCapabilities(adapter.capabilities, payload, { inline, companion }),
+    identity: identityFromVoiceWebhook,
+
+    deliver(payload: DeliveryPayload): Promise<DeliveryResult> {
+      return deliverViaCapabilities(adapter.capabilities, payload, { inline, companion });
+    },
   };
 
   return adapter;
