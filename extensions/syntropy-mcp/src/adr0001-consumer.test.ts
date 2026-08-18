@@ -1,6 +1,10 @@
 import { describe, expect, it, vi } from "vitest";
 import { AdminKeyVerifyClient, type UnkeyVerifyResult } from "./admin-key.js";
-import { buildAdminGateContext, buildUserGateContext } from "./gate-context.js";
+import {
+  APP_SURFACE_PHI_APPROVED,
+  buildAdminGateContext,
+  buildUserGateContext,
+} from "./gate-context.js";
 import { PhiAuditClient } from "./phi-audit.js";
 import { toolGateGuard, type PhiAuditDep } from "./tool-gate-guard.js";
 import type { Gate } from "./tool-gate.js";
@@ -157,7 +161,16 @@ const adminCtx = buildAdminGateContext({
   admin: { adminSubject: ADMIN_SUBJECT, phiClearance: true },
   graphitiPhiEnabled: true,
 });
-const whatsappUserCtx = buildUserGateContext({ externalId: "user_wa", subscriptionPlan: "pro" }); // is_admin=false by construction
+// is_admin=false by construction. `channelPhiApproved: false` is the D0 truth for
+// this surface (`whatsapp.phi_approved === false` — no BAA with Meta), NOT a
+// convenience default: this context is explicitly a WhatsApp one, so passing
+// `true` here would assert in the ADR-0001 consumer suite the exact falsehood
+// C4 exists to prevent.
+const whatsappUserCtx = buildUserGateContext({
+  externalId: "user_wa",
+  subscriptionPlan: "pro",
+  channelPhiApproved: false,
+});
 
 function phiAuditDep(ok: boolean, spy?: () => void): PhiAuditDep {
   return {
@@ -257,6 +270,46 @@ describe("toolGateGuard — enforcement at dispatch", () => {
       },
     );
     expect(r?.block).toBe(true);
+  });
+
+  // ── C4 (Phase 5): the D0 `phi_approved` flag is LOAD-BEARING, not advisory ──
+  // Guard-level pair. Same signed-in user, same platform BAA ON, same phi-gated
+  // tool, same audit sink — the ONLY difference is the surface's PHI stance.
+  // (The dispatch-level version, which also proves the channel survives the
+  // session cache, is 5.2's two-arm test — this is not a substitute for it.)
+  const phiGate = () => ({ kind: "phi" }) as Gate;
+
+  it("C4: WhatsApp turn + BAA on → phi tool DENIED (whatsapp.phi_approved === false)", async () => {
+    const waWithBaa = buildUserGateContext({
+      externalId: "user_wa",
+      graphitiPhiEnabled: true,
+      channelPhiApproved: false, // D0 row for whatsapp
+    });
+    // Pre-C4 this context WAS phi_cleared (signed in + BAA); the channel term is
+    // what now denies it. Asserting the post-Phase-5 truth, not forcing green.
+    expect(waWithBaa.phi_cleared).toBe(false);
+    const r = await toolGateGuard(
+      "health_search",
+      {},
+      { resolveGate: phiGate, gateContext: waWithBaa, phiAudit: phiAuditDep(true) },
+    );
+    expect(r?.block).toBe(true);
+    expect(r?.blockReason).toContain("phi");
+  });
+
+  it("C4: app turn + BAA on → phi tool ALLOWED (app declares its stance, has no D0 row)", async () => {
+    const appWithBaa = buildUserGateContext({
+      externalId: "user_wa",
+      graphitiPhiEnabled: true,
+      channelPhiApproved: APP_SURFACE_PHI_APPROVED,
+    });
+    expect(appWithBaa.phi_cleared).toBe(true);
+    const r = await toolGateGuard(
+      "health_search",
+      {},
+      { resolveGate: phiGate, gateContext: appWithBaa, phiAudit: phiAuditDep(true) },
+    );
+    expect(r).toBeUndefined();
   });
 
   it("phi tool with no resolvable target clerk_id → block", async () => {
