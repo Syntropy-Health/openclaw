@@ -50,7 +50,17 @@ describe("gate-context — StrictBool + phi conjunction", () => {
   });
 
   it("buildUserGateContext is NOT admin by construction (WhatsApp/partner path)", () => {
-    const ctx = buildUserGateContext({ externalId: "user_123", subscriptionPlan: "pro" });
+    // `false` is the D0 truth for the surface this test is TITLED for
+    // (`whatsapp.phi_approved === false` — no BAA with Meta). The plan's "these
+    // sites pass true" was written for channel-AGNOSTIC call sites; this one
+    // names its channel, so a `true` here would be the authoritative gate suite
+    // asserting the exact falsehood C4 exists to prevent. Inert either way —
+    // `graphitiPhiEnabled` is omitted, so phi_cleared is false regardless.
+    const ctx = buildUserGateContext({
+      externalId: "user_123",
+      subscriptionPlan: "pro",
+      channelPhiApproved: false,
+    });
     expect(ctx.is_admin).toBe(false);
     expect(ctx.admin_subject).toBeUndefined();
     expect(ctx.phi_cleared).toBe(false);
@@ -58,7 +68,7 @@ describe("gate-context — StrictBool + phi conjunction", () => {
     expect(ctx.user_subject).toBe("user_123");
   });
   it("buildUserGateContext with no externalId → unauthenticated", () => {
-    const ctx = buildUserGateContext({ externalId: undefined });
+    const ctx = buildUserGateContext({ externalId: undefined, channelPhiApproved: true });
     expect(ctx.is_authenticated).toBe(false);
     expect(ctx.is_admin).toBe(false);
   });
@@ -84,19 +94,33 @@ describe("gate-context — StrictBool + phi conjunction", () => {
 
   // User own-PHI flip (CTO #5334 ruling, cleared by SJ self-scoping rail #5339/#1624).
   it("buildUserGateContext: signed-in user + platform BAA → phi_cleared true (own PHI)", () => {
-    const ctx = buildUserGateContext({ externalId: "user_x", graphitiPhiEnabled: true });
+    const ctx = buildUserGateContext({
+      externalId: "user_x",
+      graphitiPhiEnabled: true,
+      channelPhiApproved: true,
+    });
     expect(ctx.is_admin).toBe(false); // still never admin
     expect(ctx.phi_cleared).toBe(true);
   });
   it("buildUserGateContext: user without BAA → phi_cleared false (fail-closed)", () => {
     expect(
-      buildUserGateContext({ externalId: "user_x", graphitiPhiEnabled: false }).phi_cleared,
+      buildUserGateContext({
+        externalId: "user_x",
+        graphitiPhiEnabled: false,
+        channelPhiApproved: true,
+      }).phi_cleared,
     ).toBe(false);
-    expect(buildUserGateContext({ externalId: "user_x" }).phi_cleared).toBe(false); // omitted → false
+    expect(
+      buildUserGateContext({ externalId: "user_x", channelPhiApproved: true }).phi_cleared,
+    ).toBe(false); // omitted → false
   });
   it("buildUserGateContext: anon (no externalId) + BAA → phi_cleared false (must be signed in)", () => {
     expect(
-      buildUserGateContext({ externalId: undefined, graphitiPhiEnabled: true }).phi_cleared,
+      buildUserGateContext({
+        externalId: undefined,
+        graphitiPhiEnabled: true,
+        channelPhiApproved: true,
+      }).phi_cleared,
     ).toBe(false);
   });
 });
@@ -108,11 +132,19 @@ describe("evaluateGate — user own-PHI path (all_of[auth_required, phi])", () =
     members: [{ kind: "auth_required" }, { kind: "phi" }],
   };
   it("signed-in user + BAA → allowed (their own self-scoped PHI)", () => {
-    const ctx = buildUserGateContext({ externalId: "u", graphitiPhiEnabled: true });
+    const ctx = buildUserGateContext({
+      externalId: "u",
+      graphitiPhiEnabled: true,
+      channelPhiApproved: true,
+    });
     expect(evaluateGate(g, ctx).allowed).toBe(true);
   });
   it("signed-in user WITHOUT BAA → denied at the phi leg", () => {
-    const ctx = buildUserGateContext({ externalId: "u", graphitiPhiEnabled: false });
+    const ctx = buildUserGateContext({
+      externalId: "u",
+      graphitiPhiEnabled: false,
+      channelPhiApproved: true,
+    });
     const d = evaluateGate(g, ctx);
     expect(d.allowed).toBe(false);
     expect(d.failing_kind).toBe("phi");
@@ -120,8 +152,15 @@ describe("evaluateGate — user own-PHI path (all_of[auth_required, phi])", () =
 });
 
 // ── evaluator (mirror of SJ evaluate_decision) ────────────────────────────────
-const userCtx: GateContext = buildUserGateContext({ externalId: "u1", subscriptionPlan: "free" });
-const anonCtx: GateContext = buildUserGateContext({ externalId: undefined });
+const userCtx: GateContext = buildUserGateContext({
+  externalId: "u1",
+  subscriptionPlan: "free",
+  channelPhiApproved: true,
+});
+const anonCtx: GateContext = buildUserGateContext({
+  externalId: undefined,
+  channelPhiApproved: true,
+});
 const adminCtx: GateContext = buildAdminGateContext({
   admin: { adminSubject: "a1", phiClearance: true },
   graphitiPhiEnabled: true,

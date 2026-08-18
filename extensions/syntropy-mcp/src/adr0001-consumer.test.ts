@@ -1,6 +1,10 @@
 import { describe, expect, it, vi } from "vitest";
 import { AdminKeyVerifyClient, type UnkeyVerifyResult } from "./admin-key.js";
-import { buildAdminGateContext, buildUserGateContext } from "./gate-context.js";
+import {
+  APP_SURFACE_PHI_APPROVED,
+  buildAdminGateContext,
+  buildUserGateContext,
+} from "./gate-context.js";
 import { PhiAuditClient } from "./phi-audit.js";
 import { toolGateGuard, type PhiAuditDep } from "./tool-gate-guard.js";
 import type { Gate } from "./tool-gate.js";
@@ -157,7 +161,16 @@ const adminCtx = buildAdminGateContext({
   admin: { adminSubject: ADMIN_SUBJECT, phiClearance: true },
   graphitiPhiEnabled: true,
 });
-const whatsappUserCtx = buildUserGateContext({ externalId: "user_wa", subscriptionPlan: "pro" }); // is_admin=false by construction
+// is_admin=false by construction. `channelPhiApproved: false` is the D0 truth for
+// this surface (`whatsapp.phi_approved === false` — no BAA with Meta), NOT a
+// convenience default: this context is explicitly a WhatsApp one, so passing
+// `true` here would assert in the ADR-0001 consumer suite the exact falsehood
+// C4 exists to prevent.
+const whatsappUserCtx = buildUserGateContext({
+  externalId: "user_wa",
+  subscriptionPlan: "pro",
+  channelPhiApproved: false,
+});
 
 function phiAuditDep(ok: boolean, spy?: () => void): PhiAuditDep {
   return {
@@ -171,6 +184,9 @@ function phiAuditDep(ok: boolean, spy?: () => void): PhiAuditDep {
     nowIso: () => "2026-07-30T00:00:00Z",
   };
 }
+
+/** A bare `phi` gate — the shared resolveGate for the phi-leg cases below. */
+const phiGate = (): Gate => ({ kind: "phi" });
 
 describe("toolGateGuard — enforcement at dispatch", () => {
   it("WHATSAPP NEGATIVE: a whatsapp/user turn to an admin_required tool is BLOCKED", async () => {
@@ -271,5 +287,69 @@ describe("toolGateGuard — enforcement at dispatch", () => {
       },
     );
     expect(r?.block).toBe(true);
+  });
+
+  // ── C4 (Phase 5): the D0 `phi_approved` flag is LOAD-BEARING, not advisory ──
+  // Its OWN block, after the phi-audit sequence above, so it stops splitting
+  // that sequence. Every name says "guard-level": 5.2 lands the DISPATCH-level
+  // pair (which additionally proves the channel survives the session cache) and
+  // the two must stay tellable apart across the three-file split. This is not a
+  // substitute for 5.2's pair.
+  describe("C4 channel PHI rail (guard-level)", () => {
+    // Same signed-in user, same platform BAA ON, same phi-gated tool, same audit
+    // sink — the ONLY difference between the arms is the surface's PHI stance,
+    // so the user id must be surface-NEUTRAL (it is reused on the APP arm).
+    const SIGNED_IN_USER = "user_signed_in";
+
+    it("C4 (guard-level): WhatsApp turn + BAA on → phi tool DENIED at the GATE", async () => {
+      const waWithBaa = buildUserGateContext({
+        externalId: SIGNED_IN_USER,
+        graphitiPhiEnabled: true,
+        channelPhiApproved: false, // D0 row for whatsapp
+      });
+      // Pre-C4 this context WAS phi_cleared (signed in + BAA); the channel term is
+      // what now denies it. Asserting the post-Phase-5 truth, not forcing green.
+      expect(waWithBaa.phi_cleared).toBe(false);
+      const r = await toolGateGuard(
+        "health_search",
+        {},
+        { resolveGate: phiGate, gateContext: waWithBaa, phiAudit: phiAuditDep(true) },
+      );
+      expect(r?.block).toBe(true);
+      // EXACT, not `toContain("phi")`: three AUDIT-leg reasons in tool-gate-guard
+      // also contain "phi" ("phi tool — audit sink not configured — denied", "phi
+      // tool — no target clerk_id — denied", "phi audit write failed — denied"),
+      // so a substring match would pass under a guard that blanket-denies every
+      // phi tool and never consults phi_cleared at all. `"phi denied"` is the
+      // GATE leg (`${failing_kind} denied`) and pins the leg this test is about.
+      expect(r?.blockReason).toBe("phi denied");
+    });
+
+    it("C4 (guard-level): app turn + BAA on → phi tool ALLOWED (app declares its stance, has no D0 row)", async () => {
+      const appWithBaa = buildUserGateContext({
+        externalId: SIGNED_IN_USER,
+        graphitiPhiEnabled: true,
+        channelPhiApproved: APP_SURFACE_PHI_APPROVED,
+      });
+      expect(appWithBaa.phi_cleared).toBe(true);
+      let audited = false;
+      const r = await toolGateGuard(
+        "health_search",
+        {},
+        {
+          resolveGate: phiGate,
+          gateContext: appWithBaa,
+          phiAudit: phiAuditDep(true, () => {
+            audited = true;
+          }),
+        },
+      );
+      expect(r).toBeUndefined();
+      // The ALLOW arm still traverses the audit leg, so `undefined` alone is a weak
+      // assertion: a regression that skipped the PHI audit for a cleared context would
+      // ALSO return undefined and keep this test green. Pinning the write here is what
+      // enforces the durable-insert-BEFORE-allow rail on the arm that actually allows.
+      expect(audited).toBe(true);
+    });
   });
 });
