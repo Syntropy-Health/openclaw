@@ -186,7 +186,7 @@ function phiAuditDep(ok: boolean, spy?: () => void): PhiAuditDep {
 }
 
 /** A bare `phi` gate — the shared resolveGate for the phi-leg cases below. */
-const phiGate = () => ({ kind: "phi" }) as Gate;
+const phiGate = (): Gate => ({ kind: "phi" });
 
 describe("toolGateGuard — enforcement at dispatch", () => {
   it("WHATSAPP NEGATIVE: a whatsapp/user turn to an admin_required tool is BLOCKED", async () => {
@@ -332,12 +332,24 @@ describe("toolGateGuard — enforcement at dispatch", () => {
         channelPhiApproved: APP_SURFACE_PHI_APPROVED,
       });
       expect(appWithBaa.phi_cleared).toBe(true);
+      let audited = false;
       const r = await toolGateGuard(
         "health_search",
         {},
-        { resolveGate: phiGate, gateContext: appWithBaa, phiAudit: phiAuditDep(true) },
+        {
+          resolveGate: phiGate,
+          gateContext: appWithBaa,
+          phiAudit: phiAuditDep(true, () => {
+            audited = true;
+          }),
+        },
       );
       expect(r).toBeUndefined();
+      // The ALLOW arm still traverses the audit leg, so `undefined` alone is a weak
+      // assertion: a regression that skipped the PHI audit for a cleared context would
+      // ALSO return undefined and keep this test green. Pinning the write here is what
+      // enforces the durable-insert-BEFORE-allow rail on the arm that actually allows.
+      expect(audited).toBe(true);
     });
   });
 });

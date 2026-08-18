@@ -313,7 +313,8 @@ describe("buildUserGateContext — StrictBool discipline (truthy non-booleans mu
     expect(typeof cleared.phi_cleared).toBe("boolean");
     // JSON is the carrier SJ re-checks — a truthy string would serialize as
     // `"phi_cleared":"true"` and SJ's StrictBool would reject the body.
-    expect(JSON.parse(JSON.stringify(cleared)).phi_cleared).toBe(true);
+    const clearedWire = JSON.parse(JSON.stringify(cleared)) as Record<string, unknown>;
+    expect(clearedWire.phi_cleared).toBe(true);
 
     const denied = buildUserGateContext({
       externalId: SIGNED_IN,
@@ -321,7 +322,8 @@ describe("buildUserGateContext — StrictBool discipline (truthy non-booleans mu
       channelPhiApproved: "true" as unknown as boolean,
     });
     expect(typeof denied.phi_cleared).toBe("boolean");
-    expect(JSON.parse(JSON.stringify(denied)).phi_cleared).toBe(false);
+    const deniedWire = JSON.parse(JSON.stringify(denied)) as Record<string, unknown>;
+    expect(deniedWire.phi_cleared).toBe(false);
   });
 });
 
