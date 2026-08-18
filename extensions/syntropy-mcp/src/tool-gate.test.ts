@@ -50,10 +50,16 @@ describe("gate-context — StrictBool + phi conjunction", () => {
   });
 
   it("buildUserGateContext is NOT admin by construction (WhatsApp/partner path)", () => {
+    // `false` is the D0 truth for the surface this test is TITLED for
+    // (`whatsapp.phi_approved === false` — no BAA with Meta). The plan's "these
+    // sites pass true" was written for channel-AGNOSTIC call sites; this one
+    // names its channel, so a `true` here would be the authoritative gate suite
+    // asserting the exact falsehood C4 exists to prevent. Inert either way —
+    // `graphitiPhiEnabled` is omitted, so phi_cleared is false regardless.
     const ctx = buildUserGateContext({
       externalId: "user_123",
       subscriptionPlan: "pro",
-      channelPhiApproved: true,
+      channelPhiApproved: false,
     });
     expect(ctx.is_admin).toBe(false);
     expect(ctx.admin_subject).toBeUndefined();

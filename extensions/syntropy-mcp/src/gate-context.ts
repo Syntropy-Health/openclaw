@@ -22,7 +22,15 @@ export type GateContext = {
   is_admin: boolean;
   /** The admin's clerk_user_id (= verified key `owner_id`). Present iff is_admin. */
   admin_subject?: string;
-  /** `meta.phi_clearance AND GRAPHITI_PHI_ENABLED`. Real boolean. */
+  /**
+   * Real boolean. TWO paths produce it, and they are NOT the same conjunction:
+   *  - USER  (`buildUserGateContext`)  = signed in AND platform BAA
+   *    (`GRAPHITI_PHI_ENABLED`) AND the arriving SURFACE is PHI-approved
+   *    (the C4 channel term).
+   *  - ADMIN (`buildAdminGateContext`) = key `meta.phi_clearance` AND platform
+   *    BAA. NO channel term — a deliberate asymmetry with a revisit trigger,
+   *    documented on {@link buildAdminGateContext}.
+   */
   phi_cleared: boolean;
   /** The turn's verified user identity (Clerk sub), when present. */
   user_subject?: string;
@@ -58,17 +66,30 @@ export function envFlagEnabled(raw: string | undefined): boolean {
 }
 
 /**
+ * The StrictBool rail: only a REAL `true` clears. A truthy non-boolean arriving
+ * through an untyped runtime edge (a D0 JSON row, a hook ctx, a cast) must fail
+ * CLOSED, never widen access.
+ *
+ * This exists as a NAMED helper rather than an inline `x === true` because the
+ * declared type of these terms is often already `boolean`, which makes the
+ * literal compare look redundant to a reader (and to a linter) when it is in
+ * fact the load-bearing coercion guard — the same rail SJ's Pydantic
+ * `StrictBool` enforces on the server leg. Taking `unknown` states the honest
+ * precondition: the value may not be the boolean its type claims.
+ */
+function strictTrue(value: unknown): boolean {
+  return value === true;
+}
+
+/**
  * `phi_cleared = meta.phi_clearance AND GRAPHITI_PHI_ENABLED` (devex PIN 2).
  * `keyPhiClearance` comes from the validated key meta and MUST be a real boolean —
- * `=== true` rejects a truthy string/number by construction. `graphitiPhiEnabled`
- * is the already-coerced platform BAA flag. Both false → false (fail-closed).
+ * {@link strictTrue} rejects a truthy string/number by construction.
+ * `graphitiPhiEnabled` is the already-coerced platform BAA flag. Both false →
+ * false (fail-closed).
  */
 export function computePhiCleared(keyPhiClearance: unknown, graphitiPhiEnabled: boolean): boolean {
-  // Same StrictBool rail as buildUserGateContext below — the compare is deliberate,
-  // not redundant. (Pre-existing site; `extensions/` is ignored by the repo's default
-  // lint config, so this only surfaces under the contract §8.1 real-lint invocation.)
-  // oxlint-disable-next-line typescript/no-unnecessary-boolean-literal-compare
-  return keyPhiClearance === true && graphitiPhiEnabled === true;
+  return strictTrue(keyPhiClearance) && strictTrue(graphitiPhiEnabled);
 }
 
 /**
@@ -99,7 +120,9 @@ export type AdminIdentity = {
  * Build the USER-scoped context (the default; also the WhatsApp/partner path).
  * `is_admin` is `false` BY CONSTRUCTION — there is no admin identity here.
  *
- * `phi_cleared` for a user = the platform BAA flag (`GRAPHITI_PHI_ENABLED`) ALONE
+ * `phi_cleared` for a user rests on the platform BAA flag (`GRAPHITI_PHI_ENABLED`)
+ * ALONE among the IDENTITY terms — C4 adds the SURFACE term documented below, so
+ * "alone" never meant "the only conjunct"
  * (CTO ruling #5334, cleared by #5339): a signed-in user may read their OWN PHI
  * when the platform BAA is active. This is safe ONLY because every
  * `all_of[auth_required, phi]` tool is clerk_id-SELF-SCOPED by construction — the
@@ -121,9 +144,9 @@ export type AdminIdentity = {
  * forgot the argument. Required forces every call site to state its answer, and
  * it is free right now because there are zero production callers.
  *
- * All three conjuncts use `=== true` (StrictBool): a truthy string/number must
- * never widen access — SJ's Pydantic `StrictBool` rejects those loudly, and the
- * client leg must agree with the server leg.
+ * Both flag conjuncts go through {@link strictTrue} (StrictBool): a truthy
+ * string/number must never widen access — SJ's Pydantic `StrictBool` rejects
+ * those loudly, and the client leg must agree with the server leg.
  */
 export function buildUserGateContext(params: {
   externalId: string | undefined;
@@ -141,16 +164,14 @@ export function buildUserGateContext(params: {
     // NOTE: `channelPhiApproved` is an INPUT ONLY — the emitted GateContext gains
     // no field. Its shape mirrors SJ's exactly (ADR-0001 / SJ PR #1622) and the
     // JSON body SJ re-checks must stay byte-compatible.
+    // `strictTrue` is NOT redundant here. Both flags are DECLARED `boolean`, but
+    // each crosses an untyped runtime edge (a D0 JSON row / a hook ctx) where a
+    // caller can hand us `"true"` or `1` through a cast — and those must fail
+    // CLOSED rather than widen PHI access.
     phi_cleared:
       Boolean(externalId) &&
-      params.graphitiPhiEnabled === true &&
-      // The compare is NOT unnecessary. The declared type is `boolean`, but the value
-      // crosses an untyped runtime edge (a D0 JSON row / a hook ctx), where a caller
-      // can hand us `"true"` or `1` through a cast. `=== true` is the StrictBool rail
-      // that makes a truthy non-boolean fail CLOSED instead of widening PHI access —
-      // the same rail SJ's Pydantic StrictBool enforces on the server leg.
-      // oxlint-disable-next-line typescript/no-unnecessary-boolean-literal-compare
-      params.channelPhiApproved === true,
+      strictTrue(params.graphitiPhiEnabled) &&
+      strictTrue(params.channelPhiApproved),
     user_subject: externalId,
   };
 }

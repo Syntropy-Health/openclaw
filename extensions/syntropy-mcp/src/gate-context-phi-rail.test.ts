@@ -198,6 +198,29 @@ describe("buildUserGateContext — phi_cleared truth table (all 8 rows)", () => 
     expect(buildUserGateContext({ ...base, channelPhiApproved: true }).phi_cleared).toBe(true);
     expect(buildUserGateContext({ ...base, channelPhiApproved: false }).phi_cleared).toBe(false);
   });
+
+  it("channelPhiApproved is REQUIRED — omitting it must not compile, and fails CLOSED if reached", () => {
+    // WHY the directive is the guard, not the assertion: `@ts-expect-error` is an
+    // ERROR when the line it covers has NO error (TS2578). So the moment the
+    // signature is relaxed to `channelPhiApproved?: boolean`, this call starts
+    // compiling, the directive becomes UNUSED, and tsgo fails. That is the ONLY
+    // durable proof of the "Required, not optional" ruling: the original red was a
+    // compile error that vanished the instant all 51 call sites passed the
+    // argument, so nothing else in this suite can tell a required param from an
+    // optional one.
+    //
+    // BOTH halves are load-bearing. Made optional with a `true` default (the
+    // fail-OPEN mutant, PLAN §5.2's named failure mode), the runtime assertion
+    // below ALSO fails; made optional with a `false` default, only the directive
+    // catches it. Do not "simplify" either half away.
+    // @ts-expect-error channelPhiApproved is REQUIRED. If it is ever made optional,
+    // this call compiles, the directive becomes unused, and tsgo fails with TS2578.
+    const ctx: GateContext = buildUserGateContext({
+      externalId: SIGNED_IN,
+      graphitiPhiEnabled: true,
+    });
+    expect(ctx.phi_cleared).toBe(false);
+  });
 });
 
 // ===========================================================================
@@ -468,19 +491,20 @@ describe("buildAdminGateContext — UNCHANGED by Phase 5 (deliberate asymmetry, 
     expect(typeof ctx.phi_cleared).toBe("boolean");
   });
 
-  it("an admin context is UNAFFECTED by every D0 channel value (no channel term at all)", () => {
-    // Same conditions under which the USER path is denied on every channel (all
-    // D0 rows are phi_approved:false today) — the ADMIN path still clears. If
-    // this ever needs to change, it is the revisit trigger firing, not a bug.
-    for (const channelId of knownChannelIds()) {
-      expect(capabilitiesFor(channelId)?.phi_approved ?? false).toBe(false);
-      const userCtx = buildUserGateContext({
-        externalId: SIGNED_IN,
-        graphitiPhiEnabled: true,
-        channelPhiApproved: capabilitiesFor(channelId)?.phi_approved ?? false,
-      });
-      expect(userCtx.phi_cleared).toBe(false);
-    }
+  it("the ASYMMETRY itself: a channel denial that closes the USER path leaves the ADMIN path open", () => {
+    // Deliberately states the asymmetry with a LITERAL channel denial rather than
+    // by iterating D0. What D0's rows say today is channel-capability-config's
+    // invariant to own; re-asserting it here would make the post-BAA
+    // `phi_approved` flip redden tests that are not about D0's contents.
+    const userCtx = buildUserGateContext({
+      externalId: SIGNED_IN,
+      graphitiPhiEnabled: true,
+      channelPhiApproved: false,
+    });
+    expect(userCtx.phi_cleared).toBe(false);
+
+    // Same platform BAA, same turn — the admin builder takes NO channel term at
+    // all, so nothing about the surface can close it. Revisit trigger, not a bug.
     const adminCtx = buildAdminGateContext({
       admin: { adminSubject: "user_2adminXYZ", phiClearance: true },
       graphitiPhiEnabled: true,
@@ -544,6 +568,13 @@ describe("APP_SURFACE_PHI_APPROVED — the app path's declared stance", () => {
 // ===========================================================================
 describe("D0-sourced channelPhiApproved — the wiring 2c will use", () => {
   it("whatsapp (D0 phi_approved:false) DENIES PHI for a signed-in, BAA-on user", () => {
+    // `?? false` ABSORBS a missing row: without these two lines, DELETING the
+    // whatsapp row from D0 entirely leaves this test green — it would then be
+    // proving the fail-closed default, not that whatsapp's row says false.
+    expect(capabilitiesFor("whatsapp")).not.toBeNull();
+    // Strictly `false`, not `undefined` — `?? false` cannot see the difference.
+    expect(capabilitiesFor("whatsapp")?.phi_approved).toBe(false);
+
     const channelPhiApproved = capabilitiesFor("whatsapp")?.phi_approved ?? false;
     expect(channelPhiApproved).toBe(false);
     const ctx = buildUserGateContext({
@@ -556,21 +587,37 @@ describe("D0-sourced channelPhiApproved — the wiring 2c will use", () => {
     expect(ctx.is_authenticated).toBe(true);
   });
 
-  it("EVERY known D0 channel denies PHI today (total over the table, not 3 hand-picked rows)", () => {
+  it("EVERY known D0 channel's row REACHES phi_cleared faithfully (total over the table)", () => {
+    // TOTALITY OVER THE FLOW, NOT OVER D0'S CONTENTS. "every row says false
+    // today" is channel-capability-config.test.ts's invariant and is asserted
+    // there; duplicating it here would make the deliberate post-BAA
+    // `phi_approved` flip redden this file too. What THIS file owns is that the
+    // sourcing expression carries each row's answer through to `phi_cleared`
+    // unaltered — which stays true, and stays checked, after that flip.
     const ids = knownChannelIds();
     expect(ids.length).toBeGreaterThan(0);
     for (const channelId of ids) {
+      const row = capabilitiesFor(channelId);
+      // A declared channel MUST resolve to a row; `?? false` below would
+      // otherwise silently substitute the unknown-channel default for it.
+      expect({ channelId, row: row === null }).toStrictEqual({ channelId, row: false });
+      // A REAL boolean, never `undefined` — `?? false` cannot tell those apart.
+      expect({ channelId, type: typeof row?.phi_approved }).toStrictEqual({
+        channelId,
+        type: "boolean",
+      });
+
       const channelPhiApproved = capabilitiesFor(channelId)?.phi_approved ?? false;
       const ctx = buildUserGateContext({
         externalId: SIGNED_IN,
         graphitiPhiEnabled: true,
         channelPhiApproved,
       });
-      // A future FOURTH row shipping with phi_approved:true would fail here,
-      // which is the point — no channel gets PHI without a deliberate ruling.
+      // Signed in + BAA on, so phi_cleared is exactly the row's own answer. A
+      // row whose flag is ignored, hard-coded, or inverted fails here by name.
       expect({ channelId, phi_cleared: ctx.phi_cleared }).toStrictEqual({
         channelId,
-        phi_cleared: false,
+        phi_cleared: row?.phi_approved,
       });
     }
   });
@@ -601,7 +648,18 @@ describe("D0-sourced channelPhiApproved — the wiring 2c will use", () => {
     // Simulates the deliberate post-BAA config flip WITHOUT touching D0: the
     // param must actually carry the channel's answer through, otherwise the
     // rail would be permanently-deny theatre rather than enforcement (F22).
-    const postBaaRow = { ...capabilitiesFor("whatsapp"), phi_approved: true };
+    const liveRow = capabilitiesFor("whatsapp");
+    // Spreading a NULL yields `{}`, and `phi_approved: true` is written over the
+    // top unconditionally — so without these three lines the "post-BAA D0 row"
+    // is indistinguishable from truth-table row 1/8 wearing a costume, and would
+    // read identically if capabilitiesFor returned null for everything.
+    expect(liveRow).not.toBeNull();
+    const postBaaRow = { ...liveRow, phi_approved: true };
+    // The spread must actually CARRY the row: whatsapp's other capability fields
+    // have to survive into the object being fed to the builder.
+    expect(postBaaRow.inline_link).toBe(true);
+    expect(postBaaRow.inline_text).toBe(true);
+
     const ctx = buildUserGateContext({
       externalId: SIGNED_IN,
       graphitiPhiEnabled: true,
