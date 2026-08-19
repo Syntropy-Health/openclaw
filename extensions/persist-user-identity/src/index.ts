@@ -6,6 +6,13 @@ import { evictClerkSessionCache } from "../../../src/gateway/clerk-session-valid
 // Session-key parsing is shared with auth-memory-gate + syntropy so the
 // convention can't drift across the three identity hooks (oc-hygiene #7).
 import { deriveChannel, deriveIdentityPeer } from "../../shared/session-key.js";
+// #68 step 1 — vault-backed token storage, same client the syntropy extension
+// builds. Cross-extension import follows the syntropy-mcp precedent.
+import {
+  createSyntropyVault,
+  vaultRpcsInstalled,
+  type SyntropyVault,
+} from "../../syntropy/src/vault.js";
 import { registerIdentityCommands } from "./commands.js";
 import { formatIdentityContext, formatUnknownUserContext } from "./context.js";
 import {
@@ -54,6 +61,13 @@ const persistUserIdentityPlugin = {
     let schemaReady = false;
     let initError: unknown = null;
 
+    // #68 step 1 — token-at-rest encryption for the !verify pairing path.
+    // Resolved lazily inside ensureReady() because `vaultRpcsInstalled` is a
+    // round-trip and register() must not await the network. Mirrors the same
+    // decision the syntropy extension makes (index.ts): RPCs installed → vault;
+    // otherwise the documented dev-only plaintext fallback.
+    let vault: SyntropyVault | null = null;
+
     async function ensureReady() {
       if (schemaReady) {
         return;
@@ -64,6 +78,17 @@ const persistUserIdentityPlugin = {
       try {
         await sql`SELECT 1`;
         await ensureUserSchema(sql);
+        // Decide the token-storage path once, on the same latch as the schema.
+        if (await vaultRpcsInstalled(sql)) {
+          vault = createSyntropyVault(sql);
+          api.logger.info("persist-user-identity: token storage = supabase vault");
+        } else {
+          vault = null;
+          api.logger.warn(
+            "persist-user-identity: token storage = legacy-plaintext (dev only) — " +
+              "install supabase-migrations/0001 to enable the vault path",
+          );
+        }
         schemaReady = true;
         api.logger.info("persist-user-identity: schema ready");
       } catch (err) {
@@ -134,7 +159,14 @@ const persistUserIdentityPlugin = {
     // Commands: !verify, !identify, !register, !whoami (see ./commands.ts)
     // -------------------------------------------------------------------
 
-    registerIdentityCommands(api, { sql, authConfig, ensureReady, pendingIdentify });
+    registerIdentityCommands(api, {
+      sql,
+      // Getter, not a value — `vault` is resolved lazily in ensureReady().
+      getVault: () => vault,
+      authConfig,
+      ensureReady,
+      pendingIdentify,
+    });
 
     // -------------------------------------------------------------------
     // G-lane [G2]: POST /gateway/mobile/signout — unbind the caller's OWN

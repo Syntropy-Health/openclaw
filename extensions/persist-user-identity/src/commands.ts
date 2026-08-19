@@ -12,6 +12,10 @@
 
 import type { OpenClawPluginApi } from "openclaw/plugin-sdk";
 import type postgres from "postgres";
+// Cross-extension import of the SINGLE owner of `syntropy_tokens` (#68 step 1).
+// Precedent: syntropy-mcp already imports ../../syntropy/src/* the same way.
+import { upsertSyntropyToken } from "../../syntropy/src/db.js";
+import type { SyntropyVault } from "../../syntropy/src/vault.js";
 import {
   createUser,
   findUserByChannelPeer,
@@ -32,6 +36,22 @@ import {
 /** Closure state register() owns, threaded into the command handlers. */
 export type IdentityCommandDeps = {
   sql: postgres.Sql;
+  /**
+   * Supabase Vault client for token-at-rest encryption, or `null` in the dev
+   * fallback (SUPABASE_* absent / RPCs not installed). Threaded in rather than
+   * constructed here so this module keeps a single responsibility and the
+   * production/dev decision stays in `register()` alongside the same choice the
+   * syntropy extension makes.
+   *
+   * A GETTER, NOT A VALUE, and that distinction is load-bearing: register()
+   * resolves the vault lazily inside `ensureReady()` (the RPC probe is a
+   * round-trip and register() must not await the network), but these handlers
+   * are registered — and their deps destructured — before that runs. Passing
+   * the value would capture `null` permanently and silently downgrade every
+   * production pairing to the plaintext path, which is precisely the defect
+   * #68 step 1 exists to remove.
+   */
+  getVault: () => SyntropyVault | null;
   authConfig: AuthConfig | undefined;
   ensureReady: () => Promise<void>;
   /** Pending !identify results so !verify can use the email as user_identifier. */
@@ -43,7 +63,7 @@ export type IdentityCommandDeps = {
  * command blocks that previously lived inline in register().
  */
 export function registerIdentityCommands(api: OpenClawPluginApi, deps: IdentityCommandDeps): void {
-  const { sql, authConfig, ensureReady, pendingIdentify } = deps;
+  const { sql, getVault, authConfig, ensureReady, pendingIdentify } = deps;
 
   // -------------------------------------------------------------------
   // Command: /verify <token>
@@ -131,21 +151,42 @@ export function registerIdentityCommands(api: OpenClawPluginApi, deps: IdentityC
         await linkExternalId(sql, existingLink.id, verified.externalId, channel, peerId);
       }
 
-      // Store Syntropy auth token if present in the pairing response
+      // Store the Syntropy auth token if the pairing response carried one.
+      //
+      // #68 step 1: this MUST go through `upsertSyntropyToken` — the single
+      // producer that owns `syntropy_tokens` — and never through a local
+      // INSERT. This handler previously hand-rolled its own
+      // `INSERT INTO syntropy_tokens (user_id, auth_token, origin)` binding the
+      // plaintext as a VALUE with no vault branch, so every production pairing
+      // wrote a cleartext credential to the legacy column. Two independent
+      // producers on one table is the drift mechanism itself; routing through
+      // the shared writer is what actually closes it.
+      let tokenPersistFailed = false;
       if (verified.authToken) {
         try {
-          await sql`
-            INSERT INTO syntropy_tokens (user_id, auth_token, origin)
-            VALUES (${user.id}, ${verified.authToken}, 'pairing')
-            ON CONFLICT (user_id) DO UPDATE
-              SET auth_token = EXCLUDED.auth_token,
-                  origin     = EXCLUDED.origin,
-                  updated_at = now()
-          `;
-          api.logger.info(`persist-user-identity: stored Syntropy auth token for user ${user.id}`);
+          const vault = getVault();
+          await upsertSyntropyToken(sql, vault, user.id, verified.authToken, "pairing");
+          api.logger.info(
+            `persist-user-identity: stored Syntropy auth token for user ${user.id} ` +
+              `(${vault ? "vault" : "legacy-plaintext (dev)"})`,
+          );
         } catch (tokenErr) {
-          // Non-fatal: syntropy_tokens table may not exist yet if syntropy plugin isn't loaded
-          api.logger.warn(`persist-user-identity: could not store Syntropy token: ${tokenErr}`);
+          // DELIBERATE CHANGE OF STANCE (#68 step 1). This was a warn-and-continue
+          // on the theory that a missing `syntropy_tokens` table (syntropy plugin
+          // not loaded) is a benign degraded mode. That reasoning still holds for
+          // the LOG level, but it must no longer produce a SILENT success: the
+          // whole point of !verify is to persist the pairing token, so a failure
+          // here means the pairing is functionally broken while the reply claims
+          // it worked — an indistinguishable-from-success state.
+          //
+          // We do not rethrow: the user/channel link above already succeeded and
+          // discarding it would be worse. Instead we surface the failure in the
+          // reply so the outcome is honest, and log at ERROR because a token that
+          // never landed is an operational problem, not a debug note.
+          tokenPersistFailed = true;
+          api.logger.error(
+            `persist-user-identity: FAILED to store Syntropy token for user ${user.id}: ${tokenErr}`,
+          );
         }
       }
 
@@ -158,11 +199,20 @@ export function registerIdentityCommands(api: OpenClawPluginApi, deps: IdentityC
         `persist-user-identity: verified ${channel}:${peerId} → user ${user.id} (${verified.externalId})`,
       );
 
+      // #68 step 1: never report an unqualified success when the token did not
+      // persist. The identity link above IS real, so we confirm that much, but
+      // the connection will not work until the token lands — say so rather than
+      // letting the user discover it as a mysterious failure later.
       return {
         text:
           `Identity verified! Welcome${name ? `, ${name}` : ""}.\n` +
           `Your user ID: ${user.id}\n` +
-          `Linked channels: ${channelList}`,
+          `Linked channels: ${channelList}` +
+          (tokenPersistFailed
+            ? "\n\n⚠️ Your account is linked, but storing your access token failed, " +
+              "so Syntropy features will not work yet. Please run !verify again, " +
+              "and contact support if it keeps failing."
+            : ""),
       };
     },
   });
