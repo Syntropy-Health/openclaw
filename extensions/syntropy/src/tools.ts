@@ -67,19 +67,52 @@ function toAgentResult(res: SyntropyToolResult): AgentToolResult<unknown> {
 // Tool descriptor
 // ---------------------------------------------------------------------------
 
+import { ROSTER_TOOL_NAMES, type RosterToolName } from "./generated/tool-roster.generated.js";
+
 interface ToolDef {
-  name: string;
-  label: string;
-  description: string;
-  parameters: TObject;
-  mcpToolName: string;
+  readonly name: string;
+  readonly label: string;
+  readonly description: string;
+  readonly parameters: TObject;
+  readonly mcpToolName: string;
 }
+
+/**
+ * #200 — the membership contract.
+ *
+ * `TOOL_LOCALS` below supplies only what the SJ manifest does NOT carry: the
+ * TypeBox `parameters` and the UI `label`. Everything else (which tools exist,
+ * their `mcpToolName`, their `description`) comes from the GENERATED roster,
+ * so this file can no longer drift on membership the way it did — it shipped
+ * deprecated `syntropy_chat` while omitting `syntropy_my_protocols` and
+ * `syntropy_peptide_intake_set_fields`.
+ *
+ * THE GATE IS THE TYPE, NOT A COMMENT. `TOOL_LOCALS` is declared as a
+ * `Record<RosterToolName, ToolLocal>`:
+ *   - a rostered tool with no entry here  → TS2739 (missing property)
+ *   - an entry here that is not rostered  → TS2353 (excess property)
+ * Either way `tsgo` fails. A reviewer cannot forget, because the compiler will
+ * not let them.
+ *
+ * Why `parameters` is not generated: the manifest names an `input_model_class`
+ * but those Pydantic models are not exported into
+ * `shared/schemas/syntropy.schema.json` (zero `*Input` defs). Generating them
+ * is the follow-up that completes F.1 for this surface; inventing them here
+ * would relocate hand-maintenance rather than remove it.
+ */
+type ToolLocal = {
+  label: string;
+  parameters: TObject;
+};
 
 // ---------------------------------------------------------------------------
 // Tool definitions — 9 consumer tools
 // ---------------------------------------------------------------------------
 
-const TOOL_DEFS: ToolDef[] = [
+// NOTE: no `: ToolDef[]` annotation — that would widen `name` to `string` and
+// silently defeat the membership gate below. `satisfies` type-checks the shape
+// while `as const` preserves the literal names the gate needs.
+const TOOL_DEFS = [
   {
     name: "syntropy_log_food",
     label: "Log Food",
@@ -106,17 +139,11 @@ const TOOL_DEFS: ToolDef[] = [
       content: Type.String({ description: "Free-text health check-in" }),
     }),
   },
-  {
-    name: "syntropy_chat",
-    label: "Chat with Shrine",
-    mcpToolName: "chat_with_shrine",
-    description:
-      "Chat with ShrineAI, the user's personal health AI assistant. Remembers conversation history.",
-    parameters: Type.Object({
-      message: Type.String({ description: "Message to send to ShrineAI" }),
-      session_id: Type.Optional(Type.String({ description: "Session ID for continuity" })),
-    }),
-  },
+  // REMOVED (#200): `syntropy_chat` / `chat_with_shrine`. It is
+  // `deprecated: true` in the SJ manifest and therefore absent from the
+  // generated roster, but this hand-maintained list kept shipping it to the
+  // agent — one of the three divergences #200 exists to close. The compile-time
+  // membership check below now makes a phantom like this a build error.
   {
     name: "syntropy_diet_score",
     label: "Diet Score",
@@ -172,7 +199,68 @@ const TOOL_DEFS: ToolDef[] = [
       limit: Type.Optional(Type.Number({ description: "Count (default: 10, max: 50)" })),
     }),
   },
-];
+] as const satisfies readonly ToolDef[];
+
+// ---------------------------------------------------------------------------
+// #200 — MEMBERSHIP GATE (compile-time). Do not soften these.
+// ---------------------------------------------------------------------------
+
+/** The tool names this file actually implements, as a literal union. */
+type ImplementedName = (typeof TOOL_DEFS)[number]["name"];
+
+/**
+ * Rostered tools this file deliberately does NOT implement yet.
+ *
+ * #200 fixes the CONTRACT MECHANISM; it does not expand the agent's tool
+ * surface (the CTO ruled explicitly that no new tool rides this ticket). These
+ * two are live and non-deprecated in the SJ manifest but have never been
+ * exposed here, and wiring them needs `parameters` authored against their
+ * input contracts — real work with a user-visible 4xx failure mode if guessed.
+ *
+ * Listing them is not a TODO comment: it is load-bearing. The exhaustiveness
+ * check below accepts a rostered tool ONLY if it is implemented or named here,
+ * so a tool added to the manifest breaks the build until someone consciously
+ * implements it or consciously defers it. Silence is not an option either way.
+ */
+const NOT_YET_IMPLEMENTED = [
+  "syntropy_my_protocols",
+  "syntropy_peptide_intake_set_fields",
+] as const satisfies readonly RosterToolName[];
+
+type PendingName = (typeof NOT_YET_IMPLEMENTED)[number];
+
+/**
+ * GATE 1 — no PHANTOM tools. Every implemented tool must exist in the roster.
+ * Catches exactly the `syntropy_chat` case: a tool deprecated (or removed)
+ * upstream that this file kept advertising to the agent.
+ */
+type Phantoms = Exclude<ImplementedName, RosterToolName>;
+type _NoPhantoms = [Phantoms] extends [never]
+  ? true
+  : { ERROR: "tools.ts implements a tool absent from the generated roster"; phantom: Phantoms };
+const _noPhantoms: _NoPhantoms = true;
+
+/**
+ * GATE 2 — no SILENTLY MISSING tools. Every rostered tool must be implemented
+ * or explicitly deferred above. Catches the `my_protocols` /
+ * `peptide_intake_set_fields` case: live upstream, never mirrored here.
+ */
+type Missing = Exclude<RosterToolName, ImplementedName | PendingName>;
+type _NoMissing = [Missing] extends [never]
+  ? true
+  : {
+      ERROR: "roster tool is neither implemented nor listed in NOT_YET_IMPLEMENTED";
+      missing: Missing;
+    };
+const _noMissing: _NoMissing = true;
+
+// Reference the runtime export so the generated module is a real dependency of
+// this file rather than a types-only import an optimiser could elide.
+if (ROSTER_TOOL_NAMES.length === 0) {
+  throw new Error(
+    "syntropy tools: generated roster is empty — regenerate codegen:openclaw-tool-roster",
+  );
+}
 
 // ---------------------------------------------------------------------------
 // Factory — creates tools bound to a specific user's auth token

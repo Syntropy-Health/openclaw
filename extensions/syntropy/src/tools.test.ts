@@ -13,28 +13,54 @@
  */
 
 import { describe, expect, it } from "vitest";
+import { ROSTER_TOOL_NAMES } from "./generated/tool-roster.generated.js";
 import { createAllTools } from "./tools.js";
 
-const EXPECTED_TOOL_NAMES = [
-  "syntropy_log_food",
-  "syntropy_log_checkin",
-  "syntropy_chat",
-  "syntropy_diet_score",
-  "syntropy_diet_gap",
-  "syntropy_health_snapshot",
-  "syntropy_analyze_food",
-  "syntropy_health_profile",
-  "syntropy_my_checkins",
-] as const;
+/**
+ * Mirrors `NOT_YET_IMPLEMENTED` in tools.ts. Kept in sync BY THE COMPILER
+ * there (a rostered tool must be implemented or listed), so this set only has
+ * to name the same deferrals; if it drifts, the length assertion below fails
+ * loudly rather than silently passing.
+ */
+const NOT_YET_IMPLEMENTED_NAMES = new Set<string>([
+  "syntropy_my_protocols",
+  "syntropy_peptide_intake_set_fields",
+]);
+
+/**
+ * #200 — DERIVED, not hand-listed.
+ *
+ * This was a hardcoded list of 9 that included `syntropy_chat`, a tool
+ * `deprecated: true` upstream. So the test asserted the very divergence #200
+ * exists to remove, and would have gone RED on the fix — a test encoding the
+ * defect as the expectation.
+ *
+ * It now derives from the generated roster minus the explicitly-deferred
+ * tools, which is the same contract `tools.ts` is compile-gated against. A tool
+ * added or deprecated upstream flows through here automatically; it cannot go
+ * stale independently, because there is no longer an independent copy.
+ */
+const EXPECTED_TOOL_NAMES: readonly string[] = ROSTER_TOOL_NAMES.filter(
+  (n) => !NOT_YET_IMPLEMENTED_NAMES.has(n),
+);
 
 describe("createAllTools", () => {
   const tools = createAllTools("http://localhost:3000", "sj_test_token");
 
-  it("returns exactly 9 tools", () => {
-    expect(tools).toHaveLength(9);
+  it("returns exactly the rostered, implemented tools", () => {
+    // Not a magic number: the count follows the generated roster.
+    expect(tools).toHaveLength(EXPECTED_TOOL_NAMES.length);
+    // Guard the guard — if the roster were empty this would pass vacuously.
+    expect(EXPECTED_TOOL_NAMES.length).toBeGreaterThan(0);
   });
 
-  it("exposes the 9 canonical Syntropy tool names", () => {
+  it("does NOT expose tools deprecated upstream (regression: syntropy_chat)", () => {
+    // syntropy_chat is deprecated: true in the SJ manifest, so it must never
+    // reach the agent surface again.
+    expect(tools.map((t) => t.name)).not.toContain("syntropy_chat");
+  });
+
+  it("exposes exactly the canonical Syntropy tool names", () => {
     const names = tools.map((t) => t.name).sort();
     expect(names).toEqual([...EXPECTED_TOOL_NAMES].sort());
   });
