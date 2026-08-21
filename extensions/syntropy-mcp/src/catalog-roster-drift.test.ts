@@ -41,7 +41,16 @@ function listToolsReturning(byServer: Record<string, string[]>) {
   });
 }
 
-const DECLARED = ["syntropy_log_food", "syntropy_diet_score"] as const;
+/**
+ * WIRE names, deliberately — this is what the live SJ server announces.
+ *
+ * The first version of this file used agent-facing names (`syntropy_log_food`)
+ * and would have passed while the production filter dropped 100% of the SJ
+ * surface: the live server registers with FastMCP's bare `@mcp_server.tool()`
+ * decorator (no `name=`), so it announces the PYTHON FUNCTION name. Matches the
+ * convention already used by catalog.test.ts and index.test.ts.
+ */
+const DECLARED = ["log_food", "get_diet_score"] as const;
 
 describe("#200 — discovered-but-undeclared is FILTERED and REPORTED", () => {
   it("drops an undeclared tool from the agent surface", async () => {
@@ -51,7 +60,7 @@ describe("#200 — discovered-but-undeclared is FILTERED and REPORTED", () => {
       // chat_with_shrine is the real case: deprecated in the manifest but kept
       // live by SJ's DEPRECATED_STILL_LIVE, so discovery still reports it.
       listTools: listToolsReturning({
-        sj: ["syntropy_log_food", "syntropy_diet_score", "chat_with_shrine"],
+        sj: ["log_food", "get_diet_score", "chat_with_shrine"],
       }),
       declaredRoster: DECLARED,
       declaredRosterServerId: "sj",
@@ -59,7 +68,7 @@ describe("#200 — discovered-but-undeclared is FILTERED and REPORTED", () => {
     await catalog.refresh();
 
     const names = catalog.getToolDescriptors().map((e) => e.descriptor.name);
-    expect(names).toContain("syntropy_log_food");
+    expect(names).toContain("log_food");
     expect(names).not.toContain("chat_with_shrine");
   });
 
@@ -68,7 +77,7 @@ describe("#200 — discovered-but-undeclared is FILTERED and REPORTED", () => {
     const catalog = new ToolCatalog([server("sj")], {
       log,
       listTools: listToolsReturning({
-        sj: ["syntropy_log_food", "syntropy_diet_score", "chat_with_shrine"],
+        sj: ["log_food", "get_diet_score", "chat_with_shrine"],
       }),
       declaredRoster: DECLARED,
       declaredRosterServerId: "sj",
@@ -85,7 +94,7 @@ describe("#200 — discovered-but-undeclared is FILTERED and REPORTED", () => {
     const catalog = new ToolCatalog([server("sj")], {
       log: makeLog(),
       listTools: listToolsReturning({
-        sj: ["syntropy_log_food", "syntropy_diet_score", "chat_with_shrine"],
+        sj: ["log_food", "get_diet_score", "chat_with_shrine"],
       }),
       declaredRoster: DECLARED,
       declaredRosterServerId: "sj",
@@ -104,14 +113,14 @@ describe("#200 — declared-but-undiscovered is reported (the worse direction)",
     // at CALL time. Nothing else in the system notices until an agent tries it.
     const catalog = new ToolCatalog([server("sj")], {
       log: makeLog(),
-      listTools: listToolsReturning({ sj: ["syntropy_log_food"] }),
+      listTools: listToolsReturning({ sj: ["log_food"] }),
       declaredRoster: DECLARED,
       declaredRosterServerId: "sj",
     });
     await catalog.refresh();
 
     expect(catalog.getRosterDrift()).toEqual([
-      { serverId: "sj", kind: "declared_undiscovered", toolName: "syntropy_diet_score" },
+      { serverId: "sj", kind: "declared_undiscovered", toolName: "get_diet_score" },
     ]);
   });
 });
@@ -124,7 +133,7 @@ describe("#200 — the filter is SCOPED, and over-broad application is the failu
     const catalog = new ToolCatalog([server("sj"), server("kg")], {
       log: makeLog(),
       listTools: listToolsReturning({
-        sj: ["syntropy_log_food", "syntropy_diet_score"],
+        sj: ["log_food", "get_diet_score"],
         kg: ["kg_search", "kg_ingest"],
       }),
       declaredRoster: DECLARED,
@@ -166,5 +175,62 @@ describe("#200 — a synced server produces NO drift (the guard must not cry wol
     expect(catalog.getToolDescriptors()).toHaveLength(2);
     expect(catalog.getRosterDrift()).toEqual([]);
     expect(log.warn.mock.calls.map((c) => String(c[0])).join("\n")).not.toMatch(/ROSTER DRIFT/);
+  });
+});
+
+describe("#200 — misconfiguration FAILS CLOSED (QG security finding 3)", () => {
+  it("refuses to construct when declaredRosterServerId names no configured server", () => {
+    // A typo would otherwise disable the filter silently AND make
+    // getRosterDrift() return [] — a clean bill of health the config has not
+    // earned, which is the failure mode the guard exists to prevent.
+    expect(
+      () =>
+        new ToolCatalog([server("sj")], {
+          log: makeLog(),
+          listTools: listToolsReturning({ sj: ["log_food"] }),
+          declaredRoster: DECLARED,
+          declaredRosterServerId: "sj-typo",
+        }),
+    ).toThrow(/not among the configured servers/);
+  });
+
+  it("constructs normally when the id does match", () => {
+    expect(
+      () =>
+        new ToolCatalog([server("sj")], {
+          log: makeLog(),
+          listTools: listToolsReturning({ sj: ["log_food"] }),
+          declaredRoster: DECLARED,
+          declaredRosterServerId: "sj",
+        }),
+    ).not.toThrow();
+  });
+});
+
+describe("#200 — the roster filter compares WIRE names (QG security finding 2)", () => {
+  /**
+   * REGRESSION GUARD for the bug this suite originally hid. The generated
+   * roster exports two namespaces; filtering against the agent-facing one
+   * (`syntropy_*`) drops every SJ tool, because the live server announces
+   * python function names. This test fails if anyone swaps the sets back.
+   */
+  it("does NOT drop real SJ tools when the server announces function names", async () => {
+    const { ROSTER_WIRE_NAMES } =
+      await import("../../syntropy/src/generated/tool-roster.generated.js");
+    const catalog = new ToolCatalog([server("sj")], {
+      log: makeLog(),
+      // Exactly what the live server announces, per server.py's bare
+      // @mcp_server.tool() decorators.
+      listTools: listToolsReturning({
+        sj: ["get_diet_score", "log_food", "get_health_snapshot"],
+      }),
+      declaredRoster: ROSTER_WIRE_NAMES,
+      declaredRosterServerId: "sj",
+    });
+    await catalog.refresh();
+
+    const names = catalog.getToolDescriptors().map((e) => e.descriptor.name);
+    expect(names).toEqual(["get_diet_score", "log_food", "get_health_snapshot"]);
+    expect(catalog.getRosterDrift().filter((d) => d.kind === "discovered_undeclared")).toEqual([]);
   });
 });

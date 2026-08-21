@@ -154,8 +154,14 @@ export class ToolCatalog {
   private readonly errorCallbacks: RefreshErrorCallback[] = [];
   private readonly declaredRoster: ReadonlySet<string> | null;
   private readonly declaredRosterServerId: string | null;
-  /** Names already warned about, so a drift does not log on every read. */
+  /**
+   * Names already warned about, so a persistent drift does not log on every
+   * read. BOUNDED: a misbehaving server that randomises tool names on each
+   * refresh would otherwise add an entry per name forever. At the cap we clear
+   * and start over — re-warning is acceptable; unbounded growth is not.
+   */
   private readonly warnedDrift = new Set<string>();
+  private static readonly WARNED_DRIFT_MAX = 1000;
 
   constructor(servers: McpServerConfig[], opts?: CatalogOptions) {
     this.refreshSeconds = opts?.refreshSeconds ?? DEFAULT_REFRESH_SECONDS;
@@ -170,6 +176,20 @@ export class ToolCatalog {
     this.declaredRosterServerId = this.declaredRoster
       ? (opts?.declaredRosterServerId ?? null)
       : null;
+    // FAIL-CLOSED ON MISCONFIGURATION (QG security finding 3). A
+    // `declaredRosterServerId` naming a server we were not handed would
+    // silently disable the filter AND make getRosterDrift() return `[]` — a
+    // clean bill of health the configuration has not earned, which is exactly
+    // the failure this guard exists to prevent. Refuse to construct instead,
+    // mirroring requireServer()'s throw for an unknown id.
+    if (
+      this.declaredRosterServerId !== null &&
+      !servers.some((c) => c.id === this.declaredRosterServerId)
+    ) {
+      throw new Error(
+        `syntropy-mcp catalog: declaredRosterServerId "${this.declaredRosterServerId}" is not among the configured servers (${servers.map((c) => c.id).join(", ") || "none"}) — refusing to start with a roster that governs nothing.`,
+      );
+    }
     for (const config of servers) {
       this.servers.set(config.id, {
         config,
@@ -225,6 +245,7 @@ export class ToolCatalog {
   private reportDrift(serverId: string, kind: RosterDrift["kind"], toolName: string): void {
     const key = `${serverId}:${kind}:${toolName}`;
     if (this.warnedDrift.has(key)) return;
+    if (this.warnedDrift.size >= ToolCatalog.WARNED_DRIFT_MAX) this.warnedDrift.clear();
     this.warnedDrift.add(key);
     this.log.warn(
       kind === "discovered_undeclared"

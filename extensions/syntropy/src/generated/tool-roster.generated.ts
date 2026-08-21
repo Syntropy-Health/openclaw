@@ -96,6 +96,22 @@ export const TOOL_ROSTER = [
   },
 ] as const satisfies readonly RosterEntry[];
 
+/**
+ * WIRE names — what the MCP server actually announces on `tools/list`.
+ *
+ * THIS IS THE SET RUNTIME DISCOVERY MUST BE FILTERED AGAINST, not
+ * {@link ROSTER_TOOL_NAMES}. The live SJ server registers via FastMCP's
+ * bare `@mcp_server.tool()` decorator with NO `name=` argument, so the
+ * announced name is the PYTHON FUNCTION name (`get_diet_score`), not the
+ * manifest's agent-facing `name` (`syntropy_diet_score`).
+ *
+ * (`registry.py` has an `attach()` path that WOULD register under the
+ * manifest name — but its own comment records that server.py has not
+ * flipped to it. Comparing against the agent-facing names would drop 100%
+ * of the SJ surface.)
+ */
+export const ROSTER_WIRE_NAMES: readonly string[] = TOOL_ROSTER.map((t) => t.mcpToolName);
+
 /** Canonical tool names, as a union — the membership contract tools.ts is pinned to. */
 export type RosterToolName = (typeof TOOL_ROSTER)[number]["name"];
 
