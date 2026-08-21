@@ -11,6 +11,13 @@
     "assets/",
     "dist/",
     "docs/_layouts/",
+    // Codegen artifacts (#200): the GENERATOR'S output is the canonical form —
+    // same principle as tests/sealed/ below. If oxfmt rewrote these, the
+    // schema-drift CI (which regenerates and byte-diffs) would report false
+    // drift forever, and a formatter version bump would demand churn in files
+    // humans must never edit. Format conformity yields to regeneration
+    // stability.
+    "extensions/syntropy/src/generated/",
     "node_modules/",
     "patches/",
     "pnpm-lock.yaml/",

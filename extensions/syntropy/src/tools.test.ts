@@ -1,48 +1,67 @@
 /**
- * Tool-factory tests.
+ * Tool-factory tests (#200).
  *
- * `createAllTools(baseUrl, authToken)` must return exactly the 9 health
- * tools registered with the SJ MCP server. The names + `MealType` enum
- * shape are load-bearing — the SJ MCP server validates against these
- * exactly, and chrome-shrine + mobile + shrine-diet-bioactivity consume
- * the same canonical contract via shared JSON Schema (see #44).
+ * `createAllTools(baseUrl, authToken)` must return exactly the rostered,
+ * implemented health tools. Membership + `mcpToolName` + `description` are
+ * DERIVED from the generated roster (one source of truth, F.1 Layered); the
+ * compile-time `Record<ImplementedName, ToolLocal>` gate in tools.ts enforces
+ * the join. These tests pin the two things the compiler cannot:
  *
- * If a tool is renamed, dropped, or added, this test must be updated to
- * match — and the schema-coupling pipeline (#44) must propagate the
- * change to every consumer surface in the same PR.
+ *   1. that the runtime derivation actually happened (fields verbatim from
+ *      the roster, not from any hand-kept copy), and
+ *   2. that the DEFERRAL LIST is not a free parameter — deleting an
+ *      implemented tool and deferring it compiles clean in both mirrors
+ *      (QG test-review mutant, 2026-08-21), so the exact deferral contents
+ *      are pinned HERE, deliberately hardcoded. Shrinking the agent surface
+ *      must be a conscious edit to this file.
  */
 
 import { describe, expect, it } from "vitest";
-import { ROSTER_TOOL_NAMES } from "./generated/tool-roster.generated.js";
-import { createAllTools } from "./tools.js";
+import { ROSTER_TOOL_NAMES, TOOL_ROSTER } from "./generated/tool-roster.generated.js";
+import { createAllTools, NOT_YET_IMPLEMENTED, TOOL_DEFS } from "./tools.js";
 
 /**
- * Mirrors `NOT_YET_IMPLEMENTED` in tools.ts. Kept in sync BY THE COMPILER
- * there (a rostered tool must be implemented or listed), so this set only has
- * to name the same deferrals; if it drifts, the length assertion below fails
- * loudly rather than silently passing.
+ * #200 — the deferral tripwire. HARDCODED on purpose; do not derive.
+ *
+ * The compile gate accepts ANY partition of the roster into implemented vs
+ * deferred — it enforces consistency, not surface size. This assertion is
+ * what makes "quietly move a tool to NOT_YET_IMPLEMENTED" a red test instead
+ * of a green refactor. If you are editing this list, you are changing the
+ * agent's tool surface: say so in the PR.
  */
-const NOT_YET_IMPLEMENTED_NAMES = new Set<string>([
-  "syntropy_my_protocols",
-  "syntropy_peptide_intake_set_fields",
-]);
+it("NOT_YET_IMPLEMENTED is exactly the consciously-deferred set", () => {
+  expect([...NOT_YET_IMPLEMENTED].sort()).toEqual(["syntropy_my_protocols"]);
+});
 
-/**
- * #200 — DERIVED, not hand-listed.
- *
- * This was a hardcoded list of 9 that included `syntropy_chat`, a tool
- * `deprecated: true` upstream. So the test asserted the very divergence #200
- * exists to remove, and would have gone RED on the fix — a test encoding the
- * defect as the expectation.
- *
- * It now derives from the generated roster minus the explicitly-deferred
- * tools, which is the same contract `tools.ts` is compile-gated against. A tool
- * added or deprecated upstream flows through here automatically; it cannot go
- * stale independently, because there is no longer an independent copy.
- */
 const EXPECTED_TOOL_NAMES: readonly string[] = ROSTER_TOOL_NAMES.filter(
-  (n) => !NOT_YET_IMPLEMENTED_NAMES.has(n),
+  (n) => !(NOT_YET_IMPLEMENTED as readonly string[]).includes(n),
 );
+
+describe("#200 — TOOL_DEFS is derived from the roster, verbatim", () => {
+  it("implements exactly roster-minus-deferred (both directions)", () => {
+    expect(TOOL_DEFS.map((d) => d.name).sort()).toEqual([...EXPECTED_TOOL_NAMES].sort());
+  });
+
+  it("every deferred name is actually rostered (a stale deferral is an error)", () => {
+    for (const name of NOT_YET_IMPLEMENTED) {
+      expect(ROSTER_TOOL_NAMES, `${name} deferred but not rostered`).toContain(name);
+    }
+  });
+
+  it("mcpToolName and description come from the roster VERBATIM", () => {
+    // The historical defect class: a hand-kept mcpToolName typo
+    // ("log_food_TYPO") passed tsgo AND the whole suite (QG mutation proof,
+    // 2026-08-21) because nothing bound the field to the manifest. Now the
+    // field is derived; this asserts the derivation, entry by entry.
+    const rosterByName = new Map(TOOL_ROSTER.map((t) => [t.name as string, t]));
+    for (const def of TOOL_DEFS) {
+      const roster = rosterByName.get(def.name);
+      expect(roster, `${def.name} missing from roster`).toBeDefined();
+      expect(def.mcpToolName, `${def.name} mcpToolName`).toBe(roster!.mcpToolName);
+      expect(def.description, `${def.name} description`).toBe(roster!.description);
+    }
+  });
+});
 
 describe("createAllTools", () => {
   const tools = createAllTools("http://localhost:3000", "sj_test_token");
