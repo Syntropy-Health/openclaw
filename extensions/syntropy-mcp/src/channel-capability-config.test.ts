@@ -25,8 +25,10 @@ import { capabilitiesFor, knownChannelIds } from "./channel-capability-config.js
 //
 // Invariants under challenge:
 //   * whatsapp CAN render links + text inline; it is the ONLY row.
-//   * sms and voice are DENIED — the fail-closed null is the ruling made
-//     load-bearing, not an accident of a missing entry.
+//   * sms and voice are DENIED at this lookup — which gates adapter
+//     CONSTRUCTION. Stated precisely (QG4 F1): no live inbound path reads
+//     this table, so this is the D0 DECLARATION ceasing to advertise, not
+//     the enforcement point of the ruling on a live turn.
 //   * phi_approved is false for every remaining row (PHI is post-BAA).
 //   * unknown channels FAIL CLOSED (null) — never a permissive default.
 // ---------------------------------------------------------------------------
@@ -60,6 +62,15 @@ describe("#216 — retired channels are DENIED (the ruling observed firing, not 
 
   it("voice resolves to null [CTO-JUDGEMENT #6654: unpairable today, not principal-ruled]", () => {
     expect(capabilitiesFor("voice")).toBeNull();
+  });
+
+  // QG4 F11 — the RESTORATION BINDING. Passes trivially today (voice is null),
+  // but the moment anyone restores a voice row, it must be the flag1-ruled
+  // shape — this fails a restoration from the A&D's superseded row
+  // (inline_text:false) WITHOUT requiring the restorer to remember flag1.
+  it("a restored voice row must be the flag1 shape (binding is live from day one)", () => {
+    const restored = capabilitiesFor("voice");
+    expect(restored ?? FLAG1_VOICE_ROW).toStrictEqual(FLAG1_VOICE_ROW);
   });
 });
 
@@ -150,12 +161,13 @@ describe("capabilitiesFor — fresh-copy isolation", () => {
 // (asserted above, with provenance labels), so these now drive the resolver
 // with FLAG1_VOICE_ROW, a literal carrying the flag1-ruled shape. Two reasons
 // this block survives the row it tested:
-//   1. deliverViaCapabilities is CHANNEL-AGNOSTIC and still shipped — this is
-//      its only coverage of the inline_text:true / inline_link:false split.
-//   2. voice's removal is [CTO-JUDGEMENT], explicitly REVERSIBLE: if voice
+//   1. voice's removal is [CTO-JUDGEMENT], explicitly REVERSIBLE: if voice
 //      returns, it must return to THIS ruled behavior — not to the A&D §3
 //      row (inline_text:false) that flag1 superseded. A future restoration
-//      flips these tests back to shipped-row sourcing.
+//      flips these tests back to shipped-row sourcing. (The resolver's
+//      inline_text/inline_link matrix is ALSO covered independently in
+//      channel-adapter.test.ts — this block is the flag1-shape reference,
+//      not the resolver's only coverage. QG4 F4.)
 //
 // The matrix:
 //   text + companion    → INLINE     (flag1: TTS speaks it)

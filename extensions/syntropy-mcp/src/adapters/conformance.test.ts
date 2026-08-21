@@ -10,12 +10,14 @@ import { createTwilioSmsAdapter } from "./twilio-sms-adapter.js";
 import { createTwilioVoiceAdapter } from "./twilio-voice-adapter.js";
 
 // ---------------------------------------------------------------------------
-// SEALED challenge suite — Phase 7 (thin channel adapters: voice / sms / whatsapp).
+// SEALED challenge suite — Phase 7 (thin channel adapters), amended by #216:
+// the voice and sms cases are RETIRED with their D0 rows; whatsapp remains.
 // Authored from PHASE7-CONTRACT.md + the FROZEN C0 seam ONLY; no adapter
 // implementation was read.
 //
-// Core invariant under challenge: UNIFORMITY (A&D §5.1). Three providers, ONE
-// shared body. A channel is allowed to differ in exactly two places — (a) how it
+// Core invariant under challenge: UNIFORMITY (A&D §5.1) — N providers, ONE
+// shared body (post-#216, N=1; the uniformity proof regains force when a
+// channel returns). A channel is allowed to differ in exactly two places — (a) how it
 // names an inbound sender and (b) how it physically delivers — and BOTH are
 // absorbed as declared capability data by C0. Everything else must be identical,
 // so this file is parameterized over a descriptor table and every assertion below
@@ -44,7 +46,9 @@ import { createTwilioVoiceAdapter } from "./twilio-voice-adapter.js";
 // plain typed config fixtures, zero env mutation.
 //
 // OPEN QUESTIONS FOR THE PRINCIPAL (contract silent — behaviour NOT invented here):
-//  Q1. Is the voice INLINE (TTS) leg TCPA-gated? Contract §5.3 wires it to the
+//  Q1. [NO LONGER EXERCISED post-#216 — the assertion arm retired with the
+//      voice case; the question STANDS OPEN for any voice restoration.]
+//      Is the voice INLINE (TTS) leg TCPA-gated? Contract §5.3 wires it to the
 //      injected `emitTwiml` with no `OptOutStore` in the path, while §5.1/§5.2
 //      route the SMS/WhatsApp legs through `guardedSendSms`/`guardedSendKapso`.
 //      This suite therefore treats TCPA suppression as a property of the SINK
@@ -117,7 +121,6 @@ const TEXT_LITERAL = "your session is ready";
 const LINK_LITERAL = "https://sj.local/verify?t=abc";
 const OTP_LITERAL = "482913";
 /** The contract's default TTS voice (§5.3: `voice?: string` defaults to "alice"). */
-const DEFAULT_VOICE = "alice";
 
 type PayloadKind = DeliveryPayload["kind"];
 
@@ -255,39 +258,8 @@ function makeEmitTwiml(hits: Hit[], mode: ProviderMode) {
 // flakiness somewhere else instead of a clean failure at the mutation test.
 
 /** Twilio webhook form body (voice AND sms): `From` is already E.164. */
-function twilioForm(fields: Record<string, string>): URLSearchParams {
-  return new URLSearchParams(fields);
-}
 
-const VOICE_CALL_SID = "CA00000000000000000000000000000001";
-const SMS_MESSAGE_SID = "SM00000000000000000000000000000001";
 const WHATSAPP_WAMID = "wamid.NATIVE0001";
-
-function voiceInbound(sender: string | null): URLSearchParams {
-  const fields: Record<string, string> = {
-    To: STORE_SMS_NUMBER,
-    CallSid: VOICE_CALL_SID,
-    CallStatus: "ringing",
-    Direction: "inbound",
-  };
-  if (sender !== null) {
-    fields.From = sender;
-  }
-  return twilioForm(fields);
-}
-
-function smsInbound(sender: string | null): URLSearchParams {
-  const fields: Record<string, string> = {
-    To: STORE_SMS_NUMBER,
-    MessageSid: SMS_MESSAGE_SID,
-    Body: "hi",
-    NumMedia: "0",
-  };
-  if (sender !== null) {
-    fields.From = sender;
-  }
-  return twilioForm(fields);
-}
 
 /** One Cloud API `entry[]` element carrying the given messages. */
 function whatsappEntry(messages: Array<Record<string, unknown>>, entryId = "WABA"): unknown {
@@ -869,6 +841,11 @@ describe("D0 capability table", () => {
   // derived from the table, so this pins the table's CARDINALITY, not a sample.
   it("locks the D0 row SET — adding a channel is a deliberate, test-visible act", () => {
     expect(knownChannelIds()).toStrictEqual(APPROVED_CHANNEL_KINDS);
+    // QG4 F5: the D0 row set and the conformance-case set must move TOGETHER —
+    // restoring a channel's row without restoring its behavioral case would
+    // otherwise be satisfiable by editing the literal above alone, shipping a
+    // live channel with zero adapter coverage.
+    expect(knownChannelIds().toSorted()).toStrictEqual(CASES.map((c) => c.kind).toSorted());
   });
 
   // Driven by knownChannelIds(), NOT by a hard-coded triple: a future fourth row is
@@ -967,5 +944,19 @@ describe("generateNotifyTwiml — TwiML artifact (§5.3, pure)", () => {
   it("renders the requested TTS voice into the Say attribute", () => {
     expect(generateNotifyTwiml("hello", "Polly.Joanna")).toContain('voice="Polly.Joanna"');
     expect(generateNotifyTwiml("hello", "alice")).toContain('voice="alice"');
+  });
+
+  // QG4 F6 — THE CALLER OBLIGATION, pinned rather than assumed. The `voice`
+  // argument is interpolated RAW into the Say attribute (only the message is
+  // escaped), so every caller MUST validate it (the retired voice adapter did,
+  // via XML_UNSAFE at construction — that guard's test retired with the case).
+  // This test documents the sharp edge so it cannot be rediscovered by
+  // exploit: if generateNotifyTwiml ever starts escaping the attribute, this
+  // goes red and the obligation comments can be deleted. NOTE the second live
+  // caller (extensions/voice-call/src/manager/outbound.ts) has NO such guard —
+  // raised as a residual in the #216 pr-submit.
+  it("does NOT escape the voice attribute — callers must validate it (documented sharp edge)", () => {
+    const hostile = '"><Say>pwned</Say><Say voice="x';
+    expect(generateNotifyTwiml("hello", hostile)).toContain(`voice="${hostile}"`);
   });
 });

@@ -66,7 +66,7 @@ export type DeliveryResult = { ok: boolean; via: "inline" | "companion" | "none"
 /**
  * The normalized identity of an inbound sender: an E.164 number + channel id.
  *
- * `channelId` is the channel KIND — `"voice" | "sms" | "whatsapp"` — the D0
+ * `channelId` is the channel KIND — `"whatsapp" (post-#216; formerly also "voice" | "sms")` — the D0
  * lookup key handed to {@link capabilitiesFor}. It is NOT a native per-conversation
  * / per-session id (a call SID, a WhatsApp wa_id, etc.); the concrete adapter
  * discards that native id and reports only the kind, because the core resolves
