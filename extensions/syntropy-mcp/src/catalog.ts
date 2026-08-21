@@ -65,45 +65,6 @@ export type CatalogOptions = {
   log?: CatalogLog;
   /** Injectable discovery transport for tests. Default {@link listMcpTools}. */
   listTools?: ListToolsFn;
-  /**
-   * #200 / CTO ruling "DISCOVERY IS NOT AUTHORITY".
-   *
-   * The declared tool roster (generated from the SJ manifest) and the id of the
-   * server that roster governs. When both are supplied, runtime discovery for
-   * THAT server is filtered against the roster: the manifest decides what
-   * exists, and discovery becomes a transport detail.
-   *
-   * SCOPED ON PURPOSE. The catalog serves several MCP servers; the manifest
-   * describes exactly one of them. Filtering every server against an SJ-derived
-   * roster would silently delete another server's entire tool set — an
-   * over-broad application of a correct rule, which is its own defect. A server
-   * with no declared roster is left ungoverned here, deliberately.
-   *
-   * Omit both to disable (default) — existing callers and tests are unaffected.
-   */
-  declaredRoster?: readonly string[];
-  /** Server id the {@link declaredRoster} governs, e.g. "sj". */
-  declaredRosterServerId?: string;
-};
-
-/**
- * One disagreement between what the manifest DECLARES and what a server SERVES.
- * Surfaced rather than swallowed — see {@link ToolCatalog.getRosterDrift}.
- */
-export type RosterDrift = {
-  serverId: string;
-  /**
-   * `discovered_undeclared` — the server serves a tool the manifest does not
-   * declare. Filtered from the served set, but never silently: this is how a
-   * deprecated-but-still-served tool (SJ's `DEPRECATED_STILL_LIVE`) stays
-   * reachable, and how an undeclared tool would otherwise reach an agent.
-   *
-   * `declared_undiscovered` — the manifest declares a tool the server does not
-   * serve. Arguably worse: it fails at CALL time rather than at discovery, so
-   * nothing notices until an agent tries to use it.
-   */
-  kind: "discovered_undeclared" | "declared_undiscovered";
-  toolName: string;
 };
 
 export type CatalogEntry = {
@@ -152,16 +113,6 @@ export class ToolCatalog {
   private readonly log: CatalogLog;
   private readonly listTools: ListToolsFn;
   private readonly errorCallbacks: RefreshErrorCallback[] = [];
-  private readonly declaredRoster: ReadonlySet<string> | null;
-  private readonly declaredRosterServerId: string | null;
-  /**
-   * Names already warned about, so a persistent drift does not log on every
-   * read. BOUNDED: a misbehaving server that randomises tool names on each
-   * refresh would otherwise add an entry per name forever. At the cap we clear
-   * and start over — re-warning is acceptable; unbounded growth is not.
-   */
-  private readonly warnedDrift = new Set<string>();
-  private static readonly WARNED_DRIFT_MAX = 1000;
 
   constructor(servers: McpServerConfig[], opts?: CatalogOptions) {
     this.refreshSeconds = opts?.refreshSeconds ?? DEFAULT_REFRESH_SECONDS;
@@ -169,27 +120,6 @@ export class ToolCatalog {
     this.now = opts?.now ?? Date.now;
     this.log = opts?.log ?? NOOP_LOG;
     this.listTools = opts?.listTools ?? listMcpTools;
-    // Both or neither: a roster without a server id cannot be scoped, and
-    // scoping to a server with no roster would filter everything away.
-    this.declaredRoster =
-      opts?.declaredRoster && opts?.declaredRosterServerId ? new Set(opts.declaredRoster) : null;
-    this.declaredRosterServerId = this.declaredRoster
-      ? (opts?.declaredRosterServerId ?? null)
-      : null;
-    // FAIL-CLOSED ON MISCONFIGURATION (QG security finding 3). A
-    // `declaredRosterServerId` naming a server we were not handed would
-    // silently disable the filter AND make getRosterDrift() return `[]` — a
-    // clean bill of health the configuration has not earned, which is exactly
-    // the failure this guard exists to prevent. Refuse to construct instead,
-    // mirroring requireServer()'s throw for an unknown id.
-    if (
-      this.declaredRosterServerId !== null &&
-      !servers.some((c) => c.id === this.declaredRosterServerId)
-    ) {
-      throw new Error(
-        `syntropy-mcp catalog: declaredRosterServerId "${this.declaredRosterServerId}" is not among the configured servers (${servers.map((c) => c.id).join(", ") || "none"}) — refusing to start with a roster that governs nothing.`,
-      );
-    }
     for (const config of servers) {
       this.servers.set(config.id, {
         config,
@@ -199,59 +129,6 @@ export class ToolCatalog {
         inFlight: null,
       });
     }
-  }
-
-  /**
-   * Every declared-vs-discovered disagreement for the governed server.
-   *
-   * Computed fresh rather than accumulated, so a resolved drift disappears
-   * instead of lingering as a stale complaint. Returns `[]` when no roster is
-   * configured (ungoverned catalogs cannot drift by definition).
-   *
-   * BOTH DIRECTIONS ARE REPORTED. `discovered_undeclared` is filtered out of
-   * the served set; `declared_undiscovered` cannot be — the manifest promises a
-   * tool the server will not answer, and that only fails at call time.
-   */
-  getRosterDrift(): RosterDrift[] {
-    if (!this.declaredRoster || !this.declaredRosterServerId) return [];
-    const entry = this.servers.get(this.declaredRosterServerId);
-    if (!entry || entry.fetchedAt === null) return [];
-
-    const drift: RosterDrift[] = [];
-    const discovered = new Set(entry.tools.map((t) => t.name));
-
-    for (const name of discovered) {
-      if (!this.declaredRoster.has(name)) {
-        drift.push({
-          serverId: entry.config.id,
-          kind: "discovered_undeclared",
-          toolName: name,
-        });
-      }
-    }
-    for (const name of this.declaredRoster) {
-      if (!discovered.has(name)) {
-        drift.push({
-          serverId: entry.config.id,
-          kind: "declared_undiscovered",
-          toolName: name,
-        });
-      }
-    }
-    return drift;
-  }
-
-  /** Warn once per (kind, tool) so a persistent drift does not flood the log. */
-  private reportDrift(serverId: string, kind: RosterDrift["kind"], toolName: string): void {
-    const key = `${serverId}:${kind}:${toolName}`;
-    if (this.warnedDrift.has(key)) return;
-    if (this.warnedDrift.size >= ToolCatalog.WARNED_DRIFT_MAX) this.warnedDrift.clear();
-    this.warnedDrift.add(key);
-    this.log.warn(
-      kind === "discovered_undeclared"
-        ? `syntropy-mcp catalog: ROSTER DRIFT — server "${serverId}" serves undeclared tool "${toolName}"; filtered from the agent surface. Declare it in the SJ manifest or stop serving it.`
-        : `syntropy-mcp catalog: ROSTER DRIFT — manifest declares "${toolName}" but server "${serverId}" does not serve it; calls will fail at dispatch.`,
-    );
   }
 
   /**
@@ -288,20 +165,6 @@ export class ToolCatalog {
         // provably read-only" — a compromised backend must not keep write
         // tools alive past the safety net simply by omitting annotations.
         if (pastMaxStale && !this.isProvablyReadOnly(descriptor)) continue;
-
-        // #200 — DISCOVERY IS NOT AUTHORITY. For the manifest-governed server,
-        // a discovered tool the manifest does not declare is dropped AND
-        // reported. Dropping it quietly would make a drifted server
-        // indistinguishable from a synced one, which is the exact
-        // clean-state-it-has-not-earned failure this guard exists to prevent.
-        if (
-          this.declaredRoster &&
-          entry.config.id === this.declaredRosterServerId &&
-          !this.declaredRoster.has(descriptor.name)
-        ) {
-          this.reportDrift(entry.config.id, "discovered_undeclared", descriptor.name);
-          continue;
-        }
 
         let surfaced = descriptor;
         if (seenNames.has(descriptor.name)) {
