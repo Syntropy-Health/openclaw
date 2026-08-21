@@ -29,6 +29,13 @@
  *       into `shared/schemas/syntropy.schema.json` — zero `*Input` defs).
  *       Exporting them upstream is the follow-up that completes F.1 here.
  *
+ *   UPSTREAM BUT NOT PROPAGATED (known gap, tracked in the roster-derivation
+ *   follow-up issue): the manifests also carry `prompt_hints.when_to_call` /
+ *   `do_not_call` (negative routing guidance) and `available_channels` (SJ's
+ *   channel-reachability control). Neither reaches the roster yet, so the
+ *   derivation below is complete over the roster's fields — not over
+ *   everything the manifest knows.
+ *
  * THE GATE IS THE TYPE. `TOOL_LOCALS` is a `Record<ImplementedName,
  * ToolLocal>` where `ImplementedName` = every rostered name not explicitly
  * deferred in `NOT_YET_IMPLEMENTED`:
@@ -179,16 +186,14 @@ const TOOL_LOCALS: Record<ImplementedName, ToolLocal> = {
 
 // ---------------------------------------------------------------------------
 // Assembly — TOOL_DEFS is DERIVED, not declared.
+//
+// No runtime empty-roster guard, deliberately (QG2-14): an empty roster makes
+// `RosterToolName = never`, which fails the `NOT_YET_IMPLEMENTED` satisfies
+// clause and every `TOOL_LOCALS` key at COMPILE time — a runtime throw here
+// is unreachable in any typechecked build, and at module top level it would
+// crash extension load rather than degrade. The generator additionally
+// refuses to emit an empty roster.
 // ---------------------------------------------------------------------------
-
-// The widening cast is required: `TOOL_ROSTER` is an `as const` tuple, so its
-// `.length` is a literal type and `=== 0` would be a compile error (TS2367).
-// The guard exists for a FUTURE regenerated roster the compiler cannot see.
-if ((TOOL_ROSTER as readonly unknown[]).length === 0) {
-  throw new Error(
-    "syntropy tools: generated roster is empty — regenerate codegen:openclaw-tool-roster",
-  );
-}
 
 /** Roster entries whose names are implemented (i.e. not deferred). */
 type ImplementedEntry = Extract<(typeof TOOL_ROSTER)[number], { name: ImplementedName }>;

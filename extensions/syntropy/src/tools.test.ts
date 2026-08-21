@@ -16,7 +16,7 @@
  *      must be a conscious edit to this file.
  */
 
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { ROSTER_TOOL_NAMES, TOOL_ROSTER } from "./generated/tool-roster.generated.js";
 import { createAllTools, NOT_YET_IMPLEMENTED, TOOL_DEFS } from "./tools.js";
 
@@ -100,27 +100,157 @@ describe("createAllTools", () => {
     }
   });
 
-  it("syntropy_log_food encodes the canonical MealType enum (6 values)", () => {
-    const tool = tools.find((t) => t.name === "syntropy_log_food");
-    expect(tool, "log_food tool present").toBeDefined();
-    const mealProp = (tool!.parameters as { properties: Record<string, unknown> }).properties
-      ?.meal_type as { anyOf?: Array<{ const: string }> } | undefined;
-
-    // Assert the schema shape unconditionally. If codegen ever switches the
-    // generated MealTypeSchema from `Type.Union([Type.Literal(...)])` (which
-    // emits `{ anyOf: [...] }`) to e.g. `Type.String({ enum: [...] })` (which
-    // emits `{ enum: [...], type: "string" }`), this drift guard must FAIL
-    // LOUD — not silently pass with `anyOf` undefined.
-    expect(mealProp, "meal_type schema missing — codegen drift").toBeDefined();
-    expect(
-      mealProp?.anyOf,
-      "meal_type must be a TypeBox Union (anyOf shape) — if this fails, the generator " +
-        "in shared/schemas/scripts/generate-typebox-enums.mjs has drifted away from Type.Union",
-    ).toBeDefined();
-
-    const values = mealProp!.anyOf!.map((v) => v.const).sort();
-    expect(values).toEqual(
-      ["beverage", "breakfast", "dinner", "lunch", "snack", "supplement"].sort(),
+  it("EVERY tool embedding meal_type encodes the canonical MealType enum (6 values)", () => {
+    // QG2-3/T8: the first version guarded log_food only; analyze_food's
+    // embedded enum was unguarded, which is part of why the gutted-schema
+    // mutant (M5) survived. Iterate every embedder and pin the count.
+    const embedders = tools.filter(
+      (t) => (t.parameters as { properties?: Record<string, unknown> }).properties?.meal_type,
     );
+    expect(
+      embedders.map((t) => t.name).sort(),
+      "exactly these tools embed meal_type — a dropped MealTypeSchema reference must fail here",
+    ).toEqual(["syntropy_analyze_food", "syntropy_log_food"]);
+
+    for (const tool of embedders) {
+      const mealProp = (tool.parameters as { properties: Record<string, unknown> }).properties
+        .meal_type as { anyOf?: Array<{ const: string }> };
+      // Assert the shape unconditionally. If codegen ever switches the
+      // generated MealTypeSchema from `Type.Union([Type.Literal(...)])` (which
+      // emits `{ anyOf: [...] }`) to e.g. `Type.String({ enum: [...] })`, this
+      // drift guard must FAIL LOUD — not silently pass with `anyOf` undefined.
+      expect(
+        mealProp.anyOf,
+        `${tool.name}: meal_type must be a TypeBox Union (anyOf shape) — if this fails, ` +
+          "shared/schemas/scripts/generate-typebox-enums.mjs has drifted away from Type.Union",
+      ).toBeDefined();
+      const values = mealProp.anyOf!.map((v) => v.const).sort();
+      expect(values, tool.name).toEqual(
+        ["beverage", "breakfast", "dinner", "lunch", "snack", "supplement"].sort(),
+      );
+    }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// QG2-3 — the LOCAL half of the join is pinned per tool, HARDCODED.
+//
+// The compile gate proves every implemented tool has *a* local entry of the
+// right TYPE; it cannot prove the entry is the right CONTENT for that tool.
+// Mutation-proven (QG 2026-08-21): swapping two tools' locals (M4) and
+// gutting six parameter schemas + junking labels (M5) both passed tsgo AND
+// the entire suite. This pin map is what kills that class. Deliberately
+// hardcoded — deriving it from TOOL_LOCALS would compare the code to itself.
+// ---------------------------------------------------------------------------
+
+const LOCAL_PINS: Record<string, { label: string; props: string[]; required: string[] }> = {
+  syntropy_log_food: {
+    label: "Log Food",
+    props: ["food_name", "meal_type", "calories", "protein", "carbs", "fat", "notes"],
+    required: ["food_name"],
+  },
+  syntropy_log_checkin: {
+    label: "Health Check-in",
+    props: ["content"],
+    required: ["content"],
+  },
+  syntropy_diet_score: { label: "Diet Score", props: ["days"], required: [] },
+  syntropy_diet_gap: { label: "Diet Gap Analysis", props: ["days"], required: [] },
+  syntropy_health_snapshot: { label: "Health Snapshot", props: ["days"], required: [] },
+  syntropy_analyze_food: {
+    label: "Analyze Food",
+    props: ["food_text", "meal_type"],
+    required: ["food_text"],
+  },
+  syntropy_health_profile: { label: "Health Profile", props: [], required: [] },
+  syntropy_my_checkins: { label: "Recent Check-ins", props: ["limit"], required: [] },
+};
+
+describe("QG2-3 — per-tool pin of the hand-kept fields (label + parameter shape)", () => {
+  it("the pin map covers exactly the implemented tool set (no tool can dodge the pin)", () => {
+    expect(Object.keys(LOCAL_PINS).sort()).toEqual(TOOL_DEFS.map((d) => d.name).sort());
+  });
+
+  it("every tool's label and parameter keys match its pin (kills the swapped-locals mutant)", () => {
+    for (const def of TOOL_DEFS) {
+      const pin = LOCAL_PINS[def.name];
+      expect(pin, `${def.name} missing from LOCAL_PINS`).toBeDefined();
+      expect(def.label, `${def.name} label`).toBe(pin.label);
+      const params = def.parameters as unknown as {
+        properties?: Record<string, unknown>;
+        required?: string[];
+      };
+      expect(Object.keys(params.properties ?? {}).sort(), `${def.name} parameter keys`).toEqual(
+        [...pin.props].sort(),
+      );
+      expect((params.required ?? []).slice().sort(), `${def.name} required keys`).toEqual(
+        [...pin.required].sort(),
+      );
+    }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// QG2-12 — execute() actually dials the WIRE name.
+//
+// Before this block, the only assertion anywhere that `mcpToolName` reaches
+// the transport lived in tracer.test.ts (one tool, inside the optional
+// Braintrust suite) — remove that feature and the wire-name guarantee
+// vanished. Pattern mirrors tracer.test.ts: doMock + dynamic import.
+// ---------------------------------------------------------------------------
+
+describe("QG2-12 — execute() wire behavior", () => {
+  async function withMockedClient(result: unknown) {
+    vi.resetModules();
+    const callSyntropyTool = vi.fn(async (..._args: unknown[]) => result);
+    vi.doMock("./client.js", () => ({ callSyntropyTool }));
+    const mod = await import("./tools.js");
+    vi.doUnmock("./client.js");
+    return { mod, callSyntropyTool };
+  }
+
+  it("EVERY tool's execute() calls the transport with its roster mcpToolName", async () => {
+    const { mod, callSyntropyTool } = await withMockedClient({ ok: true, data: "fine" });
+    const built = mod.createAllTools("http://sj.local", "tok_x");
+    for (const def of mod.TOOL_DEFS) {
+      callSyntropyTool.mockClear();
+      const tool = built.find((t) => t.name === def.name)!;
+      await tool.execute("call-1", { some: "arg" });
+      expect(callSyntropyTool, def.name).toHaveBeenCalledWith(
+        "http://sj.local",
+        "tok_x",
+        def.mcpToolName,
+        {
+          some: "arg",
+        },
+      );
+      // The wire name is the roster's `function`, never the agent-facing name.
+      expect(callSyntropyTool.mock.calls[0][2], def.name).not.toBe(def.name);
+    }
+  });
+
+  it("nullish args coalesce to {} before hitting the wire", async () => {
+    const { mod, callSyntropyTool } = await withMockedClient({ ok: true, data: "fine" });
+    const built = mod.createAllTools("http://sj.local", "tok_x");
+    await built[0].execute("call-2", undefined);
+    expect(callSyntropyTool.mock.calls[0][3]).toEqual({});
+  });
+
+  it("transport errors surface as user-visible Error text with details", async () => {
+    const { mod } = await withMockedClient({ ok: false, error: "boom" });
+    const built = mod.createAllTools("http://sj.local", "tok_x");
+    const res = await built[0].execute("call-3", {});
+    expect(res.content[0]).toEqual({ type: "text", text: "Error: boom" });
+    expect((res.details as { error: string }).error).toBe("boom");
+  });
+
+  it("object data is pretty-printed JSON; string data passes through unwrapped", async () => {
+    const obj = await withMockedClient({ ok: true, data: { a: 1 } });
+    const objRes = await obj.mod.createAllTools("http://x", "t")[0].execute("c", {});
+    expect((objRes.content[0] as { text: string }).text).toBe(JSON.stringify({ a: 1 }, null, 2));
+
+    const str = await withMockedClient({ ok: true, data: "plain text" });
+    const strRes = await str.mod.createAllTools("http://x", "t")[0].execute("c", {});
+    expect((strRes.content[0] as { text: string }).text).toBe("plain text");
   });
 });
