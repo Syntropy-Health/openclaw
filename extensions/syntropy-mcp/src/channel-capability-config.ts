@@ -33,17 +33,28 @@ import type { ChannelCapabilities } from "./channel-adapter.js";
  * field exists so the shape is uniform across channels.
  */
 const CAPABILITY_TABLE: Record<string, ChannelCapabilities> = {
-  voice: {
-    inline_link: false,
-    inline_text: true,
-    phi_approved: false,
-    companion_text_channel: undefined,
-  },
-  sms: {
-    inline_link: true,
-    inline_text: true,
-    phi_approved: false,
-  },
+  // `sms`: REMOVED [PRINCIPAL-RULED, 2026-08-21] — "WhatsApp/SMS is a
+  // staging-only EXPERIMENT. SMS is OUT OF SCOPE." The fail-closed lookup
+  // below now DENIES sms turns, which is the ruling made load-bearing.
+  // Reinstating sms needs the ruling revisited AND the E.164/pairing design
+  // funded (no phone column exists anywhere in SJ) — a product decision,
+  // not a config flip.
+  //
+  // `voice`: REMOVED [CTO-JUDGEMENT, dispatch #6654 — NOT principal-ruled;
+  // the "and voice" in the relay was an inference inside a PRINCIPAL RULED
+  // paragraph, recorded as such]. Auditable basis: (a) same evidence as sms
+  // (no production app, no channel creds on staging, Phase 7 adapters at
+  // zero non-test call sites); (b) SJ's manifests already shipped without
+  // voice (SJ #1761), and a capability table asserting a channel the
+  // declared contract refuses to advertise is two truths in disagreement;
+  // (c) voice is UNPAIRABLE today (not in A7_CHANNELS), so advertising it
+  // was false regardless of scope. UNLIKE sms this is REVERSIBLE same-day:
+  // if voice gains a pairing path, restore the row AS IT WAS —
+  // { inline_link: false, inline_text: true, phi_approved: false,
+  //   companion_text_channel: undefined } — inline_text:true per CTO ruling
+  // flag1 (#5762), which deliberately SUPERSEDED the approved A&D §3 row
+  // (inline_text:false): TTS speaks inline text; only link/OTP fell back to
+  // the paired SMS number. Do NOT restore from the A&D's superseded table.
   whatsapp: {
     inline_link: true,
     inline_text: true,
