@@ -14,8 +14,10 @@
  * with the integrity line's hex replaced by a fixed placeholder (a file
  * cannot contain its own hash otherwise; do NOT "simplify" the placeholder
  * mechanic away). This test re-derives it. It needs no manifests and no
- * network, so it can only fail for real tampering — never for environment
- * reasons.
+ * network. Its environment dependencies are named, not denied: byte-stable
+ * checkouts (this repo pins `* text=auto eol=lf` in .gitattributes — a CRLF
+ * checkout would read as tampering) and a formatter that leaves the file
+ * alone (.oxfmtrc ignores it: the sealed form is the canonical form).
  *
  * STATED LIMIT (keep verbatim): tamper-EVIDENT, not tamper-proof — a
  * deliberate forger can recompute it; the parent gate at gitlink bump is the
@@ -53,6 +55,14 @@ function verifySelfHash(content: string): {
   return { ok: expected === actual, expected, actual };
 }
 
+/**
+ * Hand-maintained on purpose, with the residual STATED: `enums.generated.ts`
+ * (same directory, same DO-NOT-EDIT class, same deploy path) is deliberately
+ * UNSTAMPED in this pass — its only guard is the parent repo's schema-drift
+ * byte-diff, so a hand-edit to it still ships from this repo unverified.
+ * Tracked in the #213 issue as the enums-stamp follow-on; when its generator
+ * seals it, add it here and the whole suite below extends automatically.
+ */
 const STAMPED_ARTIFACTS = ["generated/tool-roster.generated.ts"];
 
 describe("#213 — generated artifacts carry a verifiable self-integrity stamp", () => {
@@ -80,15 +90,23 @@ describe("#213 — generated artifacts carry a verifiable self-integrity stamp",
     it(`${rel}: provenance stamp present (manifest-tree content hash)`, () => {
       const content = readFileSync(resolve(HERE, rel), "utf8");
       expect(content).toMatch(
-        /^\/\/ Provenance: SJ manifest-tree sha256 [0-9a-f]{64} \(\d+ manifest files\)$/m,
+        // Counts are stated in full — "N hashed; M emitted" — because the
+        // hash covers the ENTIRE input tree (deprecated manifests included)
+        // while the artifact emits only the live subset.
+        /^\/\/ Provenance: SJ manifest-tree sha256 [0-9a-f]{64} \(\d+ manifest files hashed; \d+ (live )?tools emitted\)$/m,
       );
     });
   }
 
-  it("the verifier itself fires on tampering (guard observed red, not assumed)", () => {
-    const content = readFileSync(resolve(HERE, STAMPED_ARTIFACTS[0]), "utf8");
-    const tampered = content.replace('scope: "consumer"', 'scope: "consumer" ');
-    expect(tampered).not.toBe(content);
-    expect(verifySelfHash(tampered).ok).toBe(false);
-  });
+  for (const rel of STAMPED_ARTIFACTS) {
+    it(`${rel}: the verifier fires on tampering (guard observed red, not assumed)`, () => {
+      const content = readFileSync(resolve(HERE, rel), "utf8");
+      // Artifact-agnostic mutation: append a byte. Coupling the tamper to
+      // specific artifact content (the first version mutated a roster
+      // literal) makes the negative control silently rot when that content
+      // legitimately changes.
+      const tampered = `${content} `;
+      expect(verifySelfHash(tampered).ok).toBe(false);
+    });
+  }
 });

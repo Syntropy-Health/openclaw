@@ -11,6 +11,16 @@
     "assets/",
     "dist/",
     "docs/_layouts/",
+    // #213: this artifact is integrity-hash-LOCKED (sealed self-hash; see
+    // extensions/syntropy/src/generated-integrity.test.ts) — the same class
+    // as tests/sealed/ below: the sealed form IS the canonical form, and a
+    // formatter version bump must never rewrite bytes a hash certifies, or
+    // the format gate and the integrity gate deadlock across a repo
+    // boundary. The file is emitted oxfmt-canonical TODAY; this ignore is
+    // the guard against a future oxfmt changing its mind. Deliberately
+    // file-scoped: the unstamped enums.generated.ts sibling stays
+    // format-gated.
+    "extensions/syntropy/src/generated/tool-roster.generated.ts",
     "node_modules/",
     "patches/",
     "pnpm-lock.yaml/",

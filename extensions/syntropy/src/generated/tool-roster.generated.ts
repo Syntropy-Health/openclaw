@@ -1,6 +1,6 @@
 // AUTO-GENERATED from apps/Syntropy-Journals/schemas/manifest/*.manifest.yaml — DO NOT EDIT.
-// Provenance: SJ manifest-tree sha256 10b7a0f86cea11b52f8f4c899191aa2344215db9c7c0db094db1e62d868aebf9 (10 manifest files)
-// Integrity: self sha256 c166bdf22ea86f7bc127ee0ab068b30d2e2236d21710041da8ef88ca8314cc75
+// Provenance: SJ manifest-tree sha256 d70c9031a44b4fd16838fcf58282feaf41e2c9e5a4d2148ab9c1a6445e3e806a (10 manifest files hashed; 9 live tools emitted)
+// Integrity: self sha256 212184c9e797454660d17c41e3946e5406100111581b613cf4e9bc8ee95697f8
 // Regenerate in the SyntropyHealth-Applications monorepo (the parent repo that
 // pins this one as apps/openclaw): `npm run codegen:openclaw-tool-roster` in its
 // shared/schemas/ directory. The generator does not exist in this repository.
