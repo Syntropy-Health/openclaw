@@ -411,15 +411,19 @@ export class ConfirmGovernor {
 
 /** The initiate tool carries the C1 descriptor under `result.details.component`. */
 type ReadDescriptorResult =
-  | { kind: "absent" } // no `component` field at all — the ordinary tool result
-  | { kind: "invalid" } // `component` present but failed schema parse
+  | { kind: "absent" } // no `component` key at all — the ordinary tool result
+  | { kind: "invalid" } // `component` key PRESENT (even explicitly null) but not a valid descriptor
   | { kind: "ok"; descriptor: ComponentDescriptor };
 
 function readDescriptor(result: AgentToolResult<unknown>): ReadDescriptorResult {
   const details = result.details;
   if (!details || typeof details !== "object") return { kind: "absent" };
+  if (!("component" in details)) return { kind: "absent" };
+  // An EXPLICIT `component: null` is a present key that parses to nothing — a
+  // backend that used to emit descriptors and regressed to null lands here,
+  // and must be greppable rather than reproducing the silent collapse (QG5 F5).
   const raw = (details as Record<string, unknown>).component;
-  if (raw === undefined || raw === null) return { kind: "absent" };
+  if (raw === undefined || raw === null) return { kind: "invalid" };
   const descriptor = parseComponentDescriptor(raw);
   return descriptor ? { kind: "ok", descriptor } : { kind: "invalid" };
 }

@@ -789,14 +789,30 @@ export function createSyntropyMcpPlugin(overrides: SyntropyMcpOverrides = {}) {
           // must not hide at debug), legitimate degrade arms INFO (a signed-out
           // turn is not a warning, but must still be separable from silence).
           onDrop: (event) => {
-            const line =
-              `syntropy-mcp governor: descriptor DROPPED reason=${event.reason} ` +
-              `server="${event.serverId}"` +
-              (event.commitTool ? ` commit_tool="${event.commitTool}"` : "");
-            if (event.reason === "no_commit_tool" || event.reason === "identity_unverified") {
-              api.logger.info(line);
-            } else {
-              api.logger.warn(line);
+            // Observability must never break a turn: a throwing logger would
+            // otherwise escape preview()'s caller via the recovery path (QG5 F4).
+            try {
+              // commitTool is BACKEND-CONTROLLED and schema-unbounded — and the
+              // arm that logs it most is precisely not-allowlisted, i.e. a value
+              // our config does NOT vouch for. JSON.stringify escapes control
+              // chars/quotes (no forged second log line); the slice caps floods.
+              // This greppable channel is ground truth — it must not be
+              // poisonable by the thing it reports on (QG5 F3).
+              const tool =
+                event.commitTool === undefined
+                  ? ""
+                  : ` commit_tool=${JSON.stringify(event.commitTool.slice(0, 64))}`;
+              const line =
+                `syntropy-mcp governor: descriptor DROPPED reason=${event.reason} ` +
+                `server=${JSON.stringify(event.serverId)}${tool}`;
+              if (event.reason === "no_commit_tool" || event.reason === "identity_unverified") {
+                api.logger.info(line);
+              } else {
+                api.logger.warn(line);
+              }
+            } catch {
+              // Swallow: the drop already happened; losing one line beats
+              // failing the tool call that carried it.
             }
           },
         });
@@ -843,7 +859,27 @@ export function createSyntropyMcpPlugin(overrides: SyntropyMcpOverrides = {}) {
           .then(() => {
             if (stopped) return;
             const remaining = unfetchedIds();
-            if (remaining.length === 0 || attempt >= MAX_PRIME_ATTEMPTS) return;
+            // #219 boot-refresh race: the priming is deliberately un-awaited
+            // (register() must not block on the network), so its COMPLETION is
+            // a load-bearing, greppable signal — shrinemobile's harness voided
+            // two runs because a first turn raced this and read a cold catalog
+            // as a legitimate negative. The warm line is what a harness gates
+            // on; the exhausted line is the loud failure arm.
+            if (remaining.length === 0) {
+              api.logger.info(
+                `syntropy-mcp: catalog WARM — all ${serverIds.length} server(s) discovered ` +
+                  `(attempt ${attempt})`,
+              );
+              return;
+            }
+            if (attempt >= MAX_PRIME_ATTEMPTS) {
+              api.logger.warn(
+                `syntropy-mcp: catalog priming EXHAUSTED after ${attempt} attempts — ` +
+                  `server(s) never discovered: ${remaining.join(", ")}. Their tools are ` +
+                  `absent from every turn; negatives involving them are unreliable.`,
+              );
+              return;
+            }
             const delayMs = Math.min(BACKOFF_BASE_MS * 2 ** (attempt - 1), BACKOFF_CAP_MS);
             const handle = setTimeoutFn(() => {
               pendingBackoff.delete(handle);
@@ -879,6 +915,21 @@ export function createSyntropyMcpPlugin(overrides: SyntropyMcpOverrides = {}) {
 
       api.registerTool((ctx) => {
         try {
+          // #219 boot-refresh race — FAIL LOUDLY, since waiting is not
+          // available (this factory is SYNC by host contract): a turn that
+          // starts while any server is still undiscovered sees a cold catalog,
+          // and its "no descriptor" outcome is indistinguishable from a real
+          // negative. Name the state on the turn itself so a harness (or a
+          // human reading logs next to a surprising negative) can void the
+          // run instead of trusting it.
+          const cold = serverIds.filter((id) => catalog.lastState(id).fetchedAt === null);
+          if (cold.length > 0) {
+            api.logger.warn(
+              `syntropy-mcp: catalog COLD at agent start — undiscovered server(s): ` +
+                `${cold.join(", ")}. This turn's tool set is incomplete; treat a negative ` +
+                `result from this turn as unreliable (boot-refresh race, #219).`,
+            );
+          }
           const entries = catalog.getToolDescriptors();
           if (entries.length === 0) return null;
           const sessionKey = ctx.sessionKey ?? "";

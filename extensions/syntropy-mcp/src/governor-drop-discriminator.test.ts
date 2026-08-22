@@ -100,6 +100,45 @@ describe("#6864 — every drop arm names its reason (observed firing)", () => {
     ).toBeNull();
     expect(drops).toEqual([{ reason: "invalid_descriptor", serverId: "sj" }]);
   });
+
+  it("component EXPLICITLY null → invalid_descriptor (a regressed backend must be greppable)", () => {
+    // QG5 F5: `component: null` is a PRESENT key that parses to nothing — a
+    // backend that used to emit descriptors and regressed to null must not
+    // reproduce the silent collapse. (No `component` key at all stays silent —
+    // that is the ordinary result, covered in the noise guards.)
+    const { governor, drops } = makeGovernor();
+
+    expect(governor.preview({ toolResult: resultWith(null), ...TURN })).toBeNull();
+    expect(drops).toEqual([{ reason: "invalid_descriptor", serverId: "sj" }]);
+  });
+
+  it("stamp re-validation failure → stamp_revalidation_failed AND the pending is cancelled", () => {
+    // QG5 F2: the fifth arm, previously unobserved while the header claimed
+    // "every arm". Force it by minting a pending whose id violates
+    // PENDING_ID_PATTERN, so the stamped descriptor fails schema re-parse.
+    const drops: GovernorDropEvent[] = [];
+    class BadIdStore extends PendingConfirmStore {
+      override mint(params: Parameters<PendingConfirmStore["mint"]>[0]) {
+        const real = super.mint(params);
+        return { ...real, pendingId: "not a valid pending id!" };
+      }
+    }
+    const store = new BadIdStore();
+    const cancel = vi.spyOn(store, "cancel");
+    const governor = new ConfirmGovernor(store, {
+      commitToolsByServer: new Map([["sj", new Set(["log_food"])]]),
+      onDrop: (e) => drops.push(e),
+    });
+
+    const out = governor.preview({ toolResult: resultWith(VALID_DESCRIPTOR), ...TURN });
+
+    expect(out).toBeNull();
+    expect(drops).toEqual([
+      { reason: "stamp_revalidation_failed", serverId: "sj", commitTool: "log_food" },
+    ]);
+    // The defensive arm's other half: no live pending survives a failed stamp.
+    expect(cancel).toHaveBeenCalledTimes(1);
+  });
 });
 
 describe("#6864 — the noise guards (the event must not cry wolf)", () => {
