@@ -781,7 +781,25 @@ export function createSyntropyMcpPlugin(overrides: SyntropyMcpOverrides = {}) {
         new PendingConfirmStore({ now: overrides.now, randomId: overrides.mintId });
       const governor =
         overrides.governor ??
-        new ConfirmGovernor(pendingStore, { commitToolsByServer, now: overrides.now });
+        new ConfirmGovernor(pendingStore, {
+          commitToolsByServer,
+          now: overrides.now,
+          // #6864 discriminator: every drop arm is a distinct, greppable line.
+          // Levels split by meaning: misconfig/defect arms WARN (a regression
+          // must not hide at debug), legitimate degrade arms INFO (a signed-out
+          // turn is not a warning, but must still be separable from silence).
+          onDrop: (event) => {
+            const line =
+              `syntropy-mcp governor: descriptor DROPPED reason=${event.reason} ` +
+              `server="${event.serverId}"` +
+              (event.commitTool ? ` commit_tool="${event.commitTool}"` : "");
+            if (event.reason === "no_commit_tool" || event.reason === "identity_unverified") {
+              api.logger.info(line);
+            } else {
+              api.logger.warn(line);
+            }
+          },
+        });
 
       // Seam: before_agent_start has ctx.externalId (verified caller) + sessionKey;
       // the sync tool factory and the before_tool_call guard have sessionKey only.
