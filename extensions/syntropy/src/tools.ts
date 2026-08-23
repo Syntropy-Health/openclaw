@@ -128,7 +128,16 @@ interface ToolLocal {
 // they are deliberately NOT repeated here (nothing hand-kept can drift).
 // ---------------------------------------------------------------------------
 
-const TOOL_LOCALS: Record<ImplementedName, ToolLocal> = {
+/**
+ * P3-A4: the DECLARED type of TOOL_LOCALS, exported type-only so the
+ * compile-gate probe (tools.gate-probe.ts) can assert the gate is still
+ * ARMED. If this Record is ever widened (e.g. to Record<string, ToolLocal>),
+ * the probe's @ts-expect-error directives become unused and tsgo fails —
+ * converting the gate's in-session mutation proofs into a standing CI fact.
+ */
+export type ToolLocalsShape = Record<ImplementedName, ToolLocal>;
+
+const TOOL_LOCALS: ToolLocalsShape = {
   syntropy_log_food: {
     label: "Log Food",
     parameters: Type.Object({
