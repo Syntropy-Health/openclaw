@@ -38,14 +38,40 @@ export const DEFAULT_POLLY_VOICE = "Polly.Joanna";
  * @param voice - OpenAI voice name (alloy, echo, etc.) or Polly voice name
  * @returns Polly voice name suitable for Twilio TwiML
  */
+/**
+ * Grammar for a provider voice TOKEN (`Polly.Joanna`, `Google.en-US-Neural2-A`).
+ * Validation-not-escaping (#217): the value lands RAW inside
+ * `<Say voice="...">` at BOTH live call sites, so the pass-through branch must
+ * admit only token-shaped strings. Amazon/Google voice CATALOGS drift, so the
+ * allow-list is the token grammar, not an enumeration — anything XML-active
+ * (quotes, angle brackets, spaces) is outside [A-Za-z0-9.-] and fails.
+ */
+const PROVIDER_VOICE_RE = /^(Polly|Google)\.[A-Za-z0-9.-]{1,64}$/;
+
 export function mapVoiceToPolly(voice: string | undefined): string {
   if (!voice) {
     return DEFAULT_POLLY_VOICE;
   }
 
-  // Already a Polly/Google voice - pass through
+  // Provider-voice pass-through — VALIDATED, not verbatim (#217). The old
+  // branch returned any `Polly.`/`Google.`-prefixed string unchanged, which
+  // made "config-derived therefore bounded" reasoning load-bearing at two
+  // call sites that interpolate the result raw into a TwiML attribute. The
+  // token grammar closes injection at this choke point for BOTH callers.
   if (voice.startsWith("Polly.") || voice.startsWith("Google.")) {
-    return voice;
+    if (PROVIDER_VOICE_RE.test(voice)) {
+      return voice;
+    }
+    // FAIL CLOSED to the default voice rather than throwing: this runs on a
+    // LIVE CALL, and the function's existing contract already degrades
+    // unknown OpenAI names to the default — a malformed provider token gets
+    // the same resilience, minus the injection. The log names the shape
+    // safely (JSON-escaped, capped), never echoing raw content.
+    console.warn(
+      `[voice-call] rejected malformed provider voice ${JSON.stringify(voice.slice(0, 64))} — ` +
+        `not a valid Polly./Google. token; using ${DEFAULT_POLLY_VOICE} (#217)`,
+    );
+    return DEFAULT_POLLY_VOICE;
   }
 
   // Map OpenAI voices to Polly equivalents

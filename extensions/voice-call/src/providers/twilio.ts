@@ -552,6 +552,12 @@ export class TwilioProvider implements VoiceCallProvider {
       "[voice-call] Using TwiML <Say> fallback - telephony TTS not configured or media stream not active",
     );
 
+    // #217: `pollyVoice` lands RAW in the voice attribute below — safe ONLY
+    // because mapVoiceToPolly validates the token grammar (the message text,
+    // by contrast, is escapeXml'd — the one-of-two-interpolations asymmetry
+    // is deliberate, not an oversight to replicate). input.voice is
+    // config-valued today (speak() sources ctx.config.tts.openai.voice), but
+    // the validation makes that trust analysis non-load-bearing.
     const pollyVoice = mapVoiceToPolly(input.voice);
     const twiml = `<?xml version="1.0" encoding="UTF-8"?>
 <Response>
