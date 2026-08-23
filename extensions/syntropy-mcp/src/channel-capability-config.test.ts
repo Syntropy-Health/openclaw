@@ -4,74 +4,36 @@ import {
   deliverViaCapabilities,
   type DeliveryPayload,
 } from "./channel-adapter.js";
-import { capabilitiesFor } from "./channel-capability-config.js";
+import { capabilitiesFor, knownChannelIds } from "./channel-capability-config.js";
 
 // ---------------------------------------------------------------------------
-// SEALED challenge suite — Phase 0, Task 0.2 (D0 capability config).
-// Authored from the FROZEN interface contract ONLY; no implementation was read.
+// SEALED challenge suite — Phase 0, Task 0.2 (D0 capability config), amended
+// by Phase 7 Task 7.0 (voice.inline_text flip, CTO ruling flag1 #5762) and by
+// #216 (2026-08-21): the `sms` and `voice` rows are REMOVED from the table.
+//
+// #216 PROVENANCE, recorded because the distinction is load-bearing:
+//   * sms   — [PRINCIPAL-RULED] "WhatsApp/SMS is a staging-only EXPERIMENT.
+//             SMS is OUT OF SCOPE." Reinstating sms needs the ruling revisited
+//             AND the E.164/pairing design funded.
+//   * voice — [CTO-JUDGEMENT, dispatch #6654] — NOT principal-ruled; the
+//             "and voice" in the relay was an inference inside a PRINCIPAL
+//             RULED paragraph. Basis: same evidence as sms + SJ's manifests
+//             already ship without voice (SJ #1761) + voice is UNPAIRABLE
+//             today (not in A7_CHANNELS). REVERSIBLE same-day if a pairing
+//             path lands — restore per flag1, whose routing semantics are
+//             preserved at the bottom of this file as the reference.
 //
 // Invariants under challenge:
-//   * voice cannot render links inline (inline_link=false) but CAN speak plain
-//     text inline (inline_text=true — see the Phase 7 / Task 7.0 block below).
-//   * sms + whatsapp CAN render inline.
-//   * phi_approved is false for ALL three channels today (PHI channel is post-BAA).
+//   * whatsapp CAN render links + text inline; it is the ONLY row.
+//   * sms and voice are DENIED at this lookup — which gates adapter
+//     CONSTRUCTION. Stated precisely (QG4 F1): no live inbound path reads
+//     this table, so this is the D0 DECLARATION ceasing to advertise, not
+//     the enforcement point of the ruling on a live turn.
+//   * phi_approved is false for every remaining row (PHI is post-BAA).
 //   * unknown channels FAIL CLOSED (null) — never a permissive default.
 // ---------------------------------------------------------------------------
 
-// ---------------------------------------------------------------------------
-// SEALED challenge suite — Phase 7, Task 7.0 (D0 voice.inline_text flip).
-// Authored from the CTO ruling (flag1, dispatch #5762) which SUPERSEDES the
-// A&D §3 D0 table row for `voice`. No implementation was read.
-//
-// THE RULING / invariant under challenge:
-//   A voice call's TTS IS a real inline TEXT sink — the assistant literally
-//   SPEAKS plain text to the caller. So `voice.inline_text` MUST be TRUE.
-//   What a voice call genuinely cannot render is a clickable LINK or a readable
-//   OTP CODE, so `voice.inline_link` MUST STAY FALSE and link/otp must keep
-//   falling back to the paired companion SMS number.
-//
-// The three things this block challenges:
-//   1. The flip HAPPENED     — voice.inline_text === true.
-//   2. The flip did NOT OVER-APPLY — voice.inline_link is still false; the sms
-//      and whatsapp rows are byte-for-byte unchanged; phi_approved stays false
-//      on all three rows (post-BAA, not this phase); fail-closed still holds.
-//   3. The flip CHANGED ROUTING for real — asserted end-to-end through
-//      deliverViaCapabilities against the SHIPPED voice row (obtained from
-//      capabilitiesFor("voice"), never hand-built), because the point is that
-//      the real table produces the routing, not that a literal does.
-// ---------------------------------------------------------------------------
-
-describe("capabilitiesFor — known channels", () => {
-  it("voice speaks plain text inline (TTS) but cannot render a link inline", () => {
-    const c = capabilitiesFor("voice");
-    expect(c).not.toBeNull();
-    // CTO ruling (flag1 #5762): TTS is a real inline TEXT sink.
-    expect(c!.inline_text).toBe(true);
-    // ...and the flip must NOT over-apply: a call still cannot render a URL/OTP.
-    expect(c!.inline_link).toBe(false);
-    expect(c!.phi_approved).toBe(false);
-    // Voice must have a companion text path to be able to deliver a link at all —
-    // present (a set E.164) or explicitly configurable (a string field).
-    expect("companion_text_channel" in c!).toBe(true);
-  });
-
-  it("voice row is EXACTLY the ruled shape (no extra/renamed fields)", () => {
-    expect(capabilitiesFor("voice")).toStrictEqual({
-      inline_link: false,
-      inline_text: true,
-      phi_approved: false,
-      companion_text_channel: undefined,
-    });
-  });
-
-  it("sms renders links and text inline", () => {
-    const c = capabilitiesFor("sms");
-    expect(c).not.toBeNull();
-    expect(c!.inline_link).toBe(true);
-    expect(c!.inline_text).toBe(true);
-    expect(c!.phi_approved).toBe(false);
-  });
-
+describe("capabilitiesFor — known channels (post-#216: whatsapp is the only row)", () => {
   it("whatsapp renders links and text inline", () => {
     const c = capabilitiesFor("whatsapp");
     expect(c).not.toBeNull();
@@ -79,25 +41,8 @@ describe("capabilitiesFor — known channels", () => {
     expect(c!.inline_text).toBe(true);
     expect(c!.phi_approved).toBe(false);
   });
-});
 
-// ---------------------------------------------------------------------------
-// Task 7.0 regression guard — the voice.inline_text flip touches the VOICE ROW
-// ONLY. sms and whatsapp are UNCHANGED by the ruling; an over-broad edit (e.g.
-// a blanket "inline_text: true" sweep that also nudged inline_link, or a copy
-// of the voice row into a sibling) is caught here as an exact-shape mismatch.
-// ---------------------------------------------------------------------------
-
-describe("capabilitiesFor — sms/whatsapp unchanged by the voice flip", () => {
-  it("sms row is exactly unchanged", () => {
-    expect(capabilitiesFor("sms")).toStrictEqual({
-      inline_link: true,
-      inline_text: true,
-      phi_approved: false,
-    });
-  });
-
-  it("whatsapp row is exactly unchanged", () => {
+  it("whatsapp row is EXACTLY the ruled shape (no extra/renamed fields)", () => {
     expect(capabilitiesFor("whatsapp")).toStrictEqual({
       inline_link: true,
       inline_text: true,
@@ -105,39 +50,48 @@ describe("capabilitiesFor — sms/whatsapp unchanged by the voice flip", () => {
     });
   });
 
-  it.each(["sms", "whatsapp"])(
-    "%s keeps inline_link=true (the voice flip must not have knocked it down)",
-    (channel) => {
-      expect(capabilitiesFor(channel)!.inline_link).toBe(true);
-    },
-  );
+  it("the table exposes EXACTLY the whatsapp row — nothing snuck back in", () => {
+    expect(knownChannelIds()).toEqual(["whatsapp"]);
+  });
+});
+
+describe("#216 — retired channels are DENIED (the ruling observed firing, not assumed)", () => {
+  it("sms resolves to null [PRINCIPAL-RULED: out of scope]", () => {
+    expect(capabilitiesFor("sms")).toBeNull();
+  });
+
+  it("voice resolves to null [CTO-JUDGEMENT #6654: unpairable today, not principal-ruled]", () => {
+    expect(capabilitiesFor("voice")).toBeNull();
+  });
+
+  // QG4 F11 — the RESTORATION BINDING. Passes trivially today (voice is null),
+  // but the moment anyone restores a voice row, it must be the flag1-ruled
+  // shape — this fails a restoration from the A&D's superseded row
+  // (inline_text:false) WITHOUT requiring the restorer to remember flag1.
+  it("a restored voice row must be the flag1 shape (binding is live from day one)", () => {
+    const restored = capabilitiesFor("voice");
+    expect(restored ?? FLAG1_VOICE_ROW).toStrictEqual(FLAG1_VOICE_ROW);
+  });
 });
 
 describe("capabilitiesFor — PHI gate (post-BAA)", () => {
-  it.each(["voice", "sms", "whatsapp"])(
-    "phi_approved is false for %s (no channel is PHI-approved today)",
-    (channel) => {
-      const c = capabilitiesFor(channel);
-      expect(c).not.toBeNull();
-      expect(c!.phi_approved).toBe(false);
-    },
-  );
-
-  // Task 7.0: the inline_text flip is an inline-RENDERING ruling, not a PHI
-  // ruling. phi_approved stays false on EVERY row — flipping it is a separate,
-  // deliberate post-BAA change. This guards the invariant against drift while
-  // the voice row is being edited.
-  it("no channel row is phi_approved (the flip must not have touched the PHI gate)", () => {
-    const rows = ["voice", "sms", "whatsapp"].map((id) => capabilitiesFor(id));
-    expect(rows.every((r) => r !== null)).toBe(true);
-    expect(rows.map((r) => r!.phi_approved)).toEqual([false, false, false]);
+  // The channel set shrank (#216); the PHI invariant did not: EVERY remaining
+  // row is phi_approved:false, and flipping one is a separate, deliberate
+  // post-BAA change. Iterating knownChannelIds() keeps this exhaustive if a
+  // channel is ever added back.
+  it("no channel row is phi_approved", () => {
+    const ids = knownChannelIds();
+    expect(ids.length).toBeGreaterThan(0);
+    for (const id of ids) {
+      expect(capabilitiesFor(id)!.phi_approved, id).toBe(false);
+    }
   });
 });
 
 describe("capabilitiesFor — unknown channels fail closed", () => {
-  // Task 7.0: the voice row changed, but the LOOKUP did not — a near-miss voice
-  // key ("Voice", "VOICE", " voice", "voice\t") is still an UNKNOWN channel and
-  // must resolve to null. Editing a row must never buy a permissive normalization.
+  // #216 note: bare "sms"/"voice" now also resolve null (asserted above, with
+  // their provenance labels). The near-miss forms below were ALWAYS unknown —
+  // removing rows must never buy a permissive normalization either.
   it.each([
     "telegram",
     "",
@@ -149,6 +103,8 @@ describe("capabilitiesFor — unknown channels fail closed", () => {
     "VOICE",
     "slack",
     "unknown",
+    "Whatsapp",
+    " whatsapp",
   ])("returns null (never permissive) for unknown/malformed channel %o", (channel) => {
     expect(capabilitiesFor(channel)).toBeNull();
   });
@@ -171,52 +127,65 @@ describe("capabilitiesFor — unknown channels fail closed", () => {
 });
 
 // ---------------------------------------------------------------------------
-// T2 [HIGH]: capabilitiesFor returns a FRESH copy per call — a caller that sets
-// companion_text_channel per session must not mutate the shared table or any
-// other caller's row.
+// T2 [HIGH]: capabilitiesFor returns a FRESH copy per call — a caller that
+// mutates its row (e.g. binding a per-session field) must not mutate the shared
+// table or any other caller's row. Exercised on whatsapp, the remaining row.
 // ---------------------------------------------------------------------------
 
 describe("capabilitiesFor — fresh-copy isolation", () => {
   it("two calls for the same channel return distinct objects", () => {
-    const a = capabilitiesFor("voice");
-    const b = capabilitiesFor("voice");
+    const a = capabilitiesFor("whatsapp");
+    const b = capabilitiesFor("whatsapp");
     expect(a).not.toBeNull();
     expect(b).not.toBeNull();
     expect(a).not.toBe(b);
   });
 
-  it("mutating one result's companion_text_channel does not affect another call", () => {
-    const a = capabilitiesFor("voice")!;
-    const b = capabilitiesFor("voice")!;
-    a.companion_text_channel = "+15551239999";
-    const c = capabilitiesFor("voice")!;
-    expect(b.companion_text_channel).toBeUndefined();
-    expect(c.companion_text_channel).toBeUndefined();
+  it("mutating one result does not affect another call", () => {
+    const a = capabilitiesFor("whatsapp")!;
+    const b = capabilitiesFor("whatsapp")!;
+    a.inline_link = false;
+    const c = capabilitiesFor("whatsapp")!;
+    expect(b.inline_link).toBe(true);
+    expect(c.inline_link).toBe(true);
   });
 });
 
 // ---------------------------------------------------------------------------
-// Task 7.0 ROUTING — the BEHAVIORAL consequence of the voice.inline_text flip.
+// flag1 (#5762) ROUTING SEMANTICS — preserved as the REVERSIBILITY REFERENCE.
 //
-// These drive the SHARED resolver (deliverViaCapabilities) with the SHIPPED
-// voice row — obtained from capabilitiesFor("voice"), never hand-built — so the
-// proof is "the real D0 table produces this routing", not "a literal does". A
-// hand-built row would pass even if the table were never flipped.
+// HISTORY OF THIS BLOCK, because its sourcing deliberately INVERTED at #216:
+// while the voice row shipped, these tests drove deliverViaCapabilities with
+// the row from capabilitiesFor("voice") — "the real table produces the
+// routing, not a literal". Post-#216 the SHIPPED fact is the row's ABSENCE
+// (asserted above, with provenance labels), so these now drive the resolver
+// with FLAG1_VOICE_ROW, a literal carrying the flag1-ruled shape. Two reasons
+// this block survives the row it tested:
+//   1. voice's removal is [CTO-JUDGEMENT], explicitly REVERSIBLE: if voice
+//      returns, it must return to THIS ruled behavior — not to the A&D §3
+//      row (inline_text:false) that flag1 superseded. A future restoration
+//      flips these tests back to shipped-row sourcing. (The resolver's
+//      inline_text/inline_link matrix is ALSO covered independently in
+//      channel-adapter.test.ts — this block is the flag1-shape reference,
+//      not the resolver's only coverage. QG4 F4.)
 //
-// Every case asserts the route TWICE: through the returned `via` AND through
-// which sink was / was NOT called. `via` alone is a weaker proof — it cannot
-// distinguish "routed inline" from "reported inline while also poking companion".
-//
-// The matrix (voice only; sms/whatsapp are inline for everything):
-//   text + companion  → INLINE     (NEW: pre-flip this went to companion)
-//   link + companion  → COMPANION  (unchanged — a call can't render a URL)
-//   otp  + companion  → COMPANION  (unchanged — a call can't render a code)
-//   link + NO companion → FAIL-CLOSED via:"none", neither sink
-//   text + NO companion → INLINE   (NEW: the flip closed a fail-closed HOLE —
-//                                   plain speech no longer needs an SMS pair)
+// The matrix:
+//   text + companion    → INLINE     (flag1: TTS speaks it)
+//   link + companion    → COMPANION  (a call can't render a URL)
+//   otp  + companion    → COMPANION  (a call can't render a code)
+//   link/otp, NO companion → FAIL-CLOSED via:"none", neither sink
+//   text, NO companion  → INLINE     (flag1 closed this fail-closed hole)
 // ---------------------------------------------------------------------------
 
 const VOICE_COMPANION_E164 = "+15551230042";
+
+/** The flag1-ruled voice shape. See the block comment: a LITERAL, deliberately. */
+const FLAG1_VOICE_ROW: ChannelCapabilities = {
+  inline_link: false,
+  inline_text: true,
+  phi_approved: false,
+  companion_text_channel: undefined,
+};
 
 /** Records which sink fired and with what args; each sink resolves true (delivered). */
 function makeSinks() {
@@ -225,26 +194,19 @@ function makeSinks() {
   return { inline, companion };
 }
 
-/**
- * The SHIPPED voice row, optionally with a per-session companion bound (exactly
- * how a real adapter wires it at wire time). Deliberately NOT a literal — the
- * inline_link / inline_text values come from the D0 table under challenge.
- */
-function shippedVoiceCaps(companion?: string): ChannelCapabilities {
-  const row = capabilitiesFor("voice");
-  expect(row).not.toBeNull();
-  return companion === undefined ? row! : { ...row!, companion_text_channel: companion };
+function flag1VoiceCaps(companion?: string): ChannelCapabilities {
+  return companion === undefined
+    ? { ...FLAG1_VOICE_ROW }
+    : { ...FLAG1_VOICE_ROW, companion_text_channel: companion };
 }
 
-describe("D0 voice row × deliverViaCapabilities — routing after the inline_text flip", () => {
-  // (a) THE NEW BEHAVIOR. Pre-flip this landed on the companion SMS; post-ruling
-  // the TTS speaks it and the companion must stay untouched.
-  it("text over voice (companion set) → INLINE; companion sink never called", async () => {
+describe("flag1 voice shape × deliverViaCapabilities — routing (reversibility reference)", () => {
+  it("text (companion set) → INLINE; companion sink never called", async () => {
     const sinks = makeSinks();
     const payload: DeliveryPayload = { kind: "text", text: "Your appointment is confirmed." };
 
     const result = await deliverViaCapabilities(
-      shippedVoiceCaps(VOICE_COMPANION_E164),
+      flag1VoiceCaps(VOICE_COMPANION_E164),
       payload,
       sinks,
     );
@@ -255,13 +217,12 @@ describe("D0 voice row × deliverViaCapabilities — routing after the inline_te
     expect(sinks.companion).not.toHaveBeenCalled();
   });
 
-  // (b) UNCHANGED: a call cannot render a clickable URL → paired SMS.
-  it("link over voice (companion set) → COMPANION at the E.164; inline never called", async () => {
+  it("link (companion set) → COMPANION at the E.164; inline never called", async () => {
     const sinks = makeSinks();
     const payload: DeliveryPayload = { kind: "link", url: "https://sj.local/verify?t=abc" };
 
     const result = await deliverViaCapabilities(
-      shippedVoiceCaps(VOICE_COMPANION_E164),
+      flag1VoiceCaps(VOICE_COMPANION_E164),
       payload,
       sinks,
     );
@@ -272,13 +233,12 @@ describe("D0 voice row × deliverViaCapabilities — routing after the inline_te
     expect(sinks.inline).not.toHaveBeenCalled();
   });
 
-  // (c) UNCHANGED: an OTP code is not speakable-as-readable → paired SMS.
-  it("otp over voice (companion set) → COMPANION at the E.164; inline never called", async () => {
+  it("otp (companion set) → COMPANION at the E.164; inline never called", async () => {
     const sinks = makeSinks();
     const payload: DeliveryPayload = { kind: "otp", code: "123456" };
 
     const result = await deliverViaCapabilities(
-      shippedVoiceCaps(VOICE_COMPANION_E164),
+      flag1VoiceCaps(VOICE_COMPANION_E164),
       payload,
       sinks,
     );
@@ -289,43 +249,38 @@ describe("D0 voice row × deliverViaCapabilities — routing after the inline_te
     expect(sinks.inline).not.toHaveBeenCalled();
   });
 
-  // (d) The flip must NOT have widened link/otp into an inline path: with no
-  // companion there is still NO route for a link, and it must fail closed.
-  it("link over voice with NO companion → FAIL-CLOSED via:'none'; NEITHER sink called", async () => {
+  it("link with NO companion → FAIL-CLOSED via:'none'; NEITHER sink called", async () => {
     const sinks = makeSinks();
     const payload: DeliveryPayload = { kind: "link", url: "https://sj.local/verify?t=abc" };
 
-    const result = await deliverViaCapabilities(shippedVoiceCaps(), payload, sinks);
+    const result = await deliverViaCapabilities(flag1VoiceCaps(), payload, sinks);
 
     expect(result).toEqual({ ok: false, via: "none" });
     expect(sinks.inline).not.toHaveBeenCalled();
     expect(sinks.companion).not.toHaveBeenCalled();
   });
 
-  it("otp over voice with NO companion → FAIL-CLOSED via:'none'; NEITHER sink called", async () => {
+  it("otp with NO companion → FAIL-CLOSED via:'none'; NEITHER sink called", async () => {
     const sinks = makeSinks();
     const payload: DeliveryPayload = { kind: "otp", code: "123456" };
 
-    const result = await deliverViaCapabilities(shippedVoiceCaps(), payload, sinks);
+    const result = await deliverViaCapabilities(flag1VoiceCaps(), payload, sinks);
 
     expect(result).toEqual({ ok: false, via: "none" });
     expect(sinks.inline).not.toHaveBeenCalled();
     expect(sinks.companion).not.toHaveBeenCalled();
   });
 
-  // (e) THE POINT OF THE RULING: an unpaired voice call could previously not
-  // deliver plain text AT ALL (fail-closed hole). Post-flip it speaks it.
-  it("text over voice with NO companion → still INLINE (the flip closed the fail-closed hole)", async () => {
+  it("text with NO companion → still INLINE (flag1 closed the fail-closed hole)", async () => {
     const sinks = makeSinks();
     const payload: DeliveryPayload = { kind: "text", text: "You are now signed in." };
 
-    const result = await deliverViaCapabilities(shippedVoiceCaps(), payload, sinks);
+    const result = await deliverViaCapabilities(flag1VoiceCaps(), payload, sinks);
 
     expect(result).toEqual({ ok: true, via: "inline" });
     expect(sinks.inline).toHaveBeenCalledTimes(1);
     expect(sinks.inline).toHaveBeenCalledWith(payload);
     expect(sinks.companion).not.toHaveBeenCalled();
-    // Explicitly NOT the pre-flip observable.
     expect(result.via).not.toBe("none");
     expect(result.via).not.toBe("companion");
   });
