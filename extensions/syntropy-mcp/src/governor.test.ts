@@ -35,6 +35,9 @@ function makeStore(): PendingConfirmStore {
 
 function makeGovernor(store: PendingConfirmStore, commitTools: string[] = ["syntropy_log_food"]) {
   return new ConfirmGovernor(store, {
+    // Not a drop-behavior suite: drops consciously ignored here (see
+    // governor-drop-discriminator.test.ts for the observed-firing coverage).
+    onDrop: () => {},
     commitToolsByServer: new Map([["sj", new Set(commitTools)]]),
     now,
   });
@@ -132,6 +135,7 @@ describe("guardBeforeToolCall — collision-prefixed commit tool is still gated"
   // runs ungated with model params, defeating the Governor).
   function twoServerGov(store: PendingConfirmStore) {
     return new ConfirmGovernor(store, {
+      onDrop: () => {},
       commitToolsByServer: new Map([
         ["kg", new Set(["syntropy_log_food"])],
         ["sj", new Set(["syntropy_log_food"])],
@@ -560,6 +564,7 @@ describe("preview — mint + stamp", () => {
     // commit tool the catalog surfaced (prefixed) on server "sj".
     const store = makeStore();
     const gov = new ConfirmGovernor(store, {
+      onDrop: () => {},
       commitToolsByServer: new Map([
         ["kg", new Set(["syntropy_log_food"])],
         ["sj", new Set(["syntropy_log_food"])],

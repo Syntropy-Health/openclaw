@@ -9,7 +9,10 @@
  *    ComponentDescriptor whose `ui.commit_tool` is allowlisted, the Governor
  *    MINTS a single-use pending (previewArgs = the values the user saw) and
  *    stamps a gateway-minted `pending_id` + `expires_at` onto the descriptor.
- *    No allowlisted commit_tool / no verified identity ⇒ no pending (summary-only).
+ *    No allowlisted commit_tool / no verified identity ⇒ no pending AND no
+ *    component output at all (the model's prose is the only surface — an
+ *    unstamped descriptor is never emitted); each drop arm reports WHY via
+ *    the required onDrop discriminator (#6864).
  *
  *  T4.3 CONFIRM  (parseConfirmTurn) — a deterministic, NON-LLM grammar parses the
  *    user's raw `<CONFIRM pending_id=… fields={…}>` turn, re-validates every edit
@@ -64,9 +67,57 @@ const BLOCK_REASON =
   "This action needs confirmation. Preview it first, then send the confirmation " +
   "so the gateway can bind the exact reviewed values.";
 
+/**
+ * WHY a descriptor produced no confirm card — the upstream DISCRIMINATOR
+ * (CTO directive #6864, measured by shrinemobile's C1 proof): four gateway
+ * states collapse to "zero component outputs" at the client, so a real
+ * allowlist regression is indistinguishable from correct gating, from a dead
+ * Governor, and from the tool never running. Information destroyed at this
+ * seam cannot be recovered by client-side assertions below it — so it is
+ * emitted HERE, at the drop point.
+ *
+ * Reasons (each a distinct, greppable state):
+ *  - "invalid_descriptor": a `component` field was PRESENT on the tool result
+ *    but failed schema parse. (An ordinary tool result with NO component field
+ *    emits NOTHING — 9 of 10 tools are plain data; an event on every one would
+ *    be noise that trains readers to ignore the channel.)
+ *  - "no_commit_tool": valid descriptor, `ui.commit_tool` null/absent — the
+ *    legitimate summary-shaped degrade.
+ *  - "commit_tool_not_allowlisted": THE REGRESSION CASE — a tool dropped from
+ *    `commitTools` is exactly this event, naming the tool.
+ *  - "identity_unverified": no verified externalId on the turn.
+ *  - "stamp_revalidation_failed": defensive — a minted stamp failed re-parse;
+ *    the pending was cancelled rather than emitting an ungated descriptor.
+ *
+ * PHI/identifier hygiene: the event carries reason + serverId + commit-tool
+ * name ONLY — never the sessionKey (channel session keys can embed peer
+ * identifiers such as E.164 numbers), never the externalId, never field
+ * values.
+ */
+export type GovernorDropReason =
+  | "invalid_descriptor"
+  | "no_commit_tool"
+  | "commit_tool_not_allowlisted"
+  | "identity_unverified"
+  | "stamp_revalidation_failed";
+
+export type GovernorDropEvent = {
+  reason: GovernorDropReason;
+  serverId: string;
+  /** The commit tool involved, when the descriptor declared one. */
+  commitTool?: string;
+};
+
 export type ConfirmGovernorOptions = {
   /** serverId → its allowlisted commit-tool names (the B1 per-server allowlist). */
   commitToolsByServer: Map<string, Set<string>>;
+  /**
+   * REQUIRED drop reporter — deliberately not optional and not defaulted: a
+   * silent-by-default observability channel is the defect this exists to fix
+   * (an event that can be omitted will be, and its absence looks identical to
+   * nothing-to-report). Tests that are not about drops pass a noop CONSCIOUSLY.
+   */
+  onDrop: (event: GovernorDropEvent) => void;
   /** Present for parity with the store's injectable clock; unused here today. */
   now?: () => number;
 };
@@ -90,10 +141,12 @@ export type ConfirmTurnResult = {
 export class ConfirmGovernor {
   private readonly store: PendingConfirmStore;
   private readonly commitToolsByServer: Map<string, Set<string>>;
+  private readonly onDrop: (event: GovernorDropEvent) => void;
 
   constructor(store: PendingConfirmStore, opts: ConfirmGovernorOptions) {
     this.store = store;
     this.commitToolsByServer = opts.commitToolsByServer;
+    this.onDrop = opts.onDrop;
   }
 
   // -------------------------------------------------------------------------
@@ -109,18 +162,42 @@ export class ConfirmGovernor {
    * impossible without an isolation identity).
    */
   preview(params: PreviewParams): { descriptor: ComponentDescriptor } | null {
-    const descriptor = readDescriptor(params.toolResult);
-    if (!descriptor) return null;
+    const read = readDescriptor(params.toolResult);
+    if (read.kind === "absent") return null; // ordinary result — no event (see GovernorDropReason)
+    if (read.kind === "invalid") {
+      this.onDrop({ reason: "invalid_descriptor", serverId: params.serverId });
+      return null;
+    }
+    const descriptor = read.descriptor;
 
     const commitTool = descriptor.ui.commit_tool;
-    if (!commitTool) return null; // summary-only descriptor (no commit capability)
+    if (!commitTool) {
+      // Degrade = NO component output; the model's prose is the only surface.
+      // An unstamped descriptor is never emitted (it would be a forgeable
+      // client-side surface). #219 item 2: the old "summary-only" wording here
+      // was misread as "an unstamped summary CARD arrives" — it does not.
+      this.onDrop({ reason: "no_commit_tool", serverId: params.serverId });
+      return null;
+    }
 
     const allow = this.commitToolsByServer.get(params.serverId);
-    if (!allow || !allow.has(commitTool)) return null; // not allowlisted ⇒ no gating
+    if (!allow || !allow.has(commitTool)) {
+      // THE REGRESSION CASE (#6864): a tool dropped from commitTools lands
+      // here — the event names the tool so the regression is greppable.
+      this.onDrop({
+        reason: "commit_tool_not_allowlisted",
+        serverId: params.serverId,
+        commitTool,
+      });
+      return null;
+    }
 
     // Fail-closed: without a verified caller identity the pending could never be
     // isolated or confirmed, so no pending is minted (descriptor stays inert).
-    if (!params.externalId) return null;
+    if (!params.externalId) {
+      this.onDrop({ reason: "identity_unverified", serverId: params.serverId, commitTool });
+      return null;
+    }
 
     const editableFields = descriptor.ui.fields ?? [];
     const previewArgs = previewArgsFromFields(editableFields);
@@ -149,6 +226,11 @@ export class ConfirmGovernor {
       // Defensive: a stamp that will not re-validate is a defect — drop the
       // pending rather than emit an ungated descriptor with a live pending.
       this.store.cancel(pending.externalId, pending.pendingId);
+      this.onDrop({
+        reason: "stamp_revalidation_failed",
+        serverId: params.serverId,
+        commitTool,
+      });
       return null;
     }
     return { descriptor: stamped };
@@ -328,11 +410,22 @@ export class ConfirmGovernor {
 // ---------------------------------------------------------------------------
 
 /** The initiate tool carries the C1 descriptor under `result.details.component`. */
-function readDescriptor(result: AgentToolResult<unknown>): ComponentDescriptor | null {
+type ReadDescriptorResult =
+  | { kind: "absent" } // no `component` key at all — the ordinary tool result
+  | { kind: "invalid" } // `component` key PRESENT (even explicitly null) but not a valid descriptor
+  | { kind: "ok"; descriptor: ComponentDescriptor };
+
+function readDescriptor(result: AgentToolResult<unknown>): ReadDescriptorResult {
   const details = result.details;
-  if (!details || typeof details !== "object") return null;
+  if (!details || typeof details !== "object") return { kind: "absent" };
+  if (!("component" in details)) return { kind: "absent" };
+  // An EXPLICIT `component: null` is a present key that parses to nothing — a
+  // backend that used to emit descriptors and regressed to null lands here,
+  // and must be greppable rather than reproducing the silent collapse (QG5 F5).
   const raw = (details as Record<string, unknown>).component;
-  return parseComponentDescriptor(raw);
+  if (raw === undefined || raw === null) return { kind: "invalid" };
+  const descriptor = parseComponentDescriptor(raw);
+  return descriptor ? { kind: "ok", descriptor } : { kind: "invalid" };
 }
 
 /**

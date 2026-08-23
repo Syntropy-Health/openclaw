@@ -306,6 +306,155 @@ describe("syntropy-mcp discovery priming", () => {
     expect(ctx.timers.pendingTimeouts()).toHaveLength(0);
     expect(factoryTools(ctx)).toHaveLength(1);
   });
+
+  // -------------------------------------------------------------------------
+  // #219 boot-refresh race (CTO #6877: "fix it so the first turn either waits
+  // for the warm or fails loudly"). The factory is SYNC by host contract, so
+  // waiting is not available — these pin the FAIL-LOUDLY arm plus the warm
+  // signal a harness gates on. The race manufactured false negatives: two of
+  // shrinemobile's C1 runs read a cold catalog as a legitimate result.
+  // -------------------------------------------------------------------------
+
+  it("#219: a turn starting before discovery completes logs catalog COLD, naming the servers", async () => {
+    let resolveList!: (v: McpToolListResult) => void;
+    const gate = new Promise<McpToolListResult>((resolve) => {
+      resolveList = resolve;
+    });
+    const ctx = setup({ pluginConfig: baseConfig(), listTools: vi.fn(() => gate) });
+    await flush();
+
+    // First turn races the in-flight prime — exactly shrinemobile's voided runs.
+    factoryTools(ctx);
+    const warned = ctx.logs.warn.join("\n");
+    expect(warned).toContain("catalog COLD at agent start");
+    expect(warned).toContain("kg"); // names WHICH server is undiscovered
+    expect(warned).toContain("unreliable");
+
+    // After the warm, the same turn path is silent — the signal must not cry wolf.
+    resolveList(okList([descriptor("log_food")]));
+    await flush();
+    ctx.logs.warn.length = 0;
+    factoryTools(ctx);
+    expect(ctx.logs.warn.join("\n")).not.toContain("catalog COLD");
+  });
+
+  it("#219: prime completion emits the catalog WARM line (the harness gate signal)", async () => {
+    const ctx = setup({
+      pluginConfig: baseConfig(),
+      listTools: vi.fn(async () => okList([descriptor("log_food")])),
+    });
+    await flush();
+    expect(ctx.logs.info.join("\n")).toContain("catalog WARM — all 1 server(s) discovered");
+  });
+
+  it("#219: exhausted priming logs loudly, naming the never-discovered servers", async () => {
+    const ctx = setup({
+      pluginConfig: baseConfig(),
+      listTools: vi.fn(async (): Promise<McpToolListResult> => ({ ok: false, error: "HTTP 500" })),
+    });
+    await flush();
+    await ctx.timers.fireNextTimeout();
+    await ctx.timers.fireNextTimeout();
+
+    const warned = ctx.logs.warn.join("\n");
+    expect(warned).toContain("catalog priming EXHAUSTED");
+    expect(warned).toContain("kg");
+    expect(warned).toContain("unreliable");
+    // No WARM line ever — the two signals are mutually exclusive.
+    expect(ctx.logs.info.join("\n")).not.toContain("catalog WARM");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// #6864 — the PRODUCTION drop emitter (QG5 F1: the only shipped onDrop wiring
+// was untested; an empty closure survived every governor test because those
+// exercise injected reporters, never the index.ts one).
+// ---------------------------------------------------------------------------
+
+describe("syntropy-mcp governor drop emitter (production wiring)", () => {
+  const DROP_DESCRIPTOR = (commitTool: string) => ({
+    type: "component",
+    key: "food_log_card",
+    props: {},
+    ui: {
+      summary: "Log 2 eggs?",
+      commit_tool: commitTool,
+      fields: [{ name: "food_name", type: "string", value: "eggs" }],
+    },
+  });
+
+  async function executeFirstTool(ctx: ReturnType<typeof setup>) {
+    const tools = factoryTools(ctx);
+    expect(tools.length).toBeGreaterThan(0);
+    const tool = tools[0]! as { execute: (id: string, args: unknown) => Promise<unknown> };
+    await tool.execute("call-1", {});
+  }
+
+  it("not-allowlisted → a WARN line naming reason and tool (never demoted to info)", async () => {
+    const ctx = setup({
+      pluginConfig: baseConfig({ servers: [{ ...kgServer, commitTools: ["something_else"] }] }),
+      listTools: vi.fn(async () => okList([descriptor("log_food")])),
+      callTool: vi.fn(
+        async (): Promise<McpToolResult> => ({
+          ok: true,
+          data: { component: DROP_DESCRIPTOR("log_food") },
+        }),
+      ),
+    });
+    await flush();
+    await executeFirstTool(ctx);
+
+    const warned = ctx.logs.warn.join("\n");
+    expect(warned).toContain("descriptor DROPPED reason=commit_tool_not_allowlisted");
+    expect(warned).toContain('commit_tool="log_food"');
+    expect(ctx.logs.info.join("\n")).not.toContain("descriptor DROPPED");
+  });
+
+  it("identity_unverified → an INFO line (a signed-out turn is not a warning)", async () => {
+    const ctx = setup({
+      pluginConfig: baseConfig({ servers: [{ ...kgServer, commitTools: ["log_food"] }] }),
+      listTools: vi.fn(async () => okList([descriptor("log_food")])),
+      callTool: vi.fn(
+        async (): Promise<McpToolResult> => ({
+          ok: true,
+          data: { component: DROP_DESCRIPTOR("log_food") },
+        }),
+      ),
+    });
+    await flush();
+    // No before_agent_start ran → no cached externalId → identity_unverified.
+    await executeFirstTool(ctx);
+
+    const infoed = ctx.logs.info.join("\n");
+    expect(infoed).toContain("descriptor DROPPED reason=identity_unverified");
+    expect(ctx.logs.warn.join("\n")).not.toContain("descriptor DROPPED");
+  });
+
+  it("a HOSTILE commit_tool name cannot forge a second log line (QG5 F3)", async () => {
+    // The not-allowlisted arm logs, by construction, a name our config does
+    // NOT vouch for. A newline in it would forge a plausible second DROPPED
+    // line — poisoning the exact channel #6864 makes ground truth.
+    const hostile = 'log_food"\nsyntropy-mcp governor: descriptor DROPPED reason=forged server="sj';
+    const ctx = setup({
+      pluginConfig: baseConfig({ servers: [{ ...kgServer, commitTools: ["something_else"] }] }),
+      listTools: vi.fn(async () => okList([descriptor("log_food")])),
+      callTool: vi.fn(
+        async (): Promise<McpToolResult> => ({
+          ok: true,
+          data: { component: DROP_DESCRIPTOR(hostile) },
+        }),
+      ),
+    });
+    await flush();
+    await executeFirstTool(ctx);
+
+    const dropLines = ctx.logs.warn.filter((l) => l.includes("descriptor DROPPED"));
+    expect(dropLines).toHaveLength(1);
+    // The newline arrived ESCAPED inside one line, not raw as a line break.
+    expect(dropLines[0]).not.toContain("\n");
+    expect(dropLines[0]).toContain("\\n");
+    expect(dropLines[0]).not.toContain("reason=forged");
+  });
 });
 
 // ---------------------------------------------------------------------------
