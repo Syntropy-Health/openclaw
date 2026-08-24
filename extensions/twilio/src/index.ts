@@ -42,6 +42,41 @@ const twilioSmsPlugin = {
     "Two-way SMS via Twilio: outbound send, X-Twilio-Signature inbound webhook, TCPA opt-out rail.",
 
   async register(api: OpenClawPluginApi) {
+    // ------------------------------------------------------------------
+    // DISABLED BY CONSTRUCTION — [PRINCIPAL-RULED 2026-08-21]:
+    // "WhatsApp/SMS is a staging-only EXPERIMENT. SMS is OUT OF SCOPE."
+    // (#216 removed the D0 sms capability row; #223 executes the CTO's
+    // orphan disposition, dispatch #7057.)
+    //
+    // WHY A FLAG AND NOT CREDENTIAL-ABSENCE: before this gate, the channel
+    // was "inert until credential-complete" — inert BY ACCIDENT. Provision
+    // Twilio credentials for ANY unrelated reason (a support line, a test)
+    // and an unowned SMS transport activates. This gate makes the inertness
+    // BY CONSTRUCTION: credential presence alone can never activate it.
+    //
+    // STRUCTURAL DEATH, so this does not reopen on taste: SMS pairing binds
+    // channel="sms" via SJ's A7_CHANNELS allowlist, which the principal
+    // explicitly declined to fund — SMS is UNPAIRABLE, so an enabled
+    // transport still could not authenticate anyone.
+    //
+    // DO NOT flip this flag without a NEW principal ruling. The flag name is
+    // the acknowledgement: enabling requires writing the ruling's name.
+    // The code below is deliberately KEPT (retirement is a bigger call;
+    // a labeled disable is reversible and honest — CTO #7057).
+    // ------------------------------------------------------------------
+    if (api.pluginConfig?.enableDespiteSmsOutOfScopeRuling !== true) {
+      api.logger.info(
+        "twilio: DISABLED BY CONSTRUCTION [PRINCIPAL-RULED 2026-08-21: SMS out of scope, " +
+          "unfunded; unpairable via A7_CHANNELS] — no channel, no webhook, regardless of " +
+          "credentials. Re-enabling requires a NEW ruling + pluginConfig.",
+      );
+      return;
+    }
+    api.logger.warn(
+      "twilio: enableDespiteSmsOutOfScopeRuling is SET — the SMS surface is ACTIVE against " +
+        "the 2026-08-21 ruling. This must be backed by a new principal ruling.",
+    );
+
     // Durable opt-out store — ADR 0001: OpenClaw's OWN Postgres (DATABASE_URL), never the Journal PHI DB.
     const databaseUrl =
       (api.pluginConfig?.databaseUrl as string | undefined) ?? process.env.DATABASE_URL ?? "";
