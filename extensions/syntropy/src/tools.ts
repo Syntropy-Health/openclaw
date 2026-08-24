@@ -29,12 +29,14 @@
  *       into `shared/schemas/syntropy.schema.json` — zero `*Input` defs).
  *       Exporting them upstream is the follow-up that completes F.1 here.
  *
- *   UPSTREAM BUT NOT PROPAGATED (known gap, tracked in the roster-derivation
- *   follow-up issue): the manifests also carry `prompt_hints.when_to_call` /
- *   `do_not_call` (negative routing guidance) and `available_channels` (SJ's
- *   channel-reachability control). Neither reaches the roster yet, so the
- *   derivation below is complete over the roster's fields — not over
- *   everything the manifest knows.
+ *   PROPAGATED AS OF #214: `whenToCall` / `doNotCall` (the manifest's
+ *   prompt_hints — routing guidance) and `availableChannels` (SJ's
+ *   reachability declaration, carried VERBATIM; pairability is a separate
+ *   SJ-side fact — do not infer it from this field). The agent-facing tool
+ *   description is COMPOSED from description + both hints in createAllTools,
+ *   restoring the negative routing guidance the roster previously dropped
+ *   (QG2 D4: the agent's only selection signal had lost the do-not-call
+ *   half that the source of truth carries).
  *
  * THE GATE IS THE TYPE. `TOOL_LOCALS` is a `Record<ImplementedName,
  * ToolLocal>` where `ImplementedName` = every rostered name not explicitly
@@ -84,6 +86,9 @@ interface ToolDef {
   readonly name: string;
   readonly label: string;
   readonly description: string;
+  readonly whenToCall: string;
+  readonly doNotCall: string;
+  readonly availableChannels: readonly string[];
   readonly parameters: TObject;
   readonly mcpToolName: string;
 }
@@ -219,6 +224,9 @@ export const TOOL_DEFS: readonly ToolDef[] = TOOL_ROSTER.filter(
   name: t.name,
   label: TOOL_LOCALS[t.name].label,
   description: t.description,
+  whenToCall: t.whenToCall,
+  doNotCall: t.doNotCall,
+  availableChannels: t.availableChannels,
   parameters: TOOL_LOCALS[t.name].parameters,
   mcpToolName: t.mcpToolName,
 }));
@@ -244,7 +252,10 @@ export function createAllTools(
   return TOOL_DEFS.map((def) => ({
     name: def.name,
     label: def.label,
-    description: def.description,
+    // #214 (QG2 D4): the agent's selection signal carries the manifest's
+    // routing guidance — the do-not-call half is what prevents the
+    // wrong-tool 4xx class the descriptions alone kept producing upstream.
+    description: `${def.description} When to call: ${def.whenToCall} Do not call: ${def.doNotCall}`,
     parameters: def.parameters,
     async execute(_toolCallId: string, args: unknown): Promise<AgentToolResult<unknown>> {
       const params = (args ?? {}) as Record<string, unknown>;
