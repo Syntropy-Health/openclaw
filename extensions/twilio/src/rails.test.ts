@@ -36,8 +36,13 @@ function fakeApi() {
 }
 
 describe("B-Twilio-1 rails — register() wiring (slice 6)", () => {
-  it("registers the 'sms' channel, the '/twilio/sms' webhook, and a gateway_stop cleanup", async () => {
+  it("registers the 'sms' channel, webhook + cleanup — ONLY under the #223 ruling-override flag", async () => {
     const { api, captured } = fakeApi();
+    // #223: register() is DISABLED BY CONSTRUCTION [PRINCIPAL-RULED
+    // 2026-08-21] — the wiring contract this test pins now exists only under
+    // the named ruling-override flag. The default-refusal arm (full creds,
+    // still refuses) is pinned in index.test.ts.
+    (api.pluginConfig as Record<string, unknown>).enableDespiteSmsOutOfScopeRuling = true;
     // Force the no-DB branch so the test never opens a real pg connection.
     const savedDbUrl = process.env.DATABASE_URL;
     delete process.env.DATABASE_URL;
