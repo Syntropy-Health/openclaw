@@ -59,6 +59,24 @@ describe("#200 — TOOL_DEFS is derived from the roster, verbatim", () => {
       expect(roster, `${def.name} missing from roster`).toBeDefined();
       expect(def.mcpToolName, `${def.name} mcpToolName`).toBe(roster!.mcpToolName);
       expect(def.description, `${def.name} description`).toBe(roster!.description);
+      // #214: the propagated fields, verbatim from the roster.
+      expect(def.whenToCall, `${def.name} whenToCall`).toBe(roster!.whenToCall);
+      expect(def.doNotCall, `${def.name} doNotCall`).toBe(roster!.doNotCall);
+      expect(def.availableChannels, `${def.name} channels`).toEqual(roster!.availableChannels);
+    }
+  });
+
+  it("#214: the AGENT-facing description is COMPOSED — description + both hints (D4)", () => {
+    const tools = createAllTools("http://x", "t");
+    for (const def of TOOL_DEFS) {
+      const agent = tools.find((t) => t.name === def.name)!;
+      expect(agent.description, def.name).toBe(
+        `${def.description} When to call: ${def.whenToCall} Do not call: ${def.doNotCall}`,
+      );
+      // The do-not-call half is the point (negative routing guidance) —
+      // assert its presence independently so a composition refactor cannot
+      // silently drop it while keeping the string non-empty.
+      expect(agent.description, def.name).toContain("Do not call:");
     }
   });
 });

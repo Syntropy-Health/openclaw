@@ -93,7 +93,7 @@ describe("#213 — generated artifacts carry a verifiable self-integrity stamp",
         // Counts are stated in full — "N hashed; M emitted" — because the
         // hash covers the ENTIRE input tree (deprecated manifests included)
         // while the artifact emits only the live subset.
-        /^\/\/ Provenance: SJ manifest-tree sha256 [0-9a-f]{64} \(\d+ manifest files hashed; \d+ (live )?tools emitted\)$/m,
+        /^\/\/ Provenance: SJ manifest-tree sha256 [0-9a-f]{64} \(\d+ manifest-tree files hashed; \d+ (live )?tools emitted\)$/m,
       );
     });
   }
