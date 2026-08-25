@@ -430,6 +430,63 @@ describe("syntropy-mcp governor drop emitter (production wiring)", () => {
     expect(ctx.logs.warn.join("\n")).not.toContain("descriptor DROPPED");
   });
 
+  it("nav arm through the PRODUCTION emitter: WARN line names reason + nav_tool", async () => {
+    // channel-tool-hooks §4 — the shipped wiring, not an injected reporter
+    // (QG5 F1's lesson). No navTools configured → any nav descriptor is the
+    // regression arm.
+    const ctx = setup({
+      pluginConfig: baseConfig({ servers: [{ ...kgServer, commitTools: ["log_food"] }] }),
+      listTools: vi.fn(async () => okList([descriptor("log_food")])),
+      callTool: vi.fn(
+        async (): Promise<McpToolResult> => ({
+          ok: true,
+          data: {
+            component: { ...DROP_DESCRIPTOR("log_food"), render: "navigate" },
+          },
+        }),
+      ),
+    });
+    await flush();
+    await executeFirstTool(ctx);
+
+    const warned = ctx.logs.warn.join("\n");
+    expect(warned).toContain("descriptor DROPPED reason=nav_tool_not_allowlisted");
+    expect(warned).toContain('nav_tool="log_food"');
+    expect(ctx.logs.info.join("\n")).not.toContain("descriptor DROPPED");
+  });
+
+  it("ALLOWLISTED nav through the production path: marker attached, NO DROPPED line", async () => {
+    const ctx = setup({
+      pluginConfig: baseConfig({
+        servers: [{ ...kgServer, commitTools: ["log_food"], navTools: ["log_food"] }],
+      }),
+      listTools: vi.fn(async () => okList([descriptor("log_food")])),
+      callTool: vi.fn(
+        async (): Promise<McpToolResult> => ({
+          ok: true,
+          data: {
+            component: { ...DROP_DESCRIPTOR("log_food"), render: "navigate" },
+          },
+        }),
+      ),
+    });
+    await flush();
+    const tools = factoryTools(ctx);
+    const tool = tools[0]! as {
+      execute: (id: string, args: unknown) => Promise<{ details?: Record<string, unknown> }>;
+    };
+    const res = await tool.execute("call-nav", {});
+
+    // Silence-plus-render: no DROPPED anywhere, and the gateway marker IS
+    // attached (the attestation) with an UNSTAMPED descriptor inside.
+    expect(ctx.logs.warn.join("\n")).not.toContain("descriptor DROPPED");
+    expect(ctx.logs.info.join("\n")).not.toContain("descriptor DROPPED");
+    const marker = res.details?.["__openclaw_component"]; // OPENCLAW_COMPONENT_MARKER
+    expect(marker, "gateway marker missing on allowlisted nav").toBeTruthy();
+    const comp = (marker as { component: { ui: Record<string, unknown> } }).component;
+    expect(comp.ui.pending_id).toBeUndefined();
+  });
+
   it("a HOSTILE commit_tool name cannot forge a second log line (QG5 F3)", async () => {
     // The not-allowlisted arm logs, by construction, a name our config does
     // NOT vouch for. A newline in it would forge a plausible second DROPPED

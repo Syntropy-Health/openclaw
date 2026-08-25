@@ -91,6 +91,7 @@ export type SyntropyMcpServerSpec = {
    * to a tool not in ANY server's allowlist is never gated (nor blocked) here.
    */
   commitTools?: string[];
+  navTools?: string[];
   /** Error-message label; defaults to `id`. */
   label?: string;
 };
@@ -119,6 +120,7 @@ function parseServer(raw: unknown, index: number): SyntropyMcpServerSpec {
     machineSub,
     issuer,
     commitTools,
+    navTools,
     label,
   } = entry;
   if (typeof id !== "string" || !id.trim()) {
@@ -149,6 +151,15 @@ function parseServer(raw: unknown, index: number): SyntropyMcpServerSpec {
     }
     const names = commitTools.map((t) => (t as string).trim()).filter((t) => t.length > 0);
     if (names.length > 0) spec.commitTools = names;
+  }
+  // channel-tool-hooks §4: tools allowed to emit render:navigate|url
+  // descriptors. Same parse discipline as commitTools; WIRE names.
+  if (navTools !== undefined) {
+    if (!Array.isArray(navTools) || !navTools.every((t) => typeof t === "string")) {
+      throw new Error(`servers[${index}] ("${id}") navTools must be an array of strings`);
+    }
+    const names = navTools.map((t) => (t as string).trim()).filter((t) => t.length > 0);
+    if (names.length > 0) spec.navTools = names;
   }
   if (typeof label === "string" && label.trim()) spec.label = label.trim();
   return spec;
@@ -478,6 +489,7 @@ function buildAgentTool(params: {
             externalId: resolveExternalId(sessionKey),
             sessionKey,
             serverId: server.id,
+            toolName: surfacedName,
           });
           if (previewed) {
             agentResult.details = {
@@ -769,9 +781,11 @@ export function createSyntropyMcpPlugin(overrides: SyntropyMcpOverrides = {}) {
       // gates nothing. Empty for a server without a commitTools config.
       const registeredIds = new Set(serverIds);
       const commitToolsByServer = new Map<string, Set<string>>();
+      const navToolsByServer = new Map<string, Set<string>>();
       for (const spec of config.servers) {
         if (!registeredIds.has(spec.id)) continue;
         commitToolsByServer.set(spec.id, new Set(spec.commitTools ?? []));
+        navToolsByServer.set(spec.id, new Set(spec.navTools ?? []));
       }
 
       const hasGatedCommitTools = [...commitToolsByServer.values()].some((set) => set.size > 0);
@@ -783,6 +797,7 @@ export function createSyntropyMcpPlugin(overrides: SyntropyMcpOverrides = {}) {
         overrides.governor ??
         new ConfirmGovernor(pendingStore, {
           commitToolsByServer,
+          navToolsByServer,
           now: overrides.now,
           // #6864 discriminator: every drop arm is a distinct, greppable line.
           // Levels split by meaning: misconfig/defect arms WARN (a regression
@@ -802,9 +817,16 @@ export function createSyntropyMcpPlugin(overrides: SyntropyMcpOverrides = {}) {
                 event.commitTool === undefined
                   ? ""
                   : ` commit_tool=${JSON.stringify(event.commitTool.slice(0, 64))}`;
+              // navTool is the CALLING tool on the nav arm — catalog-sourced,
+              // but same hardening (this channel is ground truth; nothing it
+              // reports on may forge into it).
+              const nav =
+                event.navTool === undefined
+                  ? ""
+                  : ` nav_tool=${JSON.stringify(event.navTool.slice(0, 64))}`;
               const line =
                 `syntropy-mcp governor: descriptor DROPPED reason=${event.reason} ` +
-                `server=${JSON.stringify(event.serverId)}${tool}`;
+                `server=${JSON.stringify(event.serverId)}${tool}${nav}`;
               if (event.reason === "no_commit_tool" || event.reason === "identity_unverified") {
                 api.logger.info(line);
               } else {

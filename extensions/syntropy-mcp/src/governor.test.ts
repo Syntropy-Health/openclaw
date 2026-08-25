@@ -39,6 +39,7 @@ function makeGovernor(store: PendingConfirmStore, commitTools: string[] = ["synt
     // governor-drop-discriminator.test.ts for the observed-firing coverage).
     onDrop: () => {},
     commitToolsByServer: new Map([["sj", new Set(commitTools)]]),
+    navToolsByServer: new Map(),
     now,
   });
 }
@@ -136,6 +137,7 @@ describe("guardBeforeToolCall — collision-prefixed commit tool is still gated"
   function twoServerGov(store: PendingConfirmStore) {
     return new ConfirmGovernor(store, {
       onDrop: () => {},
+      navToolsByServer: new Map(),
       commitToolsByServer: new Map([
         ["kg", new Set(["syntropy_log_food"])],
         ["sj", new Set(["syntropy_log_food"])],
@@ -484,6 +486,7 @@ describe("preview — mint + stamp", () => {
       externalId: "user_A",
       sessionKey: "sess_A",
       serverId: "sj",
+      toolName: "analyze_food",
     });
 
     expect(out).not.toBeNull();
@@ -501,6 +504,7 @@ describe("preview — mint + stamp", () => {
       externalId: "user_A",
       sessionKey: "sess_A",
       serverId: "sj",
+      toolName: "analyze_food",
     });
     const pendingId = out?.descriptor.ui.pending_id as string;
     const pending = store.peek("user_A", pendingId);
@@ -516,6 +520,7 @@ describe("preview — mint + stamp", () => {
       externalId: "user_A",
       sessionKey: "sess_A",
       serverId: "sj",
+      toolName: "analyze_food",
     });
     expect(out).toBeNull();
     expect(store.size()).toBe(0);
@@ -529,6 +534,7 @@ describe("preview — mint + stamp", () => {
       externalId: "user_A",
       sessionKey: "sess_A",
       serverId: "sj",
+      toolName: "analyze_food",
     });
     expect(out).toBeNull();
     expect(store.size()).toBe(0);
@@ -542,6 +548,7 @@ describe("preview — mint + stamp", () => {
       externalId: undefined,
       sessionKey: "sess_A",
       serverId: "sj",
+      toolName: "analyze_food",
     });
     expect(out).toBeNull();
     expect(store.size()).toBe(0);
@@ -555,6 +562,7 @@ describe("preview — mint + stamp", () => {
       externalId: "user_A",
       sessionKey: "sess_A",
       serverId: "sj",
+      toolName: "analyze_food",
     });
     expect(out).toBeNull();
   });
@@ -565,6 +573,7 @@ describe("preview — mint + stamp", () => {
     const store = makeStore();
     const gov = new ConfirmGovernor(store, {
       onDrop: () => {},
+      navToolsByServer: new Map(),
       commitToolsByServer: new Map([
         ["kg", new Set(["syntropy_log_food"])],
         ["sj", new Set(["syntropy_log_food"])],
@@ -595,6 +604,7 @@ describe("preview — mint + stamp", () => {
       externalId: "user_A",
       sessionKey: "sess_A",
       serverId: "sj",
+      toolName: "analyze_food",
     });
     const pendingId = out?.descriptor.ui.pending_id as string;
 
