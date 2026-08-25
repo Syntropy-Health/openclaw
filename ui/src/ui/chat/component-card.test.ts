@@ -102,22 +102,81 @@ describe("2c-web component card — the tolerant-reader contract in DOM", () => 
     expect(host.textContent).toContain("(expired)");
   });
 
-  it("render: navigate|url → summary fallback for now (degrades loudly, never blank)", () => {
+  function navDescriptor(mode: string, url?: unknown) {
+    return {
+      ...STAMPED_CONFIRM,
+      render: mode,
+      props: url === undefined ? {} : { url },
+      ui: {
+        ...STAMPED_CONFIRM.ui,
+        commit_tool: null,
+        pending_id: undefined,
+        expires_at: undefined,
+      },
+    };
+  }
+
+  it("nav-render: https target → anchor card disclosing the HOST, noopener, new tab", () => {
     for (const mode of ["navigate", "url"]) {
-      const nav = {
-        ...STAMPED_CONFIRM,
-        render: mode,
-        ui: {
-          ...STAMPED_CONFIRM.ui,
-          commit_tool: null,
-          pending_id: undefined,
-          expires_at: undefined,
-        },
-      };
-      const { host } = card(nav);
+      const { host } = card(navDescriptor(mode, "https://journals.example.com/entry/42"));
+      const a = host.querySelector("a.chat-component-card__link") as HTMLAnchorElement;
+      expect(a, mode).not.toBeNull();
+      expect(a.href, mode).toBe("https://journals.example.com/entry/42");
+      expect(a.textContent, mode).toContain("journals.example.com");
+      expect(a.rel, mode).toContain("noopener");
+      expect(a.target, mode).toBe("_blank");
       expect(host.textContent, mode).toContain("Log 2 eggs (156 kcal)?");
-      expect(host.querySelectorAll("button"), mode).toHaveLength(0);
     }
+  });
+
+  it("nav-render: same-origin relative path → anchor resolved against the page origin", () => {
+    const { host } = card(navDescriptor("url", "/sessions/today"));
+    const a = host.querySelector("a.chat-component-card__link") as HTMLAnchorElement;
+    expect(a).not.toBeNull();
+    expect(a.href).toBe(new URL("/sessions/today", window.location.origin).href);
+  });
+
+  it("RED ARM (phishing rail): javascript:, data:, cross-origin http → summary, NO anchor", () => {
+    for (const bad of [
+      "javascript:alert(1)",
+      "data:text/html,hi",
+      "http://evil.example.com/x",
+      "https://", // unparseable even with a base — URL() throws
+    ]) {
+      const { host } = card(navDescriptor("url", bad));
+      expect(host.querySelector("a"), bad).toBeNull();
+      expect(host.textContent, bad).toContain("Log 2 eggs (156 kcal)?");
+    }
+  });
+
+  it("junk that RESOLVES as a same-origin relative path is allowed (it can only link home)", () => {
+    // "not a url at all ://" absorbs into the page origin under new URL(x, base)
+    // — the resulting anchor targets the user's own gateway, which the origin
+    // rule deliberately permits. Pinned so nobody 'fixes' this into a parse
+    // strictness that breaks legitimate relative paths.
+    const { host } = card(navDescriptor("url", "not a url at all ://"));
+    const a = host.querySelector("a.chat-component-card__link") as HTMLAnchorElement;
+    expect(a).not.toBeNull();
+    expect(new URL(a.href).origin).toBe(window.location.origin);
+  });
+
+  it("nav without a usable target (absent / non-string url) → summary fallback, never blank", () => {
+    for (const missing of [undefined, 42, ""]) {
+      const { host } = card(navDescriptor("navigate", missing));
+      expect(host.querySelector("a"), String(missing)).toBeNull();
+      expect(host.textContent, String(missing)).toContain("Log 2 eggs (156 kcal)?");
+      expect(host.querySelectorAll("button"), String(missing)).toHaveLength(0);
+    }
+  });
+
+  it("a nav descriptor that is ALSO confirm-shaped renders NOTHING (stricter arm wins)", () => {
+    // Nav descriptors are never stamped; one carrying a commit_tool would be
+    // an ungated commit affordance wearing a nav costume — refuse entirely.
+    const hybrid = { ...navDescriptor("url", "https://ok.example.com/x") };
+    (hybrid.ui as Record<string, unknown>).commit_tool = "log_food";
+    const { host } = card(hybrid);
+    expect(host.querySelector(".chat-component-card")).toBeNull();
+    expect(host.querySelector("a")).toBeNull();
   });
 
   it("extraction is tolerant: missing summary ⇒ null; junk component ⇒ null", () => {

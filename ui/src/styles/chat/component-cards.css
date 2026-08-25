@@ -41,3 +41,9 @@
   display: flex;
   gap: 8px;
 }
+
+.chat-component-card__link {
+  display: inline-block;
+  margin-top: 4px;
+  font-weight: 600;
+}

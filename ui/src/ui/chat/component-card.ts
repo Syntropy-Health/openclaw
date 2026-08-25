@@ -55,6 +55,7 @@ function formatFieldValue(value: unknown): string {
 export type WebComponentDescriptor = {
   key: string;
   summary: string;
+  props: Record<string, unknown>;
   commitTool: string | null;
   pendingId?: string;
   /** ISO timestamp (the schema's wire type — NOT epoch millis). */
@@ -85,15 +86,48 @@ export function extractComponentDescriptor(message: unknown): WebComponentDescri
     return null;
   }
   const rawFields = Array.isArray(u.fields) ? u.fields : [];
+  const props = c.props && typeof c.props === "object" ? (c.props as Record<string, unknown>) : {};
   return {
     key: typeof c.key === "string" ? c.key : "",
     summary,
+    props,
     commitTool: typeof u.commit_tool === "string" ? u.commit_tool : null,
     pendingId: typeof u.pending_id === "string" ? u.pending_id : undefined,
     expiresAt: typeof u.expires_at === "string" ? u.expires_at : undefined,
     fields: rawFields.filter((f): f is ComponentField => Boolean(f) && typeof f === "object"),
     render: typeof c.render === "string" ? c.render : undefined,
   };
+}
+
+/**
+ * The nav target contract (proposed cross-consumer, tests-as-authority):
+ * `props.url` carries the destination. Accepted: absolute https:, or a
+ * same-origin target (relative paths resolve against the page origin).
+ * Everything else — http: cross-origin, javascript:, data:, unparseable —
+ * resolves to null and the card degrades to summary with NO anchor.
+ */
+export function resolveNavTarget(
+  descriptor: WebComponentDescriptor,
+): { href: string; host: string } | null {
+  const raw = descriptor.props.url;
+  if (typeof raw !== "string" || !raw.trim()) {
+    return null;
+  }
+  let parsed: URL;
+  try {
+    parsed = new URL(raw, window.location.origin);
+  } catch {
+    return null;
+  }
+  const sameOrigin = parsed.origin === window.location.origin;
+  if (parsed.protocol !== "https:" && !sameOrigin) {
+    return null;
+  }
+  if (parsed.protocol !== "https:" && parsed.protocol !== "http:") {
+    // javascript:, data:, blob: … can never be a nav target, even "same-origin".
+    return null;
+  }
+  return { href: parsed.href, host: parsed.host };
 }
 
 export function renderComponentCard(
@@ -111,12 +145,38 @@ export function renderComponentCard(
     return nothing;
   }
 
-  // Unknown key, or a render mode this client has no rich path for yet
-  // (navigate/url land in increment 3): the summary IS the degraded render,
-  // and it names what happened rather than going blank.
-  const richKey = KNOWN_COMPONENT_KEYS.has(descriptor.key);
+  // NAV MODES (increment 3, A&D §3): the web client has no SJ-surface route
+  // registry, so `navigate` takes the DECLARED fallback chain — url rendering
+  // when a target exists, summary otherwise. `url` renders an anchor card.
+  // The phishing rail is enforced here: the target must pass
+  // resolveNavTarget's scheme/origin rules or NO anchor renders (summary
+  // degrade — loud, never a live link to an unvetted destination), and the
+  // anchor DISCLOSES its host so the user sees where they are going. Lit
+  // interpolation output-encodes; nothing here touches unsafeHTML.
   const navMode = descriptor.render === "navigate" || descriptor.render === "url";
-  if (!richKey || navMode) {
+  if (navMode) {
+    const target = resolveNavTarget(descriptor);
+    if (!target) {
+      return html`<div class="chat-component-card chat-component-card--summary">
+        ${descriptor.summary}
+      </div>`;
+    }
+    return html`<div class="chat-component-card chat-component-card--nav">
+      <div class="chat-component-card__summary">${descriptor.summary}</div>
+      <a
+        class="chat-component-card__link"
+        href=${target.href}
+        target="_blank"
+        rel="noopener noreferrer"
+        >Open ${target.host}</a
+      >
+    </div>`;
+  }
+
+  // Unknown key: the summary IS the degraded render, and it names what
+  // happened rather than going blank.
+  const richKey = KNOWN_COMPONENT_KEYS.has(descriptor.key);
+  if (!richKey) {
     return html`<div class="chat-component-card chat-component-card--summary">
       ${descriptor.summary}
     </div>`;
