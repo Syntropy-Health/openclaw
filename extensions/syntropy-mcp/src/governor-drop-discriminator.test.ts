@@ -42,12 +42,13 @@ function makeGovernor(opts: { allow?: string[] } = {}) {
   const store = new PendingConfirmStore();
   const governor = new ConfirmGovernor(store, {
     commitToolsByServer: new Map([["sj", new Set(opts.allow ?? ["log_food"])]]),
+    navToolsByServer: new Map(),
     onDrop: (e) => drops.push(e),
   });
   return { governor, drops };
 }
 
-const TURN = { externalId: "user_1", sessionKey: "s1", serverId: "sj" };
+const TURN = { externalId: "user_1", sessionKey: "s1", serverId: "sj", toolName: "analyze_food" };
 
 describe("#6864 — every drop arm names its reason (observed firing)", () => {
   it("RED ARM (the regression case): a tool dropped from commitTools → event names TOOL and REASON", () => {
@@ -82,6 +83,7 @@ describe("#6864 — every drop arm names its reason (observed firing)", () => {
       externalId: undefined,
       sessionKey: "whatsapp:+15551230042", // channel keys can embed E.164 — must never leak
       serverId: "sj",
+      toolName: "analyze_food",
     });
 
     expect(out).toBeNull();
@@ -127,6 +129,7 @@ describe("#6864 — every drop arm names its reason (observed firing)", () => {
     const cancel = vi.spyOn(store, "cancel");
     const governor = new ConfirmGovernor(store, {
       commitToolsByServer: new Map([["sj", new Set(["log_food"])]]),
+      navToolsByServer: new Map(),
       onDrop: (e) => drops.push(e),
     });
 
@@ -138,6 +141,99 @@ describe("#6864 — every drop arm names its reason (observed firing)", () => {
     ]);
     // The defensive arm's other half: no live pending survives a failed stamp.
     expect(cancel).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("channel-tool-hooks §4 — nav modes: allowlisted = silent pass-through, else the NAMED arm", () => {
+  const NAV_DESCRIPTOR = {
+    ...VALID_DESCRIPTOR,
+    render: "navigate",
+    ui: { ...VALID_DESCRIPTOR.ui, commit_tool: null },
+  };
+
+  function makeNavGovernor(opts: { navAllow?: string[] } = {}) {
+    const drops: GovernorDropEvent[] = [];
+    const store = new PendingConfirmStore();
+    const governor = new ConfirmGovernor(store, {
+      commitToolsByServer: new Map([["sj", new Set(["log_food"])]]),
+      navToolsByServer: new Map([["sj", new Set(opts.navAllow ?? [])]]),
+      onDrop: (e) => drops.push(e),
+    });
+    return { governor, drops };
+  }
+
+  it("RED ARM: a nav descriptor from a NON-allowlisted tool → arm names the CALLING tool", () => {
+    const { governor, drops } = makeNavGovernor({ navAllow: ["some_other_tool"] });
+
+    const out = governor.preview({ toolResult: resultWith(NAV_DESCRIPTOR), ...TURN });
+
+    expect(out).toBeNull();
+    expect(drops).toEqual([
+      { reason: "nav_tool_not_allowlisted", serverId: "sj", navTool: "analyze_food" },
+    ]);
+  });
+
+  it("DESIGNED PATH: allowlisted nav tool → descriptor passes through with NO event", () => {
+    // "By design" is silence + a rendered card; a discriminator firing on the
+    // designed path trains its readers to ignore it (the #219 noise rule,
+    // CTO 7148/7155). This is the fifth-state fix: the legitimate nav flow
+    // never reaches the no_commit_tool arm that would have misclassified it.
+    const { governor, drops } = makeNavGovernor({ navAllow: ["analyze_food"] });
+
+    const out = governor.preview({ toolResult: resultWith(NAV_DESCRIPTOR), ...TURN });
+
+    expect(out).not.toBeNull();
+    expect(drops).toEqual([]);
+  });
+
+  it("the pass-through is UNSTAMPED: no pending, no pending_id, no expires_at", () => {
+    // Non-mutating by contract — the gateway MARKER (attached by the caller)
+    // is the attestation; a stamp here would mint a pending nothing consumes.
+    const { governor } = makeNavGovernor({ navAllow: ["analyze_food"] });
+
+    const out = governor.preview({ toolResult: resultWith(NAV_DESCRIPTOR), ...TURN })!;
+
+    expect(out.descriptor.ui.pending_id).toBeUndefined();
+    expect(out.descriptor.ui.expires_at).toBeUndefined();
+  });
+
+  it("url mode takes the same gate as navigate (both arms)", () => {
+    const URL_DESC = { ...NAV_DESCRIPTOR, render: "url" };
+    const denied = makeNavGovernor();
+    expect(denied.governor.preview({ toolResult: resultWith(URL_DESC), ...TURN })).toBeNull();
+    expect(denied.drops[0]?.reason).toBe("nav_tool_not_allowlisted");
+
+    const allowed = makeNavGovernor({ navAllow: ["analyze_food"] });
+    expect(allowed.governor.preview({ toolResult: resultWith(URL_DESC), ...TURN })).not.toBeNull();
+    expect(allowed.drops).toEqual([]);
+  });
+
+  it("nav gating does NOT need identity (non-mutating), and confirm flow is UNTOUCHED", () => {
+    // A signed-out turn may still render a nav card — nothing mutates.
+    const { governor, drops } = makeNavGovernor({ navAllow: ["analyze_food"] });
+    const out = governor.preview({
+      toolResult: resultWith(NAV_DESCRIPTOR),
+      externalId: undefined,
+      sessionKey: "s1",
+      serverId: "sj",
+      toolName: "analyze_food",
+    });
+    expect(out).not.toBeNull();
+    expect(drops).toEqual([]);
+
+    // And a render:"component"/absent descriptor still walks the confirm arms
+    // (here: identity_unverified, since commit_tool is allowlisted).
+    const confirmOut = governor.preview({
+      toolResult: resultWith(VALID_DESCRIPTOR),
+      externalId: undefined,
+      sessionKey: "s1",
+      serverId: "sj",
+      toolName: "analyze_food",
+    });
+    expect(confirmOut).toBeNull();
+    expect(drops).toEqual([
+      { reason: "identity_unverified", serverId: "sj", commitTool: "log_food" },
+    ]);
   });
 });
 

@@ -88,6 +88,12 @@ const BLOCK_REASON =
  *  - "identity_unverified": no verified externalId on the turn.
  *  - "stamp_revalidation_failed": defensive — a minted stamp failed re-parse;
  *    the pending was cancelled rather than emitting an ungated descriptor.
+ *  - "nav_tool_not_allowlisted": THE NAV REGRESSION CASE (channel-tool-hooks
+ *    A&D §4) — a `render: navigate|url` descriptor from a tool absent from
+ *    the per-server `navTools` allowlist, naming the CALLING tool. The
+ *    ALLOWLISTED nav path emits NOTHING (designed-path silence, like the
+ *    no-component case): "by design" is distinguished from "unexpected" by
+ *    silence-plus-rendered-card vs a logged arm — CTO 7148/7155.
  *
  * PHI/identifier hygiene: the event carries reason + serverId + commit-tool
  * name ONLY — never the sessionKey (channel session keys can embed peer
@@ -99,18 +105,27 @@ export type GovernorDropReason =
   | "no_commit_tool"
   | "commit_tool_not_allowlisted"
   | "identity_unverified"
-  | "stamp_revalidation_failed";
+  | "stamp_revalidation_failed"
+  | "nav_tool_not_allowlisted";
 
 export type GovernorDropEvent = {
   reason: GovernorDropReason;
   serverId: string;
   /** The commit tool involved, when the descriptor declared one. */
   commitTool?: string;
+  /** nav_tool_not_allowlisted only: the CALLING tool (wire name) that emitted a nav descriptor. */
+  navTool?: string;
 };
 
 export type ConfirmGovernorOptions = {
   /** serverId → its allowlisted commit-tool names (the B1 per-server allowlist). */
   commitToolsByServer: Map<string, Set<string>>;
+  /**
+   * serverId → tools allowed to emit `render: navigate|url` descriptors
+   * (channel-tool-hooks §4). REQUIRED like its sibling: an omittable nav gate
+   * would be the silent-by-default class. Empty set = no nav tools (fail-closed).
+   */
+  navToolsByServer: Map<string, Set<string>>;
   /**
    * REQUIRED drop reporter — deliberately not optional and not defaulted: a
    * silent-by-default observability channel is the defect this exists to fix
@@ -127,6 +142,8 @@ export type PreviewParams = {
   externalId: string | undefined;
   sessionKey: string;
   serverId: string;
+  /** The CALLING tool's wire name — keys the navTools allowlist (§4). */
+  toolName: string;
 };
 
 export type ConfirmTurnResult = {
@@ -141,11 +158,13 @@ export type ConfirmTurnResult = {
 export class ConfirmGovernor {
   private readonly store: PendingConfirmStore;
   private readonly commitToolsByServer: Map<string, Set<string>>;
+  private readonly navToolsByServer: Map<string, Set<string>>;
   private readonly onDrop: (event: GovernorDropEvent) => void;
 
   constructor(store: PendingConfirmStore, opts: ConfirmGovernorOptions) {
     this.store = store;
     this.commitToolsByServer = opts.commitToolsByServer;
+    this.navToolsByServer = opts.navToolsByServer;
     this.onDrop = opts.onDrop;
   }
 
@@ -169,6 +188,28 @@ export class ConfirmGovernor {
       return null;
     }
     const descriptor = read.descriptor;
+
+    // NAV MODES (channel-tool-hooks §4): navigate/url descriptors are
+    // NON-MUTATING — not the Governor's confirm business. No pending, no
+    // stamp; the gateway marker alone is the attestation (SEC-FORGE-MARKER
+    // guarantees only the gateway attaches it, so a backend still cannot
+    // smuggle a nav card). Authorization mirrors commitTools: the CALLING
+    // tool must be nav-allowlisted, or the drop is the NAMED regression arm.
+    // The ALLOWLISTED path emits NO event — designed-path silence (the #219
+    // noise rule); "by design" reads as silence + a rendered card,
+    // "unexpected" reads as a logged arm. CTO 7148/7155.
+    if (descriptor.render === "navigate" || descriptor.render === "url") {
+      const navAllow = this.navToolsByServer.get(params.serverId);
+      if (!navAllow || !navAllow.has(params.toolName)) {
+        this.onDrop({
+          reason: "nav_tool_not_allowlisted",
+          serverId: params.serverId,
+          navTool: params.toolName,
+        });
+        return null;
+      }
+      return { descriptor };
+    }
 
     const commitTool = descriptor.ui.commit_tool;
     if (!commitTool) {
