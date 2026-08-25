@@ -169,14 +169,42 @@ describe("2c-web component card — the tolerant-reader contract in DOM", () => 
     }
   });
 
-  it("a nav descriptor that is ALSO confirm-shaped renders NOTHING (stricter arm wins)", () => {
-    // Nav descriptors are never stamped; one carrying a commit_tool would be
-    // an ungated commit affordance wearing a nav costume — refuse entirely.
-    const hybrid = { ...navDescriptor("url", "https://ok.example.com/x") };
-    (hybrid.ui as Record<string, unknown>).commit_tool = "log_food";
-    const { host } = card(hybrid);
-    expect(host.querySelector(".chat-component-card")).toBeNull();
-    expect(host.querySelector("a")).toBeNull();
+  it("nav+commit_tool hybrid → SUMMARY with zero affordances + LOGGED reason [CTO-RULING 7403]", () => {
+    // Ruling 7403 is the documented authority for this pin's change from
+    // nothing→summary: one refusal class, one behavior (the phishing rail
+    // already chose loud-degrade), affordances refused, reason logged so a
+    // correct refusal never renders identically to a gating regression.
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      const hybrid = { ...navDescriptor("url", "https://ok.example.com/x") };
+      (hybrid.ui as Record<string, unknown>).commit_tool = "log_food";
+      const { host } = card(hybrid);
+      expect(host.textContent).toContain("Log 2 eggs (156 kcal)?");
+      expect(host.querySelector("a")).toBeNull();
+      expect(host.querySelectorAll("button")).toHaveLength(0);
+      const logged = warn.mock.calls.map((c) => String(c[0])).join("\n");
+      expect(logged).toContain("reason=nav_with_commit_tool");
+      expect(logged).toContain("food_log_card");
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
+  it("the NON-nav unstamped-confirm arm still renders NOTHING (A&D §2, unchanged by 7403)", () => {
+    // The ruling governs the nav hybrid only; a plain unstamped confirm card
+    // stays refused entirely — its summary alone misreads as a completed
+    // action. Pinned so the ruling is not over-applied.
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      const unstamped = {
+        ...STAMPED_CONFIRM,
+        ui: { ...STAMPED_CONFIRM.ui, pending_id: undefined, expires_at: undefined },
+      };
+      const { host } = card(unstamped);
+      expect(host.querySelector(".chat-component-card")).toBeNull();
+    } finally {
+      warn.mockRestore();
+    }
   });
 
   it("extraction is tolerant: missing summary ⇒ null; junk component ⇒ null", () => {

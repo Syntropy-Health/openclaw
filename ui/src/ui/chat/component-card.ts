@@ -137,10 +137,31 @@ export function renderComponentCard(
   const now = opts.now ?? Date.now();
   const stamped = Boolean(descriptor.pendingId) && typeof descriptor.expiresAt === "string";
   const confirmShaped = Boolean(descriptor.commitTool);
+  const navMode = descriptor.render === "navigate" || descriptor.render === "url";
 
-  // Confirm-shaped but unstamped: the Governor refused (or never saw) this
-  // descriptor — the drop is reported upstream. Rendering it here would give
-  // an ungated card the visual authority of a gated one.
+  // STRICTER ARM, per [CTO-RULING dispatch 7403]: a nav descriptor that ALSO
+  // carries a commit_tool refuses its AFFORDANCES (no anchor, no buttons) but
+  // renders the SUMMARY — one refusal class, one behavior: the phishing rail
+  // already chose loud-degrade over blank, and blank is indistinguishable
+  // from a broken client. The refusal reason is LOGGED at the refusal point
+  // so a correct refusal and a gating regression never render identically
+  // (the discriminator exists upstream of the collapse). Mobile renders the
+  // same summary; this line is the web client's half of that convergence.
+  if (navMode && confirmShaped) {
+    console.warn(
+      `component-card: nav descriptor REFUSED affordances reason=nav_with_commit_tool key=${JSON.stringify(descriptor.key)} — summary rendered, no anchor/buttons`,
+    );
+    return html`<div class="chat-component-card chat-component-card--summary">
+      ${descriptor.summary}
+    </div>`;
+  }
+
+  // Confirm-shaped but unstamped (NON-nav): the Governor refused (or never
+  // saw) this descriptor — the drop is reported upstream. Rendering it here
+  // would give an ungated card the visual authority of a gated one. This arm
+  // stays NOTHING per A&D §2 (the shrinemobile-aligned contract): a confirm
+  // card is affordance-first, and its summary alone misreads as a completed
+  // action. Distinct from the nav hybrid above, which ruling 7403 governs.
   if (confirmShaped && !stamped) {
     return nothing;
   }
@@ -153,7 +174,6 @@ export function renderComponentCard(
   // degrade — loud, never a live link to an unvetted destination), and the
   // anchor DISCLOSES its host so the user sees where they are going. Lit
   // interpolation output-encodes; nothing here touches unsafeHTML.
-  const navMode = descriptor.render === "navigate" || descriptor.render === "url";
   if (navMode) {
     const target = resolveNavTarget(descriptor);
     if (!target) {
