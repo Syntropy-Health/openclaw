@@ -4,6 +4,7 @@ import type { AssistantIdentity } from "../assistant-identity.ts";
 import { toSanitizedMarkdownHtml } from "../markdown.ts";
 import { detectTextDirection } from "../text-direction.ts";
 import type { MessageGroup } from "../types/chat-types.ts";
+import { extractComponentDescriptor, renderComponentCard } from "./component-card.ts";
 import { renderCopyAsMarkdownButton } from "./copy-as-markdown.ts";
 import {
   extractTextCached,
@@ -108,6 +109,7 @@ export function renderMessageGroup(
   group: MessageGroup,
   opts: {
     onOpenSidebar?: (content: string) => void;
+    onSendMessage?: (text: string) => void;
     showReasoning: boolean;
     assistantName?: string;
     assistantAvatar?: string | null;
@@ -141,6 +143,7 @@ export function renderMessageGroup(
             {
               isStreaming: group.isStreaming && index === group.messages.length - 1,
               showReasoning: opts.showReasoning,
+              onSendMessage: opts.onSendMessage,
             },
             opts.onOpenSidebar,
           ),
@@ -218,9 +221,20 @@ function renderMessageImages(images: ImageBlock[]) {
 
 function renderGroupedMessage(
   message: unknown,
-  opts: { isStreaming: boolean; showReasoning: boolean },
+  opts: {
+    isStreaming: boolean;
+    showReasoning: boolean;
+    onSendMessage?: (text: string) => void;
+  },
   onOpenSidebar?: (content: string) => void,
 ) {
+  // 2c-web: a history message carrying a gateway-lifted ComponentDescriptor
+  // renders its card ALONGSIDE whatever else the message shows.
+  const componentDescriptor = extractComponentDescriptor(message);
+  const componentCard = componentDescriptor
+    ? renderComponentCard(componentDescriptor, { onSendMessage: opts.onSendMessage })
+    : nothing;
+
   const m = message as Record<string, unknown>;
   const role = typeof m.role === "string" ? m.role : "unknown";
   const isToolResult =
@@ -253,11 +267,11 @@ function renderGroupedMessage(
     .join(" ");
 
   if (!markdown && hasToolCards && isToolResult) {
-    return html`${toolCards.map((card) => renderToolCardSidebar(card, onOpenSidebar))}`;
+    return html`${toolCards.map((card) => renderToolCardSidebar(card, onOpenSidebar))}${componentCard}`;
   }
 
   if (!markdown && !hasToolCards && !hasImages) {
-    return nothing;
+    return componentCard === nothing ? nothing : html`${componentCard}`;
   }
 
   return html`
@@ -277,6 +291,7 @@ function renderGroupedMessage(
           : nothing
       }
       ${toolCards.map((card) => renderToolCardSidebar(card, onOpenSidebar))}
+      ${componentCard}
     </div>
   `;
 }
