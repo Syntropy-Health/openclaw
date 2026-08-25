@@ -62,6 +62,8 @@ type AbortedPartialSnapshot = {
 
 const CHAT_HISTORY_TEXT_MAX_CHARS = 12_000;
 const CHAT_HISTORY_MAX_SINGLE_MESSAGE_BYTES = 128 * 1024;
+import { extractComponentChannelData } from "../../agents/pi-embedded-runner/run/payloads.js";
+
 const CHAT_HISTORY_OVERSIZED_PLACEHOLDER = "[chat.history omitted: message too large]";
 
 function stripDisallowedChatControlChars(message: string): string {
@@ -144,6 +146,18 @@ function sanitizeChatHistoryMessage(message: unknown): { message: unknown; chang
   let changed = false;
 
   if ("details" in entry) {
+    // 2c-web: LIFT a Governor-stamped component carrier before details are
+    // stripped — history is the web UI's single render path (the final chat
+    // payload is superseded by a history reload immediately), so this lift is
+    // the ONE seam that puts descriptors in front of the web renderer. Same
+    // validator as the A4 bridge (a single-result wrap of the same extractor):
+    // the two lift points cannot drift on what counts as valid. Everything
+    // else in details is stripped exactly as before; an invalid or absent
+    // marker lifts nothing (fail-closed — the Governor already reported drops).
+    const carrier = extractComponentChannelData([{ role: "toolResult", details: entry.details }]);
+    if (carrier && entry.role === "toolResult") {
+      entry.component = carrier.component;
+    }
     delete entry.details;
     changed = true;
   }
@@ -177,7 +191,7 @@ function sanitizeChatHistoryMessage(message: unknown): { message: unknown; chang
   return { message: changed ? entry : message, changed };
 }
 
-function sanitizeChatHistoryMessages(messages: unknown[]): unknown[] {
+export function sanitizeChatHistoryMessages(messages: unknown[]): unknown[] {
   if (messages.length === 0) {
     return messages;
   }

@@ -1,0 +1,43 @@
+/* 2c-web — ComponentDescriptor cards (channel-tool-hooks A&D §2). */
+
+.chat-component-card {
+  margin-top: 8px;
+  padding: 10px 12px;
+  border: 1px solid var(--border, rgba(127, 127, 127, 0.25));
+  border-radius: 10px;
+  background: var(--bg-elevated, rgba(127, 127, 127, 0.06));
+  font-size: 0.925rem;
+}
+
+.chat-component-card--summary {
+  color: var(--text-muted, inherit);
+}
+
+.chat-component-card__summary {
+  font-weight: 600;
+  margin-bottom: 6px;
+}
+
+.chat-component-card__fields {
+  margin: 0 0 8px;
+  display: grid;
+  grid-template-columns: auto 1fr;
+  gap: 2px 12px;
+}
+
+.chat-component-card__field {
+  display: contents;
+}
+
+.chat-component-card__field dt {
+  color: var(--text-muted, inherit);
+}
+
+.chat-component-card__field dd {
+  margin: 0;
+}
+
+.chat-component-card__actions {
+  display: flex;
+  gap: 8px;
+}
