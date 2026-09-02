@@ -43,38 +43,45 @@ const twilioSmsPlugin = {
 
   async register(api: OpenClawPluginApi) {
     // ------------------------------------------------------------------
-    // DISABLED BY CONSTRUCTION — [PRINCIPAL-RULED 2026-08-21]:
-    // "WhatsApp/SMS is a staging-only EXPERIMENT. SMS is OUT OF SCOPE."
-    // (#216 removed the D0 sms capability row; #223 executes the CTO's
-    // orphan disposition, dispatch #7057.)
+    // EXPLICIT-ENABLE, BY CONSTRUCTION — SYN-272 R1 [PRINCIPAL-RULED
+    // 2026-08-27, cto-loop; recorded in CTO dispatch #7596 + SYN-272
+    // Provenance]: "productionize the WhatsApp + SMS chat surfaces… This
+    // SUPERSEDES the earlier SMS de-funding ruling."
     //
-    // WHY A FLAG AND NOT CREDENTIAL-ABSENCE: before this gate, the channel
-    // was "inert until credential-complete" — inert BY ACCIDENT. Provision
-    // Twilio credentials for ANY unrelated reason (a support line, a test)
-    // and an unowned SMS transport activates. This gate makes the inertness
-    // BY CONSTRUCTION: credential presence alone can never activate it.
+    // HISTORY, kept because the gate's shape came from it: #223 shipped
+    // this gate under the 2026-08-21 de-funding ruling as
+    // `enableDespiteSmsOutOfScopeRuling` — a labeled disable, not a
+    // deletion, precisely so a supersession would be a RENAME and a
+    // basis-comment rewrite instead of a rebuild. That day arrived
+    // (2026-08-27); this is that rename. The anticipated ruling exists,
+    // so the against-the-ruling WARN is now an INFO.
     //
-    // STRUCTURAL DEATH, so this does not reopen on taste: SMS pairing binds
-    // channel="sms" via SJ's A7_CHANNELS allowlist, which the principal
-    // explicitly declined to fund — SMS is UNPAIRABLE, so an enabled
-    // transport still could not authenticate anyone.
+    // WHY A FLAG AND NOT CREDENTIAL-ABSENCE (unchanged from #223, still
+    // load-bearing): "inert until credential-complete" is inert BY
+    // ACCIDENT — provision Twilio credentials for ANY unrelated reason
+    // and an unowned transport activates. The flag makes both states BY
+    // CONSTRUCTION: never inert-by-accident, never active-by-accident
+    // (SYN-272 precondition 2). Strict equality: truthy strings/1 stay
+    // disabled — fail-closed on sloppy config.
     //
-    // DO NOT flip this flag without a NEW principal ruling. The flag name is
-    // the acknowledgement: enabling requires writing the ruling's name.
-    // The code below is deliberately KEPT (retirement is a bigger call;
-    // a labeled disable is reversible and honest — CTO #7057).
+    // GO-LIVE remains gated beyond this flag by the PVR's other arms:
+    // the D0 sms row (R2), SJ's A7_CHANNELS (R3), TCPA consent record
+    // (R5), and the behavioral pin in compliance.ts (a STOP'd number
+    // receives zero further messages) — this flag funds the surface;
+    // it does not skip the gates.
     // ------------------------------------------------------------------
-    if (api.pluginConfig?.enableDespiteSmsOutOfScopeRuling !== true) {
+    if (api.pluginConfig?.smsEnabled !== true) {
       api.logger.info(
-        "twilio: DISABLED BY CONSTRUCTION [PRINCIPAL-RULED 2026-08-21: SMS out of scope, " +
-          "unfunded; unpairable via A7_CHANNELS] — no channel, no webhook, regardless of " +
-          "credentials. Re-enabling requires a NEW ruling + pluginConfig.",
+        "twilio: SMS surface NOT ENABLED [SYN-272 R1: explicit-enable by construction] — " +
+          "no channel, no webhook, regardless of credentials. Enable via " +
+          "pluginConfig.smsEnabled: true (PVR channel-surfaces, P0).",
       );
       return;
     }
-    api.logger.warn(
-      "twilio: enableDespiteSmsOutOfScopeRuling is SET — the SMS surface is ACTIVE against " +
-        "the 2026-08-21 ruling. This must be backed by a new principal ruling.",
+    api.logger.info(
+      "twilio: smsEnabled — SMS surface ACTIVE under SYN-272 [PRINCIPAL-RULED 2026-08-27; " +
+        "supersedes the 2026-08-21 de-funding ruling]. Go-live gates (D0 row, A7, TCPA " +
+        "record, STOP pin) apply downstream.",
     );
 
     // Durable opt-out store — ADR 0001: OpenClaw's OWN Postgres (DATABASE_URL), never the Journal PHI DB.

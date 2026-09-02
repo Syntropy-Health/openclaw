@@ -435,15 +435,64 @@ type AdapterCase = {
   extraBadInbounds: Array<[string, () => unknown]>;
 };
 
+// SYN-272 R2: sms fixtures restored verbatim from 48ec6c6a1^ with the case.
+const SMS_MESSAGE_SID = "SM00000000000000000000000000000001";
+
+function twilioForm(fields: Record<string, string>): URLSearchParams {
+  return new URLSearchParams(fields);
+}
+
+function smsInbound(sender: string | null): URLSearchParams {
+  const fields: Record<string, string> = {
+    To: STORE_SMS_NUMBER,
+    MessageSid: SMS_MESSAGE_SID,
+    Body: "hi",
+    NumMedia: "0",
+  };
+  if (sender !== null) {
+    fields.From = sender;
+  }
+  return twilioForm(fields);
+}
+
+/** One Cloud API `entry[]` element carrying the given messages. */
+
 const CASES: AdapterCase[] = [
-  // #216 (2026-08-21): the `voice` and `sms` cases are RETIRED WITH THEIR D0
-  // ROWS — sms [PRINCIPAL-RULED: out of scope], voice [CTO-JUDGEMENT #6654:
-  // unpairable today; NOT principal-ruled; reversible]. Their adapters remain
-  // in-tree (voice is same-day restorable) but fail closed at construction
-  // with no capability row — pinned in the '#216 — retired channels' block
-  // below — and this suite's house rule (§7: no vi.mock, pure DI) leaves no
-  // legitimate way to construct them without a row. When voice returns,
-  // restore its case from git history at this commit.
+  // #216 (2026-08-21) retired the `voice` and `sms` cases with their D0 rows.
+  // SYN-272 R2 (2026-09-02, [PRINCIPAL-RULED 2026-08-27] supersession —
+  // channel-surfaces PVR) RESTORES the sms case, verbatim from git history
+  // at 48ec6c6a1^ exactly as the retirement comment instructed — the QG4 F5
+  // binding (row set == case set) is what forced this restoration to ride
+  // the row, which is that gate doing its job. `voice` stays retired
+  // [CTO-JUDGEMENT #6654 — untouched by the supersession]; when voice
+  // returns, restore its case from git history at 48ec6c6a1^.
+  {
+    kind: "sms",
+    make: ({ companion, mode = "ok", optedOut, storeThrows }) => {
+      const hits: Hit[] = [];
+      const adapter = createTwilioSmsAdapter({
+        session: { toE164: PEER_E164, companionE164: companion },
+        config: TWILIO_CONFIG,
+        store: makeStore(optedOut, storeThrows),
+        fetchImpl: makeSmsTransport(hits, mode),
+      });
+      return { adapter, hits };
+    },
+    expectedCompanion: () => undefined,
+    routeWithCompanion: { text: "inline", link: "inline", otp: "inline" },
+    routeWithoutCompanion: { text: "inline", link: "inline", otp: "inline" },
+    expectedInlineSink: "twilio-rest",
+    expectedCompanionSink: "twilio-rest",
+    expectedInlineTo: PEER_E164,
+    expectedArtifact: (payload) => literalOf(payload),
+    denyInlineLink: (caps) => {
+      caps.inline_link = false;
+    },
+    nativeInbound: () => smsInbound(PEER_E164),
+    nativeId: SMS_MESSAGE_SID,
+    inboundWithSender: smsInbound,
+    extraBadInbounds: [["an inbound that is not URLSearchParams", () => ({ From: PEER_E164 })]],
+  },
   {
     kind: "whatsapp",
     make: ({ companion, mode = "ok", optedOut, storeThrows }) => {
@@ -799,17 +848,19 @@ describe.each(CASES.map((c) => [c.kind, c] as const))(
 // ---------------------------------------------------------------------------
 
 /** The row set Phase 7 is approved for. Adding a row must be a DELIBERATE, test-visible act. */
-// #216: sms removed [PRINCIPAL-RULED], voice removed [CTO-JUDGEMENT #6654].
-const APPROVED_CHANNEL_KINDS = ["whatsapp"];
+// #216: sms + voice removed. SYN-272 R2: sms RESTORED [PRINCIPAL-RULED
+// 2026-08-27 supersession]; voice stays removed [CTO-JUDGEMENT #6654].
+const APPROVED_CHANNEL_KINDS = ["sms", "whatsapp"];
 
 /**
  * Ids a future channel would plausibly be added under, plus the prototype-chain
  * keys that must never resolve to a truthy non-row. Every one must be `null`.
  */
 const NON_ROW_IDS = [
-  // #216: the retired channels are now non-rows — bare ids included, so the
-  // denial itself is inside the fail-closed sweep.
-  "sms",
+  // #216 put both retired bare ids here; SYN-272 R2 removes bare "sms"
+  // (it is a ROW again — asserted in the row-set lock above). Near-miss
+  // forms ("SMS", " sms", "sms ") STAY: restoration must never buy a
+  // permissive normalization. voice remains a non-row [#6654].
   "voice",
   "email",
   "telegram",
@@ -840,7 +891,7 @@ describe("D0 capability table", () => {
   // happen to name would let a fourth row ship unnoticed — `knownChannelIds()` is
   // derived from the table, so this pins the table's CARDINALITY, not a sample.
   it("locks the D0 row SET — adding a channel is a deliberate, test-visible act", () => {
-    expect(knownChannelIds()).toStrictEqual(APPROVED_CHANNEL_KINDS);
+    expect(knownChannelIds().toSorted()).toStrictEqual(APPROVED_CHANNEL_KINDS.toSorted());
     // QG4 F5: the D0 row set and the conformance-case set must move TOGETHER —
     // restoring a channel's row without restoring its behavioral case would
     // otherwise be satisfiable by editing the literal above alone, shipping a
@@ -892,8 +943,12 @@ describe("D0 capability table", () => {
 // absence.
 // ---------------------------------------------------------------------------
 
-describe("#216 — retired channels fail closed at construction", () => {
-  it("createTwilioSmsAdapter throws: no capability row [PRINCIPAL-RULED removal]", () => {
+describe("#216/SYN-272 — construction gating tracks the row set", () => {
+  it("createTwilioSmsAdapter CONSTRUCTS [SYN-272 R2: row restored under the 2026-08-27 supersession]", () => {
+    // The #216 pin asserted the throw; the SAME provenance discipline flips
+    // it: with the row restored, construction succeeds. The voice pin below
+    // still proves the deny-arm exists — the gate discriminates, it did not
+    // rot open.
     expect(() =>
       createTwilioSmsAdapter({
         session: { toE164: PEER_E164, companionE164: undefined },
@@ -901,7 +956,7 @@ describe("#216 — retired channels fail closed at construction", () => {
         store: makeStore(),
         fetchImpl: makeSmsTransport([], "ok"),
       }),
-    ).toThrow(/no capability row for channel "sms"/);
+    ).not.toThrow();
   });
 
   it("createTwilioVoiceAdapter throws: no capability row [CTO-JUDGEMENT #6654 removal]", () => {
