@@ -30,17 +30,24 @@ import type { ChannelCapabilities } from "./channel-adapter.js";
  * field exists so the shape is uniform across channels.
  */
 const CAPABILITY_TABLE: Record<string, ChannelCapabilities> = {
-  // `sms`: REMOVED [PRINCIPAL-RULED, 2026-08-21] — "WhatsApp/SMS is a
-  // staging-only EXPERIMENT. SMS is OUT OF SCOPE." SCOPE OF THIS REMOVAL,
-  // stated precisely (QG4 F1): this is the D0 DECLARATION ceasing to
-  // advertise sms — the fail-closed lookup denies adapter CONSTRUCTION, and
-  // nothing on the live inbound path reads this table (extensions/twilio's
-  // inbound handling is a separate surface, untouched here and inert on
-  // staging only because no channel credentials exist there). Do not cite
-  // this comment as the enforcement point of the ruling on a live turn.
-  // Reinstating sms needs the ruling revisited AND the E.164/pairing design
-  // funded (no phone column exists anywhere in SJ) — a product decision,
-  // not a config flip.
+  // `sms`: RESTORED under SYN-272 R2 [PRINCIPAL-RULED 2026-08-27,
+  // cto-loop — recorded in CTO dispatch #7596 + SYN-272 Provenance:
+  // "productionize WhatsApp + SMS… This SUPERSEDES the earlier SMS
+  // de-funding ruling"]. History, kept because the provenance discipline
+  // cuts both ways: #216 REMOVED this row under the 2026-08-21 de-funding
+  // ruling ("staging-only EXPERIMENT. SMS is OUT OF SCOPE"), noting
+  // reinstatement "needs the ruling revisited AND the E.164/pairing design
+  // funded — a product decision, not a config flip." Both conditions were
+  // met by the 2026-08-27 supersession + the channel-surfaces PVR (R3
+  // funds A7 pairing; R5 the consent record). Row shape per PVR R2:
+  // phi_approved:false is PERMANENT for sms — the body carries no PHI
+  // ever (notification + tracked /r/ link into the authed app; PVR R6 SMS
+  // arm) — so unlike whatsapp there is NO post-BAA flip on this row.
+  sms: {
+    inline_link: true,
+    inline_text: true,
+    phi_approved: false,
+  },
   //
   // `voice`: REMOVED [CTO-JUDGEMENT, dispatch #6654 — NOT principal-ruled;
   // the "and voice" in the relay was an inference inside a PRINCIPAL RULED

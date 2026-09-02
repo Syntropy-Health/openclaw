@@ -1,13 +1,15 @@
 /**
- * #223 — the SMS surface is inert BY CONSTRUCTION, not by credential absence.
+ * SYN-272 R1 (renamed from #223) — the SMS surface is explicit-enable BY
+ * CONSTRUCTION, not credential-activated.
  *
- * THE ACCIDENT THIS PREVENTS (CTO ruling #7057): before this gate, the
- * channel was "inert until credential-complete" — so provisioning Twilio
- * credentials for ANY unrelated reason would activate an unowned SMS
- * transport that policy has ruled out of scope. The red arm below is the
- * ruling's own acceptance test: FULL VALID CREDENTIALS PROVISIONED, and the
- * surface must still refuse — the guard observed firing on exactly the
- * accident it prevents.
+ * THE ACCIDENT THIS PREVENTS (unchanged across the supersession): the
+ * channel must never be "inert until credential-complete" — provisioning
+ * Twilio credentials for ANY unrelated reason must not activate the
+ * transport. The red arm is the same acceptance test #223 shipped: FULL
+ * VALID CREDENTIALS PROVISIONED, and the surface still refuses without the
+ * flag. What changed under SYN-272 [PRINCIPAL-RULED 2026-08-27]: the flag
+ * is now `smsEnabled` (funding the surface is sanctioned policy, not an
+ * against-the-ruling override), and the enabled path logs INFO, not WARN.
  */
 
 import type { OpenClawPluginApi } from "openclaw/plugin-sdk";
@@ -46,7 +48,7 @@ function fakeApi(pluginConfig: Record<string, unknown> = {}) {
   return { api, logs, registered };
 }
 
-describe("#223 — constructive disable [PRINCIPAL-RULED 2026-08-21]", () => {
+describe("SYN-272 R1 — explicit-enable by construction (supersedes #223's ruling basis)", () => {
   it("RED ARM: full valid credentials provisioned → the surface STILL refuses", async () => {
     const prev: Record<string, string | undefined> = {};
     for (const [k, v] of Object.entries(FULL_CREDS_ENV)) {
@@ -54,7 +56,7 @@ describe("#223 — constructive disable [PRINCIPAL-RULED 2026-08-21]", () => {
       process.env[k] = v;
     }
     try {
-      const { api, logs, registered } = fakeApi(); // no override flag
+      const { api, logs, registered } = fakeApi(); // no enable flag
       await twilioSmsPlugin.register(api);
 
       // The accident, prevented: nothing registered, despite credentials.
@@ -63,8 +65,8 @@ describe("#223 — constructive disable [PRINCIPAL-RULED 2026-08-21]", () => {
       // The refusal is LOUD and carries the ruling label — greppable basis,
       // not silence (a silent disable reads as "nothing to report").
       const line = logs.info.join("\n");
-      expect(line).toContain("DISABLED BY CONSTRUCTION");
-      expect(line).toContain("PRINCIPAL-RULED 2026-08-21");
+      expect(line).toContain("NOT ENABLED");
+      expect(line).toContain("SYN-272 R1");
       expect(line).toContain("regardless of credentials");
     } finally {
       for (const [k, v] of Object.entries(prev)) {
@@ -74,21 +76,31 @@ describe("#223 — constructive disable [PRINCIPAL-RULED 2026-08-21]", () => {
     }
   });
 
-  it("the disable is the FLAG, not breakage: the named override registers the surface (and warns)", async () => {
-    // The reversibility half of the ruling: a labeled disable, not a broken
-    // extension. The flag name is the acknowledgement — enabling requires
-    // writing the ruling into config.
-    const { api, logs, registered } = fakeApi({ enableDespiteSmsOutOfScopeRuling: true });
+  it("the disable is the FLAG, not breakage: smsEnabled registers the surface with an INFO (not WARN)", async () => {
+    // Post-supersession: enabling is sanctioned policy (SYN-272), so the
+    // active path is INFO-level and cites the ruling; the WARN-shaped
+    // "ACTIVE against the ruling" line is gone WITH its ruling.
+    const { api, logs, registered } = fakeApi({ smsEnabled: true });
     await twilioSmsPlugin.register(api);
 
     expect(registered.channels).toBe(1);
     expect(registered.routes).toBe(1);
-    expect(logs.warn.join("\n")).toContain("ACTIVE against");
+    expect(logs.info.join("\n")).toContain("ACTIVE under SYN-272");
+    expect(logs.warn.join("\n")).not.toContain("ACTIVE against");
+  });
+
+  it("the RETIRED #223 flag name no longer enables anything (a rename, not an alias)", async () => {
+    // Two names for one gate would be two truths that can disagree; the old
+    // name must be dead, not deprecated.
+    const { api, registered } = fakeApi({ enableDespiteSmsOutOfScopeRuling: true });
+    await twilioSmsPlugin.register(api);
+    expect(registered.channels).toBe(0);
+    expect(registered.routes).toBe(0);
   });
 
   it("a truthy-but-not-true flag value does NOT enable (fail-closed on sloppy config)", async () => {
     for (const bad of ["true", 1, "yes"]) {
-      const { api, registered } = fakeApi({ enableDespiteSmsOutOfScopeRuling: bad });
+      const { api, registered } = fakeApi({ smsEnabled: bad });
       await twilioSmsPlugin.register(api);
       expect(registered.channels, String(bad)).toBe(0);
       expect(registered.routes, String(bad)).toBe(0);

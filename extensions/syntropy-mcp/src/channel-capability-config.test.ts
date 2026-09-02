@@ -8,8 +8,13 @@ import { capabilitiesFor, knownChannelIds } from "./channel-capability-config.js
 
 // ---------------------------------------------------------------------------
 // SEALED challenge suite — Phase 0, Task 0.2 (D0 capability config), amended
-// by Phase 7 Task 7.0 (voice.inline_text flip, CTO ruling flag1 #5762) and by
-// #216 (2026-08-21): the `sms` and `voice` rows are REMOVED from the table.
+// by Phase 7 Task 7.0 (voice.inline_text flip, CTO ruling flag1 #5762), by
+// #216 (2026-08-21: `sms` and `voice` rows REMOVED), and by SYN-272 R2
+// (2026-09-02: `sms` RESTORED under the [PRINCIPAL-RULED 2026-08-27]
+// supersession — channel-surfaces PVR; phi_approved:false PERMANENT for
+// sms per PVR R6). `voice` stays removed (its #6654 basis is untouched by
+// the supersession; the flag1 restoration recipe below remains the
+// reference).
 //
 // #216 PROVENANCE, recorded because the distinction is load-bearing:
 //   * sms   — [PRINCIPAL-RULED] "WhatsApp/SMS is a staging-only EXPERIMENT.
@@ -24,8 +29,8 @@ import { capabilitiesFor, knownChannelIds } from "./channel-capability-config.js
 //             preserved at the bottom of this file as the reference.
 //
 // Invariants under challenge:
-//   * whatsapp CAN render links + text inline; it is the ONLY row.
-//   * sms and voice are DENIED at this lookup — which gates adapter
+//   * whatsapp and sms CAN render links + text inline; they are the ONLY rows.
+//   * voice is DENIED at this lookup — which gates adapter
 //     CONSTRUCTION. Stated precisely (QG4 F1): no live inbound path reads
 //     this table, so this is the D0 DECLARATION ceasing to advertise, not
 //     the enforcement point of the ruling on a live turn.
@@ -50,14 +55,25 @@ describe("capabilitiesFor — known channels (post-#216: whatsapp is the only ro
     });
   });
 
-  it("the table exposes EXACTLY the whatsapp row — nothing snuck back in", () => {
-    expect(knownChannelIds()).toEqual(["whatsapp"]);
+  it("the table exposes EXACTLY the whatsapp + sms rows — nothing else snuck back in", () => {
+    // sms joined under SYN-272 R2; voice must NOT ride along (its removal
+    // basis, #6654, is untouched by the supersession).
+    expect(knownChannelIds().sort()).toEqual(["sms", "whatsapp"]);
   });
 });
 
-describe("#216 — retired channels are DENIED (the ruling observed firing, not assumed)", () => {
-  it("sms resolves to null [PRINCIPAL-RULED: out of scope]", () => {
-    expect(capabilitiesFor("sms")).toBeNull();
+describe("#216/SYN-272 — voice stays DENIED; sms restored (each ruling observed firing, not assumed)", () => {
+  it("sms resolves to the R2 row [PRINCIPAL-RULED 2026-08-27 supersession — SYN-272]", () => {
+    // Flipped from the #216 null-pin UNDER THE PVR'S AUTHORITY (the same
+    // provenance discipline that installed the null-pin removes it).
+    // phi_approved:false is PERMANENT for sms (PVR R6 SMS arm) — this
+    // exact-shape assertion is the restoration binding: a future editor
+    // cannot flip sms phi without failing a test that names the policy.
+    expect(capabilitiesFor("sms")).toStrictEqual({
+      inline_link: true,
+      inline_text: true,
+      phi_approved: false,
+    });
   });
 
   it("voice resolves to null [CTO-JUDGEMENT #6654: unpairable today, not principal-ruled]", () => {
