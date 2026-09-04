@@ -47,6 +47,13 @@ export const whatsappPlugin: ChannelPlugin<ResolvedWhatsAppAccount> = {
   agentTools: () => [getWhatsAppRuntime().channel.whatsapp.createLoginTool()],
   pairing: {
     idLabel: "whatsappSenderId",
+    // SYN-272 P1 (CTO ruling #8091): bind the pairing-store path to the SAME
+    // normalizer the dock's config.formatAllowFrom uses — before this, the
+    // store kept raw-trimmed entries while the dock normalized, two
+    // normalization truths for one channel. Null (unnormalizable) falls back
+    // to the trimmed input so a legitimate-but-unknown shape is preserved
+    // rather than silently dropped (the store's own empty-filter governs).
+    normalizeAllowEntry: (entry) => normalizeWhatsAppTarget(entry) ?? entry.trim(),
   },
   capabilities: {
     chatTypes: ["direct", "group"],
