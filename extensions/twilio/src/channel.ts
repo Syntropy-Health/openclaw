@@ -11,6 +11,7 @@
  */
 
 import type { ChannelPlugin } from "openclaw/plugin-sdk";
+import { normalizeE164 } from "openclaw/plugin-sdk";
 import {
   resolveSmsAccount,
   smsConfigAdapter,
@@ -46,6 +47,17 @@ export function createSmsPlugin(deps: SmsPluginDeps): ChannelPlugin<ResolvedSmsA
       blockStreaming: true,
     },
     reload: { configPrefixes: ["channels.sms"] },
+    // SYN-272 P1 (CTO ruling #8091): the pairing adapter is PAIRABILITY
+    // itself — listPairingChannels() filters on this key, so its absence
+    // made sms structurally unpairable; and without normalizeAllowEntry the
+    // store kept raw-trimmed entries ("+1 (555) 123-4567") that could never
+    // match the E.164 the inbound path produces ("+15551234567") — pairing
+    // green, matching dead, no suite red. normalizeE164 is the SAME
+    // normalizer the send/inbound paths use: one seam, one token.
+    pairing: {
+      idLabel: "phone number (E.164)",
+      normalizeAllowEntry: (entry) => normalizeE164(entry),
+    },
     config: smsConfigAdapter,
     outbound: buildSmsOutboundAdapter({
       resolveConfig: (cfg) => resolveSmsAccount(cfg).config,
