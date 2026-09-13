@@ -12,6 +12,10 @@
 
 import type { OpenClawPluginApi } from "openclaw/plugin-sdk";
 import type postgres from "postgres";
+// SYN-281: the SINGLE vault-aware writer of `syntropy_tokens`. This consumer
+// must delegate to it, never hand-roll a second (vault-blind) INSERT.
+import { upsertSyntropyToken } from "../../syntropy/src/db.js";
+import type { SyntropyVault } from "../../syntropy/src/vault.js";
 import {
   createUser,
   findUserByChannelPeer,
@@ -34,6 +38,15 @@ export type IdentityCommandDeps = {
   sql: postgres.Sql;
   authConfig: AuthConfig | undefined;
   ensureReady: () => Promise<void>;
+  /**
+   * SYN-281: resolves the vault client LAZILY. It is a getter, NOT a value,
+   * because register() resolves the vault inside ensureReady() (an RPC
+   * round-trip it must not await at registration) — AFTER these handlers are
+   * registered and their deps destructured. A value would capture `null`
+   * forever and silently downgrade every production pairing to the plaintext
+   * path (the exact defect this closes). Guarded by an executable test.
+   */
+  getVault: () => SyntropyVault | null;
   /** Pending !identify results so !verify can use the email as user_identifier. */
   pendingIdentify: Map<string, { email: string; userId: string; expiresAt: number }>;
 };
@@ -131,21 +144,24 @@ export function registerIdentityCommands(api: OpenClawPluginApi, deps: IdentityC
         await linkExternalId(sql, existingLink.id, verified.externalId, channel, peerId);
       }
 
-      // Store Syntropy auth token if present in the pairing response
+      // Store Syntropy auth token if present in the pairing response.
+      // SYN-281: route through upsertSyntropyToken — the single vault-aware
+      // producer — never a local INSERT. `deps.getVault()` is read HERE (after
+      // ensureReady() has resolved it), not captured at registration.
+      let tokenPersistFailed = false;
       if (verified.authToken) {
         try {
-          await sql`
-            INSERT INTO syntropy_tokens (user_id, auth_token, origin)
-            VALUES (${user.id}, ${verified.authToken}, 'pairing')
-            ON CONFLICT (user_id) DO UPDATE
-              SET auth_token = EXCLUDED.auth_token,
-                  origin     = EXCLUDED.origin,
-                  updated_at = now()
-          `;
+          await upsertSyntropyToken(sql, deps.getVault(), user.id, verified.authToken, "pairing");
           api.logger.info(`persist-user-identity: stored Syntropy auth token for user ${user.id}`);
         } catch (tokenErr) {
-          // Non-fatal: syntropy_tokens table may not exist yet if syntropy plugin isn't loaded
-          api.logger.warn(`persist-user-identity: could not store Syntropy token: ${tokenErr}`);
+          // NOT a silent warn-and-continue: a pairing that reports success while
+          // the token never landed is indistinguishable-from-success. Log at
+          // ERROR and surface it in the reply. Do NOT rethrow — the identity
+          // link already succeeded and discarding it would be worse.
+          tokenPersistFailed = true;
+          api.logger.error(
+            `persist-user-identity: FAILED to store Syntropy token for user ${user.id}: ${tokenErr}`,
+          );
         }
       }
 
@@ -162,7 +178,11 @@ export function registerIdentityCommands(api: OpenClawPluginApi, deps: IdentityC
         text:
           `Identity verified! Welcome${name ? `, ${name}` : ""}.\n` +
           `Your user ID: ${user.id}\n` +
-          `Linked channels: ${channelList}`,
+          `Linked channels: ${channelList}` +
+          // SYN-281: surface a token-persist failure rather than a clean success.
+          (tokenPersistFailed
+            ? "\n\u26a0\ufe0f Note: your Syntropy access token could not be saved — please re-pair to enable tool actions."
+            : ""),
       };
     },
   });
