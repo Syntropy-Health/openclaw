@@ -1,6 +1,6 @@
 // AUTO-GENERATED from apps/Syntropy-Journals/schemas/manifest/*.manifest.yaml — DO NOT EDIT.
-// Provenance: SJ manifest-tree sha256 14af926b90103bfbaffab5362fdffbcf6b5d2018b53c60cac64461e302f5827b (11 manifest-tree files hashed; 9 live tools emitted)
-// Integrity: self sha256 fbcb00a046aec1ee84d7de81a80fff73bc46c1755edd9f9719ed48a22d4c29e4
+// Provenance: SJ manifest-tree sha256 66c1c725070cdae2f223d855792cd3890d7afd4cee9ef3906206ccd761dc5c7a (12 manifest-tree files hashed; 10 live tools emitted)
+// Integrity: self sha256 e1d927bdbf7bd61c094c21022eb1db8237067c2c8dd281d8504c993891108e26
 // Regenerate in the SyntropyHealth-Applications monorepo (the parent repo that
 // pins this one as apps/openclaw): `npm run codegen:openclaw-tool-roster` in its
 // shared/schemas/ directory. The generator does not exist in this repository.
@@ -51,7 +51,7 @@ export const TOOL_ROSTER = [
       "User describes a meal in natural language and you need structured macros before deciding whether / how to log it.",
     doNotCall:
       "User has already given structured food name + macros — go straight to ``syntropy_log_food``. Or user is asking about past intake — use ``syntropy_health_snapshot``.",
-    availableChannels: ["web", "mobile", "sms", "voice", "whatsapp", "telegram"],
+    availableChannels: ["web", "mobile", "whatsapp", "telegram"],
   },
   {
     name: "syntropy_diet_gap",
@@ -62,7 +62,7 @@ export const TOOL_ROSTER = [
     whenToCall:
       'User asks "what am I missing", "am I getting enough protein", "what should I eat more of", or any macro-balance question.',
     doNotCall: "User wants an overall score, not a gap analysis — use ``syntropy_diet_score``.",
-    availableChannels: ["web", "mobile", "sms", "voice", "whatsapp", "telegram"],
+    availableChannels: ["web", "mobile", "whatsapp", "telegram"],
   },
   {
     name: "syntropy_diet_score",
@@ -74,7 +74,7 @@ export const TOOL_ROSTER = [
       'User asks "how am I doing", "how\'s my diet", "what\'s my score", or any progress / fulfillment / adherence question over a time window.',
     doNotCall:
       "User wants the macro GAP (over/under targets) — use ``syntropy_diet_gap`` instead. Or for a full multi-axis health snapshot — use ``syntropy_health_snapshot``.",
-    availableChannels: ["web", "mobile", "sms", "voice", "whatsapp", "telegram"],
+    availableChannels: ["web", "mobile", "whatsapp", "telegram"],
   },
   {
     name: "syntropy_health_profile",
@@ -85,7 +85,7 @@ export const TOOL_ROSTER = [
     whenToCall:
       "Once per session, ideally early — agent needs allergies + goals + conditions context before personalising any recommendation.",
     doNotCall: "Already called this session and the profile hasn't been edited.",
-    availableChannels: ["web", "mobile", "sms", "voice", "whatsapp", "telegram"],
+    availableChannels: ["web", "mobile", "whatsapp", "telegram"],
   },
   {
     name: "syntropy_health_snapshot",
@@ -97,7 +97,7 @@ export const TOOL_ROSTER = [
       'User asks for a summary, status, "how I\'m doing overall", multi-axis health check, or wants context before making a recommendation that touches multiple dimensions.',
     doNotCall:
       "User wants a single dimension (use ``syntropy_diet_score`` / ``syntropy_diet_gap``) or wants raw check-ins (use ``syntropy_my_checkins``).",
-    availableChannels: ["web", "mobile", "sms", "voice", "whatsapp", "telegram"],
+    availableChannels: ["web", "mobile", "whatsapp", "telegram"],
   },
   {
     name: "syntropy_log_checkin",
@@ -109,7 +109,7 @@ export const TOOL_ROSTER = [
       'User mentions mood, energy, sleep quality, symptoms, body signal, medication taken, or any "checking in" / "logging" semantics — even when the framing is casual.',
     doNotCall:
       "User is asking a question about past check-ins (use ``syntropy_my_checkins``) or wants to log a specific food item (use ``syntropy_log_food``).",
-    availableChannels: ["web", "mobile", "sms", "voice", "whatsapp", "telegram"],
+    availableChannels: ["web", "mobile", "whatsapp", "telegram"],
   },
   {
     name: "syntropy_log_food",
@@ -121,7 +121,7 @@ export const TOOL_ROSTER = [
       'User reports eating something — explicitly ("I had X for lunch") or descriptively ("just ate a salad"). Also use when extracting one food at a time from a multi-item meal description.',
     doNotCall:
       "User is asking ABOUT past food entries (use ``syntropy_my_checkins`` or ``syntropy_health_snapshot``) or wants nutritional breakdown of natural-language meal text (use ``syntropy_analyze_food``).",
-    availableChannels: ["web", "mobile", "sms", "voice", "whatsapp", "telegram"],
+    availableChannels: ["web", "mobile", "whatsapp", "telegram"],
   },
   {
     name: "syntropy_my_checkins",
@@ -133,7 +133,7 @@ export const TOOL_ROSTER = [
       'User asks about past check-ins explicitly ("what have I logged", "show my recent entries"). Or agent needs raw history before a pattern-finding task that the aggregated snapshot doesn\'t cover.',
     doNotCall:
       "User wants aggregated metrics — use ``syntropy_health_snapshot``, ``syntropy_diet_score``, or ``syntropy_diet_gap``.",
-    availableChannels: ["web", "mobile", "sms", "voice", "whatsapp", "telegram"],
+    availableChannels: ["web", "mobile", "whatsapp", "telegram"],
   },
   {
     name: "syntropy_my_protocols",
@@ -145,7 +145,19 @@ export const TOOL_ROSTER = [
       "User asks about their subscribed protocols, supplement stack cadence, or active wellness regimens.",
     doNotCall:
       "User wants the broader health profile (allergies, conditions, goals) — use ``syntropy_health_profile``.",
-    availableChannels: ["web", "mobile", "sms", "voice", "whatsapp", "telegram"],
+    availableChannels: ["web", "mobile", "whatsapp", "telegram"],
+  },
+  {
+    name: "syntropy_peptide_intake_set_fields",
+    mcpToolName: "peptide_intake_set_fields",
+    description:
+      "Save fields of the user's clinician-gated PEPTIDE / GLP-1 Rx intake incrementally as they come up — partial-MERGE into the ``peptide`` JSONB blob (draft-only; never submits, checks out, or touches the lockout). Only known peptide-intake fields are accepted; unknown keys are reported back in ``rejected`` (never written). Structure/function-safe — collects intake facts + eligibility/consent acknowledgements only.",
+    scope: "both",
+    whenToCall:
+      "User volunteers a goal, condition, medication, allergy, or eligibility acknowledgement relevant to their clinician-reviewed peptide / GLP-1 Rx intake. Incremental + resumable — call whenever new peptide-intake facts surface in the conversation.",
+    doNotCall:
+      "User wants to SUBMIT / check out / finalize the peptide intake (this tool is draft-only), or the field belongs to the general supplement-formula intake (use ``personalized_formula_patch``).",
+    availableChannels: ["web", "mobile", "whatsapp", "telegram"],
   },
 ] as const satisfies readonly RosterEntry[];
 

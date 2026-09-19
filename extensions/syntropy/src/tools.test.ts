@@ -30,7 +30,10 @@ import { createAllTools, NOT_YET_IMPLEMENTED, TOOL_DEFS } from "./tools.js";
  * agent's tool surface: say so in the PR.
  */
 it("NOT_YET_IMPLEMENTED is exactly the consciously-deferred set", () => {
-  expect([...NOT_YET_IMPLEMENTED].sort()).toEqual(["syntropy_my_protocols"]);
+  expect([...NOT_YET_IMPLEMENTED].sort()).toEqual([
+    "syntropy_my_protocols",
+    "syntropy_peptide_intake_set_fields",
+  ]);
 });
 
 const EXPECTED_TOOL_NAMES: readonly string[] = ROSTER_TOOL_NAMES.filter(

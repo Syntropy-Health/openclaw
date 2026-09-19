@@ -114,6 +114,11 @@ interface ToolDef {
  */
 export const NOT_YET_IMPLEMENTED = [
   "syntropy_my_protocols",
+  // SYN-272: rostered at SJ 742cf825 but deferred — exposing a new intake tool
+  // on the agent surface is a separate product decision (params + handler +
+  // claim-scope), not part of the schema-governance drift sync. Move to a
+  // TOOL_LOCALS entry to implement it.
+  "syntropy_peptide_intake_set_fields",
 ] as const satisfies readonly RosterToolName[];
 
 type PendingName = (typeof NOT_YET_IMPLEMENTED)[number];
