@@ -1,4 +1,4 @@
-import type { OpenClawPluginApi } from "openclaw/plugin-sdk";
+import { createRetryingInit, type OpenClawPluginApi } from "openclaw/plugin-sdk";
 // Gateway Clerk-verify + session deny-list — extension→src deep import per the
 // established convention (kapso precedent); src never imports extensions.
 import { authorizeClerkJwt, resolveClerkAuth } from "../../../src/gateway/auth.js";
@@ -59,22 +59,17 @@ const persistUserIdentityPlugin = {
 
     api.logger.info("persist-user-identity: connecting to PostgreSQL");
     const sql = createPgClient(databaseUrl, api.logger);
-    let schemaReady = false;
-    let initError: unknown = null;
     // SYN-281: resolved lazily inside ensureReady() (vaultRpcsInstalled is an
     // RPC round-trip register() must not await). Null → legacy plaintext path
     // (dev only). Read via the getVault getter passed to the commands, NEVER
     // captured as a value — capturing here would pin null forever.
     let vault: SyntropyVault | null = null;
 
-    async function ensureReady() {
-      if (schemaReady) {
-        return;
-      }
-      if (initError) {
-        throw initError;
-      }
-      try {
+    // Connect + schema + vault detection, RETRIED with backoff after a failure
+    // (was cached for the life of the process — a transient boot failure turned
+    // identity binding off until restart).
+    const ensureReady = createRetryingInit(
+      async () => {
         await sql`SELECT 1`;
         await ensureUserSchema(sql);
         // SYN-281: resolve the vault client once, here. RPCs installed → vault
@@ -89,14 +84,10 @@ const persistUserIdentityPlugin = {
               "absent; install supabase-migrations to enable encryption at rest)",
           );
         }
-        schemaReady = true;
         api.logger.info("persist-user-identity: schema ready");
-      } catch (err) {
-        initError = err;
-        api.logger.error(`persist-user-identity: init failed: ${err}`);
-        throw err;
-      }
-    }
+      },
+      { logger: api.logger, plugin: "persist-user-identity" },
+    );
 
     // -------------------------------------------------------------------
     // Hook: before_agent_start — resolve identity and inject context

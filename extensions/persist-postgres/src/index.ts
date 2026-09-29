@@ -1,4 +1,4 @@
-import type { OpenClawPluginApi } from "openclaw/plugin-sdk";
+import { createRetryingInit, type OpenClawPluginApi } from "openclaw/plugin-sdk";
 import { createPgClient, ensureSchema, persistMessage, purgeExpiredConversations } from "./db.js";
 
 // How often the retention sweep runs when a retention window is configured.
@@ -20,8 +20,6 @@ const persistPostgresPlugin = {
 
     api.logger.info(`persist-postgres: connecting to PostgreSQL`);
     const sql = createPgClient(databaseUrl, api.logger);
-    let schemaReady = false;
-    let initError: unknown = null;
 
     // Transcript retention: when retentionDays > 0, expired conversations (and
     // their cascaded message content) are swept periodically so the persisted
@@ -30,24 +28,17 @@ const persistPostgresPlugin = {
     const retentionDays = Number(api.pluginConfig?.retentionDays ?? 0);
     let purgeTimer: ReturnType<typeof setInterval> | undefined;
 
-    async function ensureReady() {
-      if (schemaReady) {
-        return;
-      }
-      if (initError) {
-        throw initError;
-      }
-      try {
+    // Connect + schema, RETRIED with backoff after a failure (was cached for the
+    // life of the process, so a transient boot failure disabled persistence
+    // until restart).
+    const ensureReady = createRetryingInit(
+      async () => {
         await sql`SELECT 1`;
         await ensureSchema(sql);
-        schemaReady = true;
         api.logger.info("persist-postgres: schema ready");
-      } catch (err) {
-        initError = err;
-        api.logger.error(`persist-postgres: init failed (will not retry): ${err}`);
-        throw err;
-      }
-    }
+      },
+      { logger: api.logger, plugin: "persist-postgres" },
+    );
 
     // Schedule the retention sweep when a window is configured. The timer is
     // unref'd so it never keeps the process alive, and cleared on gateway_stop.

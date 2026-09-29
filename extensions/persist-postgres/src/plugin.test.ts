@@ -133,7 +133,7 @@ describe("persist-postgres plugin registration", () => {
     );
   });
 
-  test("init error is cached — second call does not retry", async () => {
+  test("init failure is logged with its retry delay and hooks fail soft", async () => {
     const { default: plugin } = await import("./index.js");
     const api = createMockApi({
       pluginConfig: { databaseUrl: "postgresql://invalid:invalid@127.0.0.1:1/nope" },
@@ -146,23 +146,19 @@ describe("persist-postgres plugin registration", () => {
 
     // First call triggers init failure
     await beforeAgentHook!.handler({ prompt: "msg1" }, { sessionKey: "test" });
+    // The failure is RETRIED with backoff now (the window/retry contract is
+    // proven deterministically in src/plugin-sdk/retrying-init.test.ts).
     expect(api.logger.error).toHaveBeenCalledWith(
-      expect.stringContaining("init failed (will not retry)"),
+      expect.stringContaining("persist-postgres: init failed (attempt 1, retry in 1s)"),
     );
+    expect(api.logger.error).not.toHaveBeenCalledWith(expect.stringContaining("will not retry"));
 
-    // Clear mock to verify second call behavior
-    (api.logger.error as ReturnType<typeof vi.fn>).mockClear();
-
-    // Second call should fail fast with cached error (no "init failed" again)
+    // A later hook still fails soft (logged, no throw) while the DB is down.
     await agentEndHook!.handler(
       { messages: [{ role: "assistant", content: "hi" }], success: true },
       { sessionKey: "test" },
     );
     expect(api.logger.error).toHaveBeenCalledWith(expect.stringContaining("agent_end error"));
-    // Should NOT log "init failed" again — error was cached
-    expect(api.logger.error).not.toHaveBeenCalledWith(
-      expect.stringContaining("init failed (will not retry)"),
-    );
   });
 
   test("before_agent_start returns empty object when prompt is missing", async () => {
