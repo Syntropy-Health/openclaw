@@ -21,7 +21,7 @@
  *    0  memory-graphiti
  */
 
-import { openPluginPool, type OpenClawPluginApi } from "openclaw/plugin-sdk";
+import { createRetryingInit, openPluginPool, type OpenClawPluginApi } from "openclaw/plugin-sdk";
 import postgres from "postgres";
 import { TtlCache } from "./cache.js";
 import { callSyntropyTool, type SyntropyToolResult } from "./client.js";
@@ -357,18 +357,28 @@ const syntropyPlugin = {
     // installed yet (pre-migration deploys, local dev).
     let vault: SyntropyVault | null = null;
 
-    ensureSyntropySchema(sql)
-      .then(async () => {
+    // Schema + vault detection, RETRIED with backoff. This ran once at register
+    // and a failure was final: vault stayed null, so vault-stored tokens were
+    // unreadable (paired users looked unpaired) until restart. Started eagerly
+    // here, and awaited (bounded by the backoff window) before each lookup.
+    const ensureStorage = createRetryingInit(
+      async () => {
+        await ensureSyntropySchema(sql);
         if (await vaultRpcsInstalled(sql)) {
           vault = createSyntropyVault(sql);
           api.logger.info("syntropy: vault=supabase (RPCs installed)");
         } else {
+          vault = null;
           api.logger.warn(
             "syntropy: vault=legacy-plaintext — install supabase-migrations/0001 to enable vault path",
           );
         }
-      })
-      .catch((err) => api.logger.error(`syntropy: schema init failed: ${err}`));
+      },
+      { logger: api.logger, plugin: "syntropy" },
+    );
+    ensureStorage().catch(() => {
+      /* logged by createRetryingInit; retried on the next lookup */
+    });
 
     api.logger.info(
       `syntropy: enabled (base=${syntropyBaseUrl}, kg=${kgEnabled ? kgBaseUrl : "disabled"})`,
@@ -420,6 +430,7 @@ const syntropyPlugin = {
           if (!peerId || peerId === "main" || peerId === "unknown") return {};
 
           const cacheKey = `${channel}:${peerId}`;
+          await ensureStorage();
           const user = await resolveUser(sql, vault, channel, peerId);
 
           return await decideProfileInjection({

@@ -91,6 +91,8 @@ export type { FileLockHandle, FileLockOptions } from "./file-lock.js";
 export { acquireFileLock, withFileLock } from "./file-lock.js";
 export type { PgPoolFactory, PgPoolMaxResolution, PgPoolOptions } from "./pg-pool.js";
 export { openPluginPool, resolvePgPoolMax, sharedPgPoolHolders } from "./pg-pool.js";
+export type { RetryingInitOptions } from "./retrying-init.js";
+export { createRetryingInit } from "./retrying-init.js";
 export { normalizeWebhookPath, resolveWebhookPath } from "./webhook-path.js";
 export {
   registerWebhookTarget,

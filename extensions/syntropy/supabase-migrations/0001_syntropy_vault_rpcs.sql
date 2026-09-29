@@ -21,6 +21,16 @@
 --
 -- Rollback: see 0001_syntropy_vault_rpcs_rollback.sql (or simply DROP each
 -- function below).
+--
+-- SHARED-PROJECT DEPLOYMENTS (e.g. openclaw as an `openclaw` schema inside
+-- another app's Supabase project, with a dedicated login role whose
+-- search_path is that schema only): do NOT apply this file as written. The
+-- functions would land in `public`, which that role cannot reach, while the
+-- plugin's detection (`vaultRpcsInstalled`, a name lookup in pg_proc across
+-- all schemas) reports them installed — every token call then fails. Instead
+-- create the four functions IN the app schema, set search_path = <schema>,
+-- vault, pg_temp inside the SECURITY DEFINER bodies, and GRANT EXECUTE to that
+-- role only (the SJ-test install of 2026-09-29 is the reference).
 -- =========================================================================
 
 -- Ensure the vault extension is enabled (no-op if already enabled).
@@ -41,7 +51,10 @@ begin
     raise exception 'app_syntropy: secret name is required'
       using errcode = '22023';
   end if;
-  if p_name not like 'syntropy_user_%' then
+  -- NOT `like 'syntropy_user_%'`: in LIKE, `_` matches ANY character, so that
+  -- also accepted names such as 'syntropyXuserY...'. An exact prefix compare.
+  -- (Found by devex installing this on SJ's test project, 2026-09-29.)
+  if left(p_name, 14) <> 'syntropy_user_' then
     raise exception 'app_syntropy: secret name must start with `syntropy_user_`'
       using errcode = '22023';
   end if;

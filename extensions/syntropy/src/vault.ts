@@ -103,21 +103,20 @@ export class SyntropyVault {
  * the vault path or fall back to the legacy plaintext `auth_token`
  * column.
  *
- * The probe is one round-trip and tolerates a missing function gracefully
- * (returns false rather than throwing).
+ * A missing function is a successful query answering `false`. A FAILED query
+ * (connection refused, role connection limit…) THROWS: it used to be swallowed
+ * as `false`, so one transient error at boot put the process on the plaintext
+ * token path until restart, invisibly to any retry. Callers run this inside a
+ * retrying init so a failure is retried instead of being read as "absent".
  */
 export async function vaultRpcsInstalled(sql: postgres.Sql): Promise<boolean> {
-  try {
-    const rows = await sql<{ exists: boolean }[]>`
-      SELECT EXISTS (
-        SELECT 1 FROM pg_proc
-        WHERE proname = 'app_syntropy_token_set'
-      ) AS exists
-    `;
-    return rows[0]?.exists ?? false;
-  } catch {
-    return false;
-  }
+  const rows = await sql<{ exists: boolean }[]>`
+    SELECT EXISTS (
+      SELECT 1 FROM pg_proc
+      WHERE proname = 'app_syntropy_token_set'
+    ) AS exists
+  `;
+  return rows[0]?.exists ?? false;
 }
 
 /**
