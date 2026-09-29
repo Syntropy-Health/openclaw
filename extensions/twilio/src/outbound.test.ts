@@ -98,3 +98,33 @@ describe("buildSmsOutboundAdapter", () => {
     expect(msg).not.toContain("secret_never_leak"); // ...but never the api-key secret
   });
 });
+
+describe("ShrineAI sign-off reaches the wire", () => {
+  /** The form-encoded Body actually POSTed to Twilio. */
+  async function sentBody(text: string): Promise<string> {
+    const fetchImpl = vi.fn(
+      async () => new Response(JSON.stringify({ sid: "SM1", status: "queued" }), { status: 201 }),
+    );
+    const a = buildSmsOutboundAdapter({
+      resolveConfig: () => CONFIG,
+      store: emptyStore,
+      fetchImpl: fetchImpl as unknown as typeof fetch,
+    });
+    await a.sendText!(ctx("+15557654321", text));
+    expect(fetchImpl).toHaveBeenCalledTimes(1);
+    const init = (fetchImpl.mock.calls[0] as unknown as [string, RequestInit])[1];
+    return new URLSearchParams(String(init.body)).get("Body") ?? "";
+  }
+
+  it("every SMS reply is signed as ShrineAI (the Body Twilio receives, not a helper's output)", async () => {
+    expect(await sentBody("Your check-in is logged.")).toBe(
+      "Your check-in is logged.\n\n— ShrineAI, an AI assistant",
+    );
+  });
+
+  it("a long reply is fitted to Twilio's 1600-char limit with the sign-off kept", async () => {
+    const body = await sentBody("x".repeat(4000));
+    expect(body.length).toBeLessThanOrEqual(1600);
+    expect(body.endsWith("— ShrineAI, an AI assistant")).toBe(true);
+  });
+});

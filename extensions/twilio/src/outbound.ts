@@ -19,6 +19,7 @@ import { SMS_CHANNEL_ID } from "./accounts.js";
 import { guardedSendSms, type OptOutStore } from "./compliance.js";
 import { type ResolvedTwilioSmsConfig } from "./config.js";
 import { type SmsFetch } from "./send.js";
+import { withShrineAiSignOff } from "./signoff.js";
 
 /** Sentinel messageId for an opt-out-suppressed (terminal, unsent) delivery. */
 export const SMS_OPTOUT_SUPPRESSED = "suppressed:optout";
@@ -39,7 +40,8 @@ export function buildSmsOutboundAdapter(deps: SmsOutboundDeps): ChannelOutboundA
       if (!config) throw new Error("sms channel is not configured");
 
       const result = await guardedSendSms(
-        { config, to: ctx.to, body: ctx.text, fetchImpl: deps.fetchImpl },
+        // Every SMS reply carries the ShrineAI identity (SMS has no sender name).
+        { config, to: ctx.to, body: withShrineAiSignOff(ctx.text), fetchImpl: deps.fetchImpl },
         deps.store,
       );
 

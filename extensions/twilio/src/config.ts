@@ -77,6 +77,38 @@ const ENV = {
 } as const;
 
 /**
+ * SMS-specific credential names. voice-call reads the GENERIC TWILIO_ACCOUNT_SID /
+ * TWILIO_AUTH_TOKEN, and the ShrineAI SMS number can live on a different Twilio
+ * account, so SMS credentials must be settable without re-pointing voice.
+ * They win as a COHERENT SET: if ANY of these is present, the generic names are
+ * ignored for credentials, so two accounts are never mixed into one config.
+ */
+const SMS_ENV = {
+  accountSid: "TWILIO_SMS_ACCOUNT_SID",
+  apiKeySid: "TWILIO_SMS_API_KEY_SID",
+  apiKeySecret: "TWILIO_SMS_API_KEY_SECRET",
+  authToken: "TWILIO_SMS_AUTH_TOKEN",
+} as const;
+
+function envCredentials(env: NodeJS.ProcessEnv) {
+  const sms = {
+    accountSid: env[SMS_ENV.accountSid],
+    apiKeySid: env[SMS_ENV.apiKeySid],
+    apiKeySecret: env[SMS_ENV.apiKeySecret],
+    authToken: env[SMS_ENV.authToken],
+  };
+  if (Object.values(sms).some((v) => v !== undefined && v !== "")) {
+    return sms;
+  }
+  return {
+    accountSid: env[ENV.accountSid],
+    apiKeySid: env[ENV.apiKeySid],
+    apiKeySecret: env[ENV.apiKeySecret],
+    authToken: env[ENV.authToken],
+  };
+}
+
+/**
  * Merge config + env fallback and decide whether the SMS channel is CREDENTIAL-
  * COMPLETE. Returns the resolved config only when EVERY required credential +
  * the sender number is present — otherwise `null` (channel stays INERT, registers
@@ -91,10 +123,11 @@ export function resolveTwilioSmsConfig(
   env: NodeJS.ProcessEnv = process.env,
 ): ResolvedTwilioSmsConfig | null {
   const parsed = input ?? TwilioSmsConfigSchema.parse({});
-  const accountSid = parsed.accountSid ?? env[ENV.accountSid];
-  const apiKeySid = parsed.apiKeySid ?? env[ENV.apiKeySid];
-  const apiKeySecret = parsed.apiKeySecret ?? env[ENV.apiKeySecret];
-  const authToken = parsed.authToken ?? env[ENV.authToken];
+  const fromEnv = envCredentials(env);
+  const accountSid = parsed.accountSid ?? fromEnv.accountSid;
+  const apiKeySid = parsed.apiKeySid ?? fromEnv.apiKeySid;
+  const apiKeySecret = parsed.apiKeySecret ?? fromEnv.apiKeySecret;
+  const authToken = parsed.authToken ?? fromEnv.authToken;
   const smsNumber = parsed.smsNumber ?? env[ENV.smsNumber];
 
   if (!accountSid || !apiKeySid || !apiKeySecret || !authToken || !smsNumber) {
