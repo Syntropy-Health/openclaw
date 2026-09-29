@@ -16,9 +16,15 @@ import type { OpenClawPluginApi } from "openclaw/plugin-sdk";
 import { resolveSmsAccount } from "./accounts.js";
 import { createSmsPlugin } from "./channel.js";
 import { type OptOutStore } from "./compliance.js";
+import {
+  createPgContactStore,
+  ensureContactSchema,
+  type SmsContactStore,
+} from "./contacts-store.js";
 import { asSqlTag, createSmsPgClient, type SmsPgClient } from "./db.js";
 import { handleInboundSms } from "./inbound.js";
 import { createPgOptOutStore, ensureOptOutSchema } from "./optout-store.js";
+import { smsGuardrailFor } from "./sms-guardrail.js";
 import { createSmsWebhookHandler } from "./webhook.js";
 
 /**
@@ -33,6 +39,14 @@ const FAIL_CLOSED_STORE: OptOutStore = {
   },
   optOut: () => {},
   optIn: () => {},
+};
+
+/** No first-contact record available: every lookup errors, which the inbound path
+ * treats as "first" (send the opt-in confirmation — a duplicate beats a miss). */
+const UNAVAILABLE_CONTACTS: SmsContactStore = {
+  recordFirstContact: () => {
+    throw new Error("sms first-contact store unavailable");
+  },
 };
 
 const twilioSmsPlugin = {
@@ -88,6 +102,7 @@ const twilioSmsPlugin = {
     const databaseUrl =
       (api.pluginConfig?.databaseUrl as string | undefined) ?? process.env.DATABASE_URL ?? "";
     let store: OptOutStore = FAIL_CLOSED_STORE;
+    let contacts: SmsContactStore = UNAVAILABLE_CONTACTS;
     let sql: SmsPgClient | null = null;
     if (databaseUrl) {
       sql = createSmsPgClient(databaseUrl, { logger: api.logger, plugin: "twilio" });
@@ -100,11 +115,36 @@ const twilioSmsPlugin = {
           `twilio: opt-out schema init failed; sends will fail-closed: ${String(err)}`,
         );
       }
+      // Separate try: a contacts-table failure must not take the opt-out store down.
+      try {
+        await ensureContactSchema(asSqlTag(sql));
+        contacts = createPgContactStore(asSqlTag(sql));
+      } catch (err) {
+        api.logger.error(
+          `twilio: first-contact schema init failed; every message will re-send the opt-in confirmation: ${String(err)}`,
+        );
+      }
     } else {
       api.logger.warn(
         "twilio: no DATABASE_URL — opt-out store unavailable; sends fail-closed until provisioned",
       );
     }
+
+    // Enabled but not credential-complete: the webhook refuses every message and
+    // replies go nowhere. Say so at boot, naming what to provision (names only).
+    const account = resolveSmsAccount(api.config);
+    if (!account.configured) {
+      api.logger.warn(
+        `twilio: smsEnabled but SMS is INERT — missing ${account.missing.join(", ")}; ` +
+          "inbound is refused and nothing is sent until these are set.",
+      );
+    }
+
+    // No-medical-advice guardrail on every SMS turn (see sms-guardrail.ts for why this
+    // is prependContext and not systemPrompt). High priority so it heads the context.
+    api.on("before_agent_start", async (_event, ctx) => smsGuardrailFor(ctx), {
+      priority: 250,
+    });
 
     // Outbound channel.
     api.registerChannel({ plugin: createSmsPlugin({ store }) });
@@ -118,7 +158,14 @@ const twilioSmsPlugin = {
           const config = resolveSmsAccount(api.config).config;
           if (!config) return;
           // Compliance-first → access policy → agent (see inbound.ts).
-          await handleInboundSms({ inbound, cfg: api.config, config, store });
+          await handleInboundSms({
+            inbound,
+            cfg: api.config,
+            config,
+            store,
+            contacts,
+            logger: api.logger,
+          });
         },
       }),
     });

@@ -118,13 +118,13 @@ describe("ShrineAI sign-off reaches the wire", () => {
 
   it("every SMS reply is signed as ShrineAI (the Body Twilio receives, not a helper's output)", async () => {
     expect(await sentBody("Your check-in is logged.")).toBe(
-      "Your check-in is logged.\n\n— ShrineAI, an AI assistant",
+      "Your check-in is logged. - ShrineAI, an AI assistant",
     );
   });
 
   it("a long reply is fitted to Twilio's 1600-char limit with the sign-off kept", async () => {
     const body = await sentBody("x".repeat(4000));
     expect(body.length).toBeLessThanOrEqual(1600);
-    expect(body.endsWith("— ShrineAI, an AI assistant")).toBe(true);
+    expect(body.endsWith("- ShrineAI, an AI assistant")).toBe(true);
   });
 });

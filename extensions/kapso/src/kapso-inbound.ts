@@ -24,7 +24,11 @@ import { dispatchInboundMessageWithDispatcher } from "../../../src/auto-reply/di
 import type { MsgContext } from "../../../src/auto-reply/templating.js";
 import type { ReplyPayload } from "../../../src/auto-reply/types.js";
 import { buildAgentPeerSessionKey, DEFAULT_AGENT_ID } from "../../../src/routing/session-key.js";
-import { handleInboundCompliance, type OptOutStore } from "../../twilio/src/compliance.js";
+import {
+  GENERIC_COMPLIANCE_COPY,
+  handleInboundCompliance,
+  type OptOutStore,
+} from "../../twilio/src/compliance.js";
 import { type ResolvedKapsoConfig } from "./kapso-config.js";
 import { sendKapsoMessage, type KapsoFetch } from "./kapso-send.js";
 import { type KapsoInbound, type KapsoLogger } from "./kapso-webhook.js";
@@ -161,7 +165,12 @@ export async function handleKapsoInbound(
 ): Promise<KapsoInboundOutcome> {
   // Compliance runs (and PERSISTS opt-out/opt-in) before anything else — including
   // before send-target resolution. A STOP is recorded even if we can't ack it.
-  const outcome = await handleInboundCompliance(deps.inbound.from, deps.inbound.body, deps.store);
+  const outcome = await handleInboundCompliance(
+    deps.inbound.from,
+    deps.inbound.body,
+    deps.store,
+    GENERIC_COMPLIANCE_COPY,
+  );
   if (outcome.kind !== "passthrough") {
     if (deps.phoneNumberId) {
       // UNGUARDED mandated ack — must reach the recipient despite a just-recorded opt-out.

@@ -12,6 +12,7 @@
 import { DEFAULT_ACCOUNT_ID } from "openclaw/plugin-sdk";
 import type { ChannelConfigAdapter, OpenClawConfig } from "openclaw/plugin-sdk";
 import {
+  missingSmsCredentials,
   resolveTwilioSmsConfig,
   TwilioSmsConfigSchema,
   type ResolvedTwilioSmsConfig,
@@ -25,6 +26,8 @@ export type ResolvedSmsAccount = {
   /** Credential-complete config, or null when the channel is inert. */
   config: ResolvedTwilioSmsConfig | null;
   configured: boolean;
+  /** Env NAMES still needed to run (empty when configured). Names only, never values. */
+  missing: string[];
 };
 
 /** Raw config object stored at `cfg.channels.sms` (untyped plugin-channel slot). */
@@ -47,7 +50,12 @@ export function resolveSmsAccount(
   const parsed = raw ? TwilioSmsConfigSchema.safeParse(raw) : null;
   const input = parsed?.success ? parsed.data : undefined;
   const config = resolveTwilioSmsConfig(input, env);
-  return { accountId: id, config, configured: config !== null };
+  return {
+    accountId: id,
+    config,
+    configured: config !== null,
+    missing: config ? [] : missingSmsCredentials(input, env),
+  };
 }
 
 /** v1 single-account channel: always exposes the default account. */

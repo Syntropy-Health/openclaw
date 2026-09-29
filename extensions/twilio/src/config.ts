@@ -90,22 +90,50 @@ const SMS_ENV = {
   authToken: "TWILIO_SMS_AUTH_TOKEN",
 } as const;
 
+/** An env value, trimmed; empty or whitespace-only counts as ABSENT (a secret store
+ * that writes "" or a stray newline must not select a credential set or satisfy one). */
+function envValue(env: NodeJS.ProcessEnv, name: string): string | undefined {
+  const v = env[name]?.trim();
+  return v ? v : undefined;
+}
+
+type CredentialNames = { [K in keyof typeof SMS_ENV]: string };
+
+/** Which env names the credentials are read from: the SMS set if ANY of it is present. */
+function credentialEnvNames(env: NodeJS.ProcessEnv): CredentialNames {
+  const smsPresent = Object.values(SMS_ENV).some((n) => envValue(env, n) !== undefined);
+  return smsPresent ? SMS_ENV : ENV;
+}
+
 function envCredentials(env: NodeJS.ProcessEnv) {
-  const sms = {
-    accountSid: env[SMS_ENV.accountSid],
-    apiKeySid: env[SMS_ENV.apiKeySid],
-    apiKeySecret: env[SMS_ENV.apiKeySecret],
-    authToken: env[SMS_ENV.authToken],
-  };
-  if (Object.values(sms).some((v) => v !== undefined && v !== "")) {
-    return sms;
-  }
+  const names = credentialEnvNames(env);
   return {
-    accountSid: env[ENV.accountSid],
-    apiKeySid: env[ENV.apiKeySid],
-    apiKeySecret: env[ENV.apiKeySecret],
-    authToken: env[ENV.authToken],
+    accountSid: envValue(env, names.accountSid),
+    apiKeySid: envValue(env, names.apiKeySid),
+    apiKeySecret: envValue(env, names.apiKeySecret),
+    authToken: envValue(env, names.authToken),
   };
+}
+
+/**
+ * The credential/number env NAMES still missing for SMS to run — names only, never
+ * values — so an enabled-but-inert surface can say exactly what to provision.
+ * Empty when the config is credential-complete.
+ */
+export function missingSmsCredentials(
+  input: TwilioSmsConfig | undefined,
+  env: NodeJS.ProcessEnv = process.env,
+): string[] {
+  const parsed = input ?? TwilioSmsConfigSchema.parse({});
+  const names = credentialEnvNames(env);
+  const fromEnv = envCredentials(env);
+  const missing: string[] = [];
+  // Iterate the CREDENTIAL keys only: the generic name map also has smsNumber.
+  for (const k of Object.keys(SMS_ENV) as Array<keyof CredentialNames>) {
+    if (!(parsed[k] ?? fromEnv[k])) missing.push(names[k]);
+  }
+  if (!(parsed.smsNumber ?? envValue(env, ENV.smsNumber))) missing.push(ENV.smsNumber);
+  return missing;
 }
 
 /**
@@ -128,7 +156,7 @@ export function resolveTwilioSmsConfig(
   const apiKeySid = parsed.apiKeySid ?? fromEnv.apiKeySid;
   const apiKeySecret = parsed.apiKeySecret ?? fromEnv.apiKeySecret;
   const authToken = parsed.authToken ?? fromEnv.authToken;
-  const smsNumber = parsed.smsNumber ?? env[ENV.smsNumber];
+  const smsNumber = parsed.smsNumber ?? envValue(env, ENV.smsNumber);
 
   if (!accountSid || !apiKeySid || !apiKeySecret || !authToken || !smsNumber) {
     return null;

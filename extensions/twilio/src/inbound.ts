@@ -13,7 +13,10 @@
  *     (guarded send would suppress it — the bug this remediation fixes).
  *  2. Inbound access policy (`disabled`/`allowlist`/`pairing`) gates ordinary
  *     messages only.
- *  3. Agent dispatch; the agent's generated reply IS opt-out-guarded.
+ *  3. Mobile-originated opt-in: a number's first admitted non-keyword message IS its
+ *     opt-in under the registered campaign, confirmed once with OPT_IN_REPLY before
+ *     the agent answers. START records the number too, so the two never double up.
+ *  4. Agent dispatch; the agent's generated reply IS opt-out-guarded.
  */
 
 import type { OpenClawConfig } from "openclaw/plugin-sdk";
@@ -22,12 +25,22 @@ import type { MsgContext } from "../../../src/auto-reply/templating.js";
 import type { ReplyPayload } from "../../../src/auto-reply/types.js";
 import { buildAgentPeerSessionKey, DEFAULT_AGENT_ID } from "../../../src/routing/session-key.js";
 import { SMS_CHANNEL_ID } from "./accounts.js";
-import { guardedSendSms, handleInboundCompliance, type OptOutStore } from "./compliance.js";
+import {
+  guardedSendSms,
+  handleInboundCompliance,
+  SMS_CAMPAIGN_COPY,
+  type OptOutStore,
+} from "./compliance.js";
 import { type ResolvedTwilioSmsConfig } from "./config.js";
+import { type SmsContactStore } from "./contacts-store.js";
 import { sendSms, type SmsFetch } from "./send.js";
+import { withShrineAiSignOff } from "./signoff.js";
 import { type InboundSms } from "./webhook.js";
 
 export type InboundOutcome = "stop" | "start" | "help" | "blocked" | "agent";
+
+/** Minimal logger for the rare failure paths (store errors). */
+export type InboundLogger = { warn: (m: string) => void };
 
 /**
  * Inbound access policy — applied to PASSTHROUGH messages only (compliance
@@ -57,7 +70,15 @@ export function createSmsReplyDeliver(params: {
     const text = payload.text?.trim();
     if (text) {
       await guardedSendSms(
-        { config: params.config, to: params.to, body: text, fetchImpl: params.fetchImpl },
+        // Every agent reply carries the ShrineAI identity (SMS has no sender
+        // name) — THIS is the main conversational path (a user texted in).
+        // The mandated STOP/START/HELP acks go through sendSms and stay unsigned.
+        {
+          config: params.config,
+          to: params.to,
+          body: withShrineAiSignOff(text),
+          fetchImpl: params.fetchImpl,
+        },
         params.store,
       );
     }
@@ -108,6 +129,9 @@ export type HandleInboundDeps = {
   cfg: OpenClawConfig;
   config: ResolvedTwilioSmsConfig;
   store: OptOutStore;
+  /** First-contact record for mobile-originated opt-in (required: no silent skip). */
+  contacts: SmsContactStore;
+  logger?: InboundLogger;
   fetchImpl?: SmsFetch;
   /** Agent-routing seam (default {@link routeInboundToAgent}); injectable for tests. */
   dispatch?: (params: {
@@ -119,18 +143,52 @@ export type HandleInboundDeps = {
   }) => Promise<void>;
 };
 
+/**
+ * True iff this is the number's first confirmed contact. A store ERROR counts as
+ * first: a duplicate opt-in confirmation is harmless, a missing one is a campaign
+ * compliance gap. (The send itself stays opt-out-guarded either way.)
+ */
+async function isFirstContact(deps: HandleInboundDeps): Promise<boolean> {
+  try {
+    return await deps.contacts.recordFirstContact(deps.inbound.from);
+  } catch (err) {
+    deps.logger?.warn(
+      `twilio: first-contact store failed; sending opt-in confirmation: ${String(err)}`,
+    );
+    return true;
+  }
+}
+
 /** Compliance-first → policy → agent. Returns the branch taken (for tests/telemetry). */
 export async function handleInboundSms(deps: HandleInboundDeps): Promise<InboundOutcome> {
-  const { inbound, config, store } = deps;
+  const { inbound, config, store, contacts } = deps;
 
-  const outcome = await handleInboundCompliance(inbound.from, inbound.body, store);
+  const outcome = await handleInboundCompliance(
+    inbound.from,
+    inbound.body,
+    store,
+    SMS_CAMPAIGN_COPY,
+  );
   if (outcome.kind !== "passthrough") {
+    // START sends OPT_IN_REPLY itself; record the number so a following ordinary
+    // message does not confirm the opt-in a second time.
+    if (outcome.kind === "start") await isFirstContact(deps);
     // UNGUARDED mandated ack — see module header.
     await sendSms({ config, to: inbound.from, body: outcome.reply, fetchImpl: deps.fetchImpl });
     return outcome.kind;
   }
 
   if (!inboundAllowed(config, inbound.from)) return "blocked";
+
+  if (await isFirstContact(deps)) {
+    // Opt-in confirmation (registered copy, unsigned). GUARDED, unlike the keyword
+    // acks: this is not a reply to STOP, so a number already on the opt-out list
+    // (e.g. STOP'd before this table existed) must not receive it.
+    await guardedSendSms(
+      { config, to: inbound.from, body: SMS_CAMPAIGN_COPY.start, fetchImpl: deps.fetchImpl },
+      store,
+    );
+  }
 
   const dispatch = deps.dispatch ?? routeInboundToAgent;
   await dispatch({ inbound, cfg: deps.cfg, config, store, fetchImpl: deps.fetchImpl });

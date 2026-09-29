@@ -107,3 +107,33 @@ describe("SYN-272 R1 — explicit-enable by construction (supersedes #223's ruli
     }
   });
 });
+
+describe("enabled-but-inert is LOUD", () => {
+  it("smsEnabled with no credentials warns at boot, naming the missing env names", async () => {
+    const saved = { ...process.env };
+    for (const k of Object.keys(process.env)) if (k.startsWith("TWILIO_")) delete process.env[k];
+    delete process.env.DATABASE_URL;
+    try {
+      const logs = { info: [] as string[], warn: [] as string[], error: [] as string[] };
+      const api = {
+        id: "twilio",
+        config: { channels: {} },
+        pluginConfig: { smsEnabled: true },
+        logger: {
+          info: (m: string) => logs.info.push(m),
+          warn: (m: string) => logs.warn.push(m),
+          error: (m: string) => logs.error.push(m),
+        },
+        registerChannel: vi.fn(),
+        registerHttpRoute: vi.fn(),
+        on: vi.fn(),
+      } as unknown as OpenClawPluginApi;
+      await twilioSmsPlugin.register(api);
+      const w = logs.warn.join("\n");
+      expect(w).toContain("SMS is INERT");
+      expect(w).toContain("TWILIO_SMS_NUMBER");
+    } finally {
+      process.env = saved;
+    }
+  });
+});
