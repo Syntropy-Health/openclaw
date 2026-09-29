@@ -8,14 +8,21 @@
  * coupled option and stays within OpenClaw's DB, never the Journal PHI DB.
  */
 
+import { openPluginPool } from "openclaw/plugin-sdk";
 import postgres from "postgres";
+
+/** Minimal logger the pool helper needs (the plugin api logger satisfies it). */
+type PoolLogger = { warn: (message: string) => void };
 import { type SqlTag } from "./optout-store.js";
 
 export type SmsPgClient = postgres.Sql;
 
 /** Create the extension's pg pool. Small `max` — opt-out traffic is very light. */
-export function createSmsPgClient(databaseUrl: string, max: number): SmsPgClient {
-  return postgres(databaseUrl, { max });
+export function createSmsPgClient(
+  databaseUrl: string,
+  ctx: { logger: PoolLogger; plugin: string },
+): SmsPgClient {
+  return openPluginPool(postgres, databaseUrl, ctx);
 }
 
 /** Narrow the pg client to the structural {@link SqlTag} the opt-out store needs. */

@@ -1,4 +1,8 @@
+import { openPluginPool } from "openclaw/plugin-sdk";
 import postgres from "postgres";
+
+/** Minimal logger the pool helper needs (the plugin api logger satisfies it). */
+type PoolLogger = { warn: (message: string) => void };
 
 // ---------------------------------------------------------------------------
 // Types
@@ -32,8 +36,8 @@ export type ResolvedIdentity = UserRow & {
 // Client
 // ---------------------------------------------------------------------------
 
-export function createPgClient(databaseUrl: string, max: number) {
-  return postgres(databaseUrl, { max });
+export function createPgClient(databaseUrl: string, logger: PoolLogger) {
+  return openPluginPool(postgres, databaseUrl, { logger, plugin: "persist-user-identity" });
 }
 
 // ---------------------------------------------------------------------------

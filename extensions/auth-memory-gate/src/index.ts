@@ -1,4 +1,4 @@
-import { type OpenClawPluginApi, resolvePgPoolMax } from "openclaw/plugin-sdk";
+import { openPluginPool, type OpenClawPluginApi } from "openclaw/plugin-sdk";
 import postgres from "postgres";
 import {
   deriveChannel,
@@ -41,28 +41,43 @@ const authMemoryGatePlugin = {
     api.logger.info(
       `auth-memory-gate: connecting to PostgreSQL (hardGate=${hardGate}, requireVerified=${scopeConfig.requireVerified})`,
     );
-    const pgPool = resolvePgPoolMax();
-    if (pgPool.invalid) api.logger.warn(`auth-memory-gate: ${pgPool.invalid}`);
-    const sql = postgres(databaseUrl, { max: pgPool.max });
+    const sql = openPluginPool(postgres, databaseUrl, {
+      logger: api.logger,
+      plugin: "auth-memory-gate",
+    });
 
-    // Lazy init: verify DB connectivity on first hook call, cache errors
+    // Lazy init with RETRY (R5). A failed probe is remembered only for a
+    // backoff window (1s, 2s, 4s ... capped at 60s), then retried on the next
+    // turn — never cached for the life of the process, which previously left a
+    // transient boot-time failure (e.g. "too many connections for role") in
+    // place until restart. Inside the window the cached error is rethrown
+    // without a new probe, so a burst of turns cannot become a probe storm.
     let dbReady = false;
-    let initError: unknown = null;
+    let lastInitError: unknown = null;
+    let initFailures = 0;
+    let nextProbeAt = 0;
 
     async function ensureReady() {
       if (dbReady) {
         return;
       }
-      if (initError) {
-        throw initError;
+      if (lastInitError && Date.now() < nextProbeAt) {
+        throw lastInitError;
       }
       try {
         await sql`SELECT 1`;
         dbReady = true;
+        lastInitError = null;
+        initFailures = 0;
         api.logger.info("auth-memory-gate: DB connection verified");
       } catch (err) {
-        initError = err;
-        api.logger.error(`auth-memory-gate: init failed (will not retry): ${err}`);
+        initFailures += 1;
+        const delayMs = Math.min(1_000 * 2 ** (initFailures - 1), 60_000);
+        lastInitError = err;
+        nextProbeAt = Date.now() + delayMs;
+        api.logger.error(
+          `auth-memory-gate: init failed (attempt ${initFailures}, retry in ${delayMs / 1000}s): ${err}`,
+        );
         throw err;
       }
     }
@@ -80,20 +95,22 @@ const authMemoryGatePlugin = {
     api.on(
       "before_agent_start",
       async (_event, ctx) => {
+        // Peer derivation is pure (no DB), so it happens BEFORE any DB call:
+        // the fail-closed path below must know whom to gate.
+        const sessionKey = ctx?.sessionKey ?? "";
+        const channel = ctx?.messageProvider ?? deriveChannel(sessionKey);
+        // Canonical peer via the SHARED helper (device-id when threaded, else
+        // session-key-derived) — MUST match persist-user-identity's [G1] bind
+        // key, or the gate would miss the just-bound mobile row (A&D §7).
+        const peerId = deriveIdentityPeer(ctx);
+
+        if (!peerId || peerId === "main" || peerId === "unknown") {
+          return {};
+        }
+
+        const gateKey = `${channel}:${peerId}`;
         try {
           await ensureReady();
-          const sessionKey = ctx?.sessionKey ?? "";
-          const channel = ctx?.messageProvider ?? deriveChannel(sessionKey);
-          // Canonical peer via the SHARED helper (device-id when threaded, else
-          // session-key-derived) — MUST match persist-user-identity's [G1] bind
-          // key, or the gate would miss the just-bound mobile row (A&D §7).
-          const peerId = deriveIdentityPeer(ctx);
-
-          if (!peerId || peerId === "main" || peerId === "unknown") {
-            return {};
-          }
-
-          const gateKey = `${channel}:${peerId}`;
           // Cross-check the peer row against the turn's VERIFIED identity
           // (fail-closed defense-in-depth): on a verified turn a stale/contested
           // row keyed by the client-supplied device id must NEVER key this turn
@@ -135,6 +152,14 @@ const authMemoryGatePlugin = {
           return { prependContext };
         } catch (err) {
           api.logger.error(`auth-memory-gate: before_agent_start error: ${err}`);
+          // R5: with hardGate on, an unknown identity (DB down, role connection
+          // limit, lookup failure) is treated as UNVERIFIED — gate the turn.
+          // Returning {} here was a fail-OPEN: every peer ungated while the DB
+          // was unreachable. Without hardGate the gate is advisory, so {} stays.
+          if (hardGate) {
+            gatedPeers.add(gateKey);
+            return { prependContext: formatHardGateSystemPrompt(channel, peerId) };
+          }
           return {};
         }
       },

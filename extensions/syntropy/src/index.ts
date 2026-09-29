@@ -21,7 +21,7 @@
  *    0  memory-graphiti
  */
 
-import { type OpenClawPluginApi, resolvePgPoolMax } from "openclaw/plugin-sdk";
+import { openPluginPool, type OpenClawPluginApi } from "openclaw/plugin-sdk";
 import postgres from "postgres";
 import { TtlCache } from "./cache.js";
 import { callSyntropyTool, type SyntropyToolResult } from "./client.js";
@@ -335,9 +335,7 @@ const syntropyPlugin = {
       })
       .catch((err) => api.logger.error(`syntropy: braintrust init error: ${err}`));
 
-    const pgPool = resolvePgPoolMax();
-    if (pgPool.invalid) api.logger.warn(`syntropy: ${pgPool.invalid}`);
-    const sql = postgres(databaseUrl, { max: pgPool.max });
+    const sql = openPluginPool(postgres, databaseUrl, { logger: api.logger, plugin: "syntropy" });
 
     // Service-auth (M2M) provider for openclaw → SJ /mcp machine calls (P2
     // T2.2). Constructed here as the documented seam; the future MCP client /

@@ -1,4 +1,4 @@
-import { type OpenClawPluginApi, resolvePgPoolMax } from "openclaw/plugin-sdk";
+import type { OpenClawPluginApi } from "openclaw/plugin-sdk";
 import { createPgClient, ensureSchema, persistMessage, purgeExpiredConversations } from "./db.js";
 
 // How often the retention sweep runs when a retention window is configured.
@@ -19,9 +19,7 @@ const persistPostgresPlugin = {
     }
 
     api.logger.info(`persist-postgres: connecting to PostgreSQL`);
-    const pgPool = resolvePgPoolMax();
-    if (pgPool.invalid) api.logger.warn(`persist-postgres: ${pgPool.invalid}`);
-    const sql = createPgClient(databaseUrl, pgPool.max);
+    const sql = createPgClient(databaseUrl, api.logger);
     let schemaReady = false;
     let initError: unknown = null;
 

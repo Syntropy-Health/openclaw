@@ -12,7 +12,7 @@
  * a number that may have opted out.
  */
 
-import { type OpenClawPluginApi, resolvePgPoolMax } from "openclaw/plugin-sdk";
+import type { OpenClawPluginApi } from "openclaw/plugin-sdk";
 import { resolveSmsAccount } from "./accounts.js";
 import { createSmsPlugin } from "./channel.js";
 import { type OptOutStore } from "./compliance.js";
@@ -90,9 +90,7 @@ const twilioSmsPlugin = {
     let store: OptOutStore = FAIL_CLOSED_STORE;
     let sql: SmsPgClient | null = null;
     if (databaseUrl) {
-      const pgPool = resolvePgPoolMax();
-      if (pgPool.invalid) api.logger.warn(`twilio: ${pgPool.invalid}`);
-      sql = createSmsPgClient(databaseUrl, pgPool.max);
+      sql = createSmsPgClient(databaseUrl, { logger: api.logger, plugin: "twilio" });
       try {
         await ensureOptOutSchema(asSqlTag(sql));
         store = createPgOptOutStore(asSqlTag(sql));

@@ -172,7 +172,10 @@ describe("auth-memory-gate before_agent_start hook", () => {
     );
   });
 
-  test("init error is cached — second call does not retry", async () => {
+  // R5: the init error is no longer cached FOREVER — only for a backoff window
+  // (retry behaviour is proven in fail-closed.test.ts). Within the window a
+  // second call must not re-probe.
+  test("within the backoff window, a second call does not re-probe", async () => {
     const { default: plugin } = await import("./index.js");
     const api = createMockApi({
       pluginConfig: { databaseUrl: "postgresql://invalid:invalid@127.0.0.1:1/nope" },
@@ -185,20 +188,18 @@ describe("auth-memory-gate before_agent_start hook", () => {
     // First call triggers init failure
     await hook!.handler({ prompt: "msg1" }, { sessionKey: "agent:main:telegram:user1" });
     expect(api.logger.error).toHaveBeenCalledWith(
-      expect.stringContaining("init failed (will not retry)"),
+      expect.stringContaining("init failed (attempt 1, retry in 1s)"),
     );
 
     // Clear mock to verify second call behavior
     (api.logger.error as ReturnType<typeof vi.fn>).mockClear();
 
-    // Second call should fail fast with cached error (no "init failed" again)
+    // Second call (immediately, inside the 1s window) fails fast, no re-probe
     await hook!.handler({ prompt: "msg2" }, { sessionKey: "agent:main:telegram:user2" });
     expect(api.logger.error).toHaveBeenCalledWith(
       expect.stringContaining("before_agent_start error"),
     );
-    expect(api.logger.error).not.toHaveBeenCalledWith(
-      expect.stringContaining("init failed (will not retry)"),
-    );
+    expect(api.logger.error).not.toHaveBeenCalledWith(expect.stringContaining("init failed"));
   });
 });
 
@@ -270,12 +271,13 @@ describe("auth-memory-gate hardGate registration", () => {
     plugin.register(api);
 
     const hook = api._hooks.find((h) => h.name === "before_agent_start");
-    // DB unreachable → error → returns {}
-    const result = await hook!.handler(
+    // DB unreachable → error → FAIL CLOSED (R5): the turn is gated. This test's
+    // name always said so; until R5 its assertion pinned the fail-open `{}`.
+    const result = (await hook!.handler(
       { prompt: "hello" },
       { sessionKey: "agent:main:telegram:user123" },
-    );
-    expect(result).toEqual({});
+    )) as { prependContext?: string };
+    expect(result.prependContext).toContain("[IDENTITY_GATE]");
     expect(api.logger.error).toHaveBeenCalled();
   });
 
