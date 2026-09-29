@@ -2,10 +2,16 @@ import { describe, expect, it } from "vitest";
 import { createSmsPlugin } from "./channel.js";
 import { type OptOutStore } from "./compliance.js";
 
+const NO_CONTACTS = {
+  recordFirstContact: () => false,
+  forgetContact: () => {},
+  hasContact: () => false,
+};
+
 const store: OptOutStore = { isOptedOut: () => false, optOut: () => {}, optIn: () => {} };
 
 describe("createSmsPlugin", () => {
-  const plugin = createSmsPlugin({ store });
+  const plugin = createSmsPlugin({ store, contacts: NO_CONTACTS });
 
   it("is the 'sms' channel (vendor-agnostic id)", () => {
     expect(plugin.id).toBe("sms");

@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   E164Schema,
+  missingSmsCredentials,
   resolveTwilioSmsConfig,
   TwilioSmsConfigSchema,
   type TwilioSmsConfig,
@@ -93,5 +94,131 @@ describe("resolveTwilioSmsConfig — fail-closed credential completeness", () =>
     const env: NodeJS.ProcessEnv = { TWILIO_SMS_NUMBER: "+15550000000" };
     const r = resolveTwilioSmsConfig(FULL, env);
     expect(r?.smsNumber).toBe("+15550001234"); // config wins
+  });
+});
+
+describe("resolveTwilioSmsConfig — SMS-specific env set (voice-call shares the generic names)", () => {
+  // voice-call reads TWILIO_ACCOUNT_SID / TWILIO_AUTH_TOKEN too. The ShrineAI SMS
+  // number lives on a DIFFERENT Twilio account, so SMS creds must be settable
+  // without re-pointing voice. TWILIO_SMS_* win as a COHERENT SET: if any SMS-
+  // specific credential is present, the generic ones are ignored entirely, so
+  // two accounts can never be mixed into one (unauthenticatable) config.
+  const GENERIC = {
+    TWILIO_ACCOUNT_SID: "AC_voice",
+    TWILIO_API_KEY_SID: "SK_voice",
+    TWILIO_API_KEY_SECRET: "secret_voice",
+    TWILIO_AUTH_TOKEN: "authtok_voice",
+  };
+  const SMS = {
+    TWILIO_SMS_ACCOUNT_SID: "AC_sms",
+    TWILIO_SMS_API_KEY_SID: "SK_sms",
+    TWILIO_SMS_API_KEY_SECRET: "secret_sms",
+    TWILIO_SMS_AUTH_TOKEN: "authtok_sms",
+  };
+
+  it("uses the TWILIO_SMS_* credentials when present, even with generic ones set", () => {
+    const r = resolveTwilioSmsConfig(TwilioSmsConfigSchema.parse({}), {
+      ...GENERIC,
+      ...SMS,
+      TWILIO_SMS_NUMBER: "+15550008434",
+    });
+    expect(r).toMatchObject({
+      accountSid: "AC_sms",
+      apiKeySid: "SK_sms",
+      apiKeySecret: "secret_sms",
+      authToken: "authtok_sms",
+      smsNumber: "+15550008434",
+    });
+  });
+
+  it("never MIXES accounts: a partial SMS-specific set is INERT, not topped up from generic", () => {
+    const { TWILIO_SMS_API_KEY_SECRET: _drop, ...partial } = SMS;
+    const r = resolveTwilioSmsConfig(TwilioSmsConfigSchema.parse({}), {
+      ...GENERIC,
+      ...partial,
+      TWILIO_SMS_NUMBER: "+15550008434",
+    });
+    expect(r).toBeNull();
+  });
+
+  it("with NO SMS-specific credentials, the generic names still work (documented fallback)", () => {
+    const r = resolveTwilioSmsConfig(TwilioSmsConfigSchema.parse({}), {
+      ...GENERIC,
+      TWILIO_SMS_NUMBER: "+15550009999",
+    });
+    expect(r?.accountSid).toBe("AC_voice");
+  });
+
+  it("ONE SMS-specific credential alone selects the SMS set (inert), never tops up from generic", () => {
+    const r = resolveTwilioSmsConfig(TwilioSmsConfigSchema.parse({}), {
+      ...GENERIC,
+      TWILIO_SMS_ACCOUNT_SID: "AC_sms",
+      TWILIO_SMS_NUMBER: "+15550008434",
+    });
+    expect(r).toBeNull();
+  });
+
+  it.each(["", "   ", "\n"])(
+    "an empty/whitespace SMS-specific value (%j) counts as ABSENT: generic still works",
+    (blank) => {
+      const r = resolveTwilioSmsConfig(TwilioSmsConfigSchema.parse({}), {
+        ...GENERIC,
+        TWILIO_SMS_ACCOUNT_SID: blank,
+        TWILIO_SMS_NUMBER: "+15550009999",
+      });
+      expect(r?.accountSid).toBe("AC_voice");
+    },
+  );
+
+  it("a whitespace-only credential does NOT satisfy the set (inert, not a blank password)", () => {
+    const r = resolveTwilioSmsConfig(TwilioSmsConfigSchema.parse({}), {
+      ...SMS,
+      TWILIO_SMS_API_KEY_SECRET: "  ",
+      TWILIO_SMS_NUMBER: "+15550008434",
+    });
+    expect(r).toBeNull();
+  });
+
+  it("values are trimmed (a secret store's trailing newline does not break auth)", () => {
+    const r = resolveTwilioSmsConfig(TwilioSmsConfigSchema.parse({}), {
+      ...SMS,
+      TWILIO_SMS_AUTH_TOKEN: "authtok_sms\n",
+      TWILIO_SMS_NUMBER: " +15550008434 ",
+    });
+    expect(r?.authToken).toBe("authtok_sms");
+    expect(r?.smsNumber).toBe("+15550008434");
+  });
+});
+
+describe("missingSmsCredentials — names what an enabled-but-inert surface needs", () => {
+  const SMS_SET = {
+    TWILIO_SMS_ACCOUNT_SID: "AC_sms",
+    TWILIO_SMS_API_KEY_SID: "SK_sms",
+    TWILIO_SMS_API_KEY_SECRET: "secret_sms",
+    TWILIO_SMS_AUTH_TOKEN: "authtok_sms",
+  };
+  it("nothing set: names the generic set + the number", () => {
+    expect(missingSmsCredentials(undefined, {})).toEqual([
+      "TWILIO_ACCOUNT_SID",
+      "TWILIO_API_KEY_SID",
+      "TWILIO_API_KEY_SECRET",
+      "TWILIO_AUTH_TOKEN",
+      "TWILIO_SMS_NUMBER",
+    ]);
+  });
+  it("a partial SMS set: names the SMS-specific names still missing", () => {
+    const { TWILIO_SMS_AUTH_TOKEN: _d, ...partial } = SMS_SET;
+    expect(
+      missingSmsCredentials(undefined, { ...partial, TWILIO_SMS_NUMBER: "+15550008434" }),
+    ).toEqual(["TWILIO_SMS_AUTH_TOKEN"]);
+  });
+  it("complete: empty, and it returns names, never values", () => {
+    expect(
+      missingSmsCredentials(undefined, { ...SMS_SET, TWILIO_SMS_NUMBER: "+15550008434" }),
+    ).toEqual([]);
+    const out = missingSmsCredentials(undefined, { TWILIO_SMS_ACCOUNT_SID: "AC_secretish" }).join(
+      " ",
+    );
+    expect(out).not.toContain("AC_secretish");
   });
 });

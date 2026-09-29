@@ -77,6 +77,66 @@ const ENV = {
 } as const;
 
 /**
+ * SMS-specific credential names. voice-call reads the GENERIC TWILIO_ACCOUNT_SID /
+ * TWILIO_AUTH_TOKEN, and the ShrineAI SMS number can live on a different Twilio
+ * account, so SMS credentials must be settable without re-pointing voice.
+ * They win as a COHERENT SET: if ANY of these is present, the generic names are
+ * ignored for credentials, so two accounts are never mixed into one config.
+ */
+const SMS_ENV = {
+  accountSid: "TWILIO_SMS_ACCOUNT_SID",
+  apiKeySid: "TWILIO_SMS_API_KEY_SID",
+  apiKeySecret: "TWILIO_SMS_API_KEY_SECRET",
+  authToken: "TWILIO_SMS_AUTH_TOKEN",
+} as const;
+
+/** An env value, trimmed; empty or whitespace-only counts as ABSENT (a secret store
+ * that writes "" or a stray newline must not select a credential set or satisfy one). */
+function envValue(env: NodeJS.ProcessEnv, name: string): string | undefined {
+  const v = env[name]?.trim();
+  return v ? v : undefined;
+}
+
+type CredentialNames = { [K in keyof typeof SMS_ENV]: string };
+
+/** Which env names the credentials are read from: the SMS set if ANY of it is present. */
+function credentialEnvNames(env: NodeJS.ProcessEnv): CredentialNames {
+  const smsPresent = Object.values(SMS_ENV).some((n) => envValue(env, n) !== undefined);
+  return smsPresent ? SMS_ENV : ENV;
+}
+
+function envCredentials(env: NodeJS.ProcessEnv) {
+  const names = credentialEnvNames(env);
+  return {
+    accountSid: envValue(env, names.accountSid),
+    apiKeySid: envValue(env, names.apiKeySid),
+    apiKeySecret: envValue(env, names.apiKeySecret),
+    authToken: envValue(env, names.authToken),
+  };
+}
+
+/**
+ * The credential/number env NAMES still missing for SMS to run — names only, never
+ * values — so an enabled-but-inert surface can say exactly what to provision.
+ * Empty when the config is credential-complete.
+ */
+export function missingSmsCredentials(
+  input: TwilioSmsConfig | undefined,
+  env: NodeJS.ProcessEnv = process.env,
+): string[] {
+  const parsed = input ?? TwilioSmsConfigSchema.parse({});
+  const names = credentialEnvNames(env);
+  const fromEnv = envCredentials(env);
+  const missing: string[] = [];
+  // Iterate the CREDENTIAL keys only: the generic name map also has smsNumber.
+  for (const k of Object.keys(SMS_ENV) as Array<keyof CredentialNames>) {
+    if (!(parsed[k] ?? fromEnv[k])) missing.push(names[k]);
+  }
+  if (!(parsed.smsNumber ?? envValue(env, ENV.smsNumber))) missing.push(ENV.smsNumber);
+  return missing;
+}
+
+/**
  * Merge config + env fallback and decide whether the SMS channel is CREDENTIAL-
  * COMPLETE. Returns the resolved config only when EVERY required credential +
  * the sender number is present — otherwise `null` (channel stays INERT, registers
@@ -91,11 +151,12 @@ export function resolveTwilioSmsConfig(
   env: NodeJS.ProcessEnv = process.env,
 ): ResolvedTwilioSmsConfig | null {
   const parsed = input ?? TwilioSmsConfigSchema.parse({});
-  const accountSid = parsed.accountSid ?? env[ENV.accountSid];
-  const apiKeySid = parsed.apiKeySid ?? env[ENV.apiKeySid];
-  const apiKeySecret = parsed.apiKeySecret ?? env[ENV.apiKeySecret];
-  const authToken = parsed.authToken ?? env[ENV.authToken];
-  const smsNumber = parsed.smsNumber ?? env[ENV.smsNumber];
+  const fromEnv = envCredentials(env);
+  const accountSid = parsed.accountSid ?? fromEnv.accountSid;
+  const apiKeySid = parsed.apiKeySid ?? fromEnv.apiKeySid;
+  const apiKeySecret = parsed.apiKeySecret ?? fromEnv.apiKeySecret;
+  const authToken = parsed.authToken ?? fromEnv.authToken;
+  const smsNumber = parsed.smsNumber ?? envValue(env, ENV.smsNumber);
 
   if (!accountSid || !apiKeySid || !apiKeySecret || !authToken || !smsNumber) {
     return null;

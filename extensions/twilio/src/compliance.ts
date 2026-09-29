@@ -25,7 +25,20 @@ export type OptOutStore = {
 export type ComplianceKeyword = "stop" | "start" | "help";
 
 // Twilio standard opt-out / opt-in / help keyword sets (exact-match).
-const STOP_WORDS = new Set(["STOP", "STOPALL", "UNSUBSCRIBE", "CANCEL", "END", "QUIT"]);
+// REVOKE / OPT OUT / OPTOUT: the FCC 2024 consent-revocation order (47 CFR
+// 64.1200(a)(10)) names them alongside the classic set.
+const STOP_WORDS = new Set([
+  "STOP",
+  "STOPALL",
+  "UNSUBSCRIBE",
+  "CANCEL",
+  "END",
+  "QUIT",
+  "REVOKE",
+  "OPTOUT",
+  "OPT OUT",
+  "OPT-OUT",
+]);
 const START_WORDS = new Set(["START", "YES", "UNSTOP"]);
 const HELP_WORDS = new Set(["HELP", "INFO"]);
 
@@ -39,7 +52,8 @@ export function classifyCompliance(body: string): ComplianceKeyword | null {
     .trim()
     .toUpperCase()
     .replace(/[.!?]+$/, "")
-    .trim();
+    .trim()
+    .replace(/\s+/g, " ");
   if (STOP_WORDS.has(normalized)) return "stop";
   if (START_WORDS.has(normalized)) return "start";
   if (HELP_WORDS.has(normalized)) return "help";
@@ -47,12 +61,49 @@ export function classifyCompliance(body: string): ComplianceKeyword | null {
 }
 
 // Compliance reply copy — generic, no PHI / clerk-id / pairing code.
-const STOP_REPLY =
-  "You are unsubscribed from Shrine Longevity messages and will receive no more texts. Reply START to resubscribe.";
-const START_REPLY =
-  "You are resubscribed to Shrine Longevity messages. Reply HELP for help, STOP to unsubscribe.";
-const HELP_REPLY =
-  "Shrine Longevity companion. Msg & data rates may apply. Reply STOP to unsubscribe.";
+// ---------------------------------------------------------------------------
+// REGISTERED CAMPAIGN COPY — must match the A2P 10DLC campaign form BYTE-FOR-BYTE.
+// Source: gtm a2p-10dlc shrineai-sms-campaign-DRAFT.md rev 3 (sha256 a07c04fa5223…),
+// CEO GREEN #12767, GSM-7 applied per CEO #12799; OPT-OUT from devex #12804, HELP and
+// OPT-IN from the CEO's shortened co-sign #12809 (relayed verbatim by devex #12812),
+// each keyword reply <= 160 chars (one SMS segment). Carriers compare these to the registered
+// campaign: do NOT edit without a new CEO co-sign AND a campaign update.
+// Pinned (exact text + GSM-7 charset) by campaign-copy.test.ts.
+// ---------------------------------------------------------------------------
+/** Sent on STOP (and its synonyms). */
+export const OPT_OUT_REPLY =
+  "ShrineAI (Shrine Longevity): you're unsubscribed and won't receive more messages. Reply START to resubscribe.";
+/** Sent on START (and synonyms) AND on a number's first message (mobile-originated opt-in). */
+export const OPT_IN_REPLY =
+  "ShrineAI (Shrine Longevity): you're connected. Msg frequency varies; we only reply to you. Msg & data rates may apply. Reply HELP for help, STOP to opt out.";
+/** Sent on HELP (and synonyms). */
+export const HELP_REPLY =
+  "ShrineAI (Shrine Longevity) is an AI assistant for account holders. Help: support@syntropyhealth.bio. Msg & data rates may apply. Reply STOP to opt out.";
+
+/** The three keyword replies a channel sends. Required per call — no default — so a
+ * channel can never silently fall back to another channel's registered copy. */
+export type ComplianceCopy = {
+  readonly stop: string;
+  readonly start: string;
+  readonly help: string;
+};
+
+/** SMS (Twilio, number registered under the ShrineAI A2P 10DLC campaign). */
+export const SMS_CAMPAIGN_COPY: ComplianceCopy = {
+  stop: OPT_OUT_REPLY,
+  start: OPT_IN_REPLY,
+  help: HELP_REPLY,
+};
+
+/** Channels NOT covered by the SMS campaign registration (WhatsApp via kapso). Kept
+ * byte-identical to the pre-campaign copy: the A2P ruling scoped SMS only, and
+ * re-wording another channel's compliance replies needs its own co-sign. */
+export const GENERIC_COMPLIANCE_COPY: ComplianceCopy = {
+  stop: "You are unsubscribed from Shrine Longevity messages and will receive no more texts. Reply START to resubscribe.",
+  start:
+    "You are resubscribed to Shrine Longevity messages. Reply HELP for help, STOP to unsubscribe.",
+  help: "Shrine Longevity companion. Msg & data rates may apply. Reply STOP to unsubscribe.",
+};
 
 export type ComplianceOutcome =
   | { kind: "stop"; reply: string }
@@ -70,16 +121,17 @@ export async function handleInboundCompliance(
   from: string,
   body: string,
   store: OptOutStore,
+  copy: ComplianceCopy,
 ): Promise<ComplianceOutcome> {
   switch (classifyCompliance(body)) {
     case "stop":
       await store.optOut(from);
-      return { kind: "stop", reply: STOP_REPLY };
+      return { kind: "stop", reply: copy.stop };
     case "start":
       await store.optIn(from);
-      return { kind: "start", reply: START_REPLY };
+      return { kind: "start", reply: copy.start };
     case "help":
-      return { kind: "help", reply: HELP_REPLY };
+      return { kind: "help", reply: copy.help };
     default:
       return { kind: "passthrough" };
   }

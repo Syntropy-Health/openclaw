@@ -3,6 +3,7 @@ import {
   classifyCompliance,
   guardedSendSms,
   handleInboundCompliance,
+  SMS_CAMPAIGN_COPY,
   type OptOutStore,
 } from "./compliance.js";
 import { type ResolvedTwilioSmsConfig } from "./config.js";
@@ -70,7 +71,7 @@ describe("classifyCompliance — exact-keyword match (no false opt-out from conv
 describe("handleInboundCompliance", () => {
   it("STOP persists an opt-out and returns a confirmation (kind=stop)", async () => {
     const store = memStore();
-    const out = await handleInboundCompliance("+15557654321", "STOP", store);
+    const out = await handleInboundCompliance("+15557654321", "STOP", store, SMS_CAMPAIGN_COPY);
     expect(out.kind).toBe("stop");
     expect(store.set.has("+15557654321")).toBe(true);
     if (out.kind === "stop") expect(out.reply.length).toBeGreaterThan(0);
@@ -78,28 +79,33 @@ describe("handleInboundCompliance", () => {
 
   it("START clears an existing opt-out (kind=start)", async () => {
     const store = memStore(["+15557654321"]);
-    const out = await handleInboundCompliance("+15557654321", "start", store);
+    const out = await handleInboundCompliance("+15557654321", "start", store, SMS_CAMPAIGN_COPY);
     expect(out.kind).toBe("start");
     expect(store.set.has("+15557654321")).toBe(false);
   });
 
   it("HELP returns help copy WITHOUT changing opt-out state", async () => {
     const store = memStore(["+15557654321"]);
-    const out = await handleInboundCompliance("+15557654321", "HELP", store);
+    const out = await handleInboundCompliance("+15557654321", "HELP", store, SMS_CAMPAIGN_COPY);
     expect(out.kind).toBe("help");
     expect(store.set.has("+15557654321")).toBe(true); // unchanged
   });
 
   it("a normal message passes through to the agent (kind=passthrough)", async () => {
     const store = memStore();
-    const out = await handleInboundCompliance("+15557654321", "log an apple", store);
+    const out = await handleInboundCompliance(
+      "+15557654321",
+      "log an apple",
+      store,
+      SMS_CAMPAIGN_COPY,
+    );
     expect(out.kind).toBe("passthrough");
   });
 
   it("compliance replies never contain PHI markers (generic copy only)", async () => {
     const store = memStore();
-    const stop = await handleInboundCompliance("+15557654321", "STOP", store);
-    const help = await handleInboundCompliance("+15557654321", "HELP", store);
+    const stop = await handleInboundCompliance("+15557654321", "STOP", store, SMS_CAMPAIGN_COPY);
+    const help = await handleInboundCompliance("+15557654321", "HELP", store, SMS_CAMPAIGN_COPY);
     for (const o of [stop, help]) {
       if (o.kind !== "passthrough") {
         expect(o.reply).not.toMatch(/clerk|pairing|\bphi\b|patient/i);
@@ -111,7 +117,7 @@ describe("handleInboundCompliance", () => {
 describe("★ BEHAVIORAL PIN — a STOP'd number receives ZERO subsequent sends", () => {
   it("suppresses a send to an opted-out number WITHOUT calling fetch (0 network sends)", async () => {
     const store = memStore();
-    await handleInboundCompliance("+15557654321", "STOP", store);
+    await handleInboundCompliance("+15557654321", "STOP", store, SMS_CAMPAIGN_COPY);
 
     const fetchImpl = vi.fn() as unknown as typeof fetch;
     const r = await guardedSendSms(
@@ -150,5 +156,18 @@ describe("★ BEHAVIORAL PIN — a STOP'd number receives ZERO subsequent sends"
     );
     expect(r).toEqual({ ok: false, suppressed: true });
     expect(fetchImpl).not.toHaveBeenCalled();
+  });
+});
+
+describe("FCC consent-revocation words (47 CFR 64.1200(a)(10))", () => {
+  it.each(["REVOKE", "revoke", "OPT OUT", "opt out", "Opt  Out.", "OPTOUT", "opt-out"])(
+    "%j opts out",
+    (w) => {
+      expect(classifyCompliance(w)).toBe("stop");
+    },
+  );
+  it("sentences containing them still do not", () => {
+    expect(classifyCompliance("please don't opt out my mom")).toBeNull();
+    expect(classifyCompliance("revoke my last order")).toBeNull();
   });
 });

@@ -39,7 +39,8 @@
       "voice-call",
       "whatsapp",
       "catch-phrases",
-      "syntropy"
+      "syntropy",
+      "twilio"
     ],
     "entries": {
       "persist-user-identity": {
@@ -103,6 +104,12 @@
         "enabled": true,
         "config": {
           "syntropyBaseUrl": "https://syntropy-api-production.up.railway.app"
+        }
+      },
+      "twilio": {
+        "enabled": true,
+        "config": {
+          "smsEnabled": true
         }
       }
     },

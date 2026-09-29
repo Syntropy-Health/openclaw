@@ -1,7 +1,12 @@
 import { describe, expect, it, vi } from "vitest";
 import { type OptOutStore } from "./compliance.js";
 import { type ResolvedTwilioSmsConfig } from "./config.js";
-import { buildSmsOutboundAdapter, SMS_OPTOUT_SUPPRESSED } from "./outbound.js";
+import { type SmsContactStore } from "./contacts-store.js";
+import {
+  buildSmsOutboundAdapter,
+  SMS_NO_CONSENT_SUPPRESSED,
+  SMS_OPTOUT_SUPPRESSED,
+} from "./outbound.js";
 
 const CONFIG: ResolvedTwilioSmsConfig = {
   accountSid: "AC_x",
@@ -12,6 +17,19 @@ const CONFIG: ResolvedTwilioSmsConfig = {
   inbound: "pairing",
   allowFrom: [],
 };
+
+function contactsWith(known: string[], opts: { throws?: boolean } = {}): SmsContactStore {
+  return {
+    recordFirstContact: () => false,
+    forgetContact: () => {},
+    hasContact: (n) => {
+      if (opts.throws) throw new Error("db down");
+      return known.includes(n);
+    },
+  };
+}
+/** Every number has texted us — keeps the pre-existing tests on the send path. */
+const CONSENTED: SmsContactStore = { ...contactsWith([]), hasContact: () => true };
 
 const emptyStore: OptOutStore = { isOptedOut: () => false, optOut: () => {}, optIn: () => {} };
 
@@ -28,13 +46,18 @@ function okFetch(payload: Record<string, unknown>) {
 
 describe("buildSmsOutboundAdapter", () => {
   it("is a direct-delivery adapter", () => {
-    const a = buildSmsOutboundAdapter({ resolveConfig: () => CONFIG, store: emptyStore });
+    const a = buildSmsOutboundAdapter({
+      resolveConfig: () => CONFIG,
+      store: emptyStore,
+      contacts: CONSENTED,
+    });
     expect(a.deliveryMode).toBe("direct");
   });
 
   it("sendText success → { channel: 'sms', messageId: sid }", async () => {
     const a = buildSmsOutboundAdapter({
       resolveConfig: () => CONFIG,
+      contacts: CONSENTED,
       store: emptyStore,
       fetchImpl: okFetch({ sid: "SM99", status: "queued" }),
     });
@@ -48,6 +71,7 @@ describe("buildSmsOutboundAdapter", () => {
     const fetchImpl = vi.fn() as unknown as typeof fetch;
     const a = buildSmsOutboundAdapter({
       resolveConfig: () => CONFIG,
+      contacts: CONSENTED,
       store: optedStore,
       fetchImpl,
     });
@@ -63,6 +87,7 @@ describe("buildSmsOutboundAdapter", () => {
     ) as unknown as typeof fetch;
     const a = buildSmsOutboundAdapter({
       resolveConfig: () => CONFIG,
+      contacts: CONSENTED,
       store: emptyStore,
       fetchImpl: failFetch,
     });
@@ -70,7 +95,11 @@ describe("buildSmsOutboundAdapter", () => {
   });
 
   it("throws when the channel is not configured (resolveConfig → null)", async () => {
-    const a = buildSmsOutboundAdapter({ resolveConfig: () => null, store: emptyStore });
+    const a = buildSmsOutboundAdapter({
+      resolveConfig: () => null,
+      store: emptyStore,
+      contacts: CONSENTED,
+    });
     await expect(a.sendText!(ctx("+15557654321", "nudge"))).rejects.toThrow(/not configured/i);
   });
 
@@ -83,6 +112,7 @@ describe("buildSmsOutboundAdapter", () => {
     ) as unknown as typeof fetch;
     const a = buildSmsOutboundAdapter({
       resolveConfig: () => CONFIG,
+      contacts: CONSENTED,
       store: emptyStore,
       fetchImpl: failFetch,
     });
@@ -96,5 +126,75 @@ describe("buildSmsOutboundAdapter", () => {
     expect(msg).toContain("400"); // real diagnostic info surfaced (not tautological)
     expect(msg).toContain("Invalid 'To'");
     expect(msg).not.toContain("secret_never_leak"); // ...but never the api-key secret
+  });
+});
+
+describe("ShrineAI sign-off reaches the wire", () => {
+  /** The form-encoded Body actually POSTed to Twilio. */
+  async function sentBody(text: string): Promise<string> {
+    const fetchImpl = vi.fn(
+      async () => new Response(JSON.stringify({ sid: "SM1", status: "queued" }), { status: 201 }),
+    );
+    const a = buildSmsOutboundAdapter({
+      resolveConfig: () => CONFIG,
+      contacts: CONSENTED,
+      store: emptyStore,
+      fetchImpl: fetchImpl as unknown as typeof fetch,
+    });
+    await a.sendText!(ctx("+15557654321", text));
+    expect(fetchImpl).toHaveBeenCalledTimes(1);
+    const init = (fetchImpl.mock.calls[0] as unknown as [string, RequestInit])[1];
+    return new URLSearchParams(String(init.body)).get("Body") ?? "";
+  }
+
+  it("every SMS reply is signed as ShrineAI (the Body Twilio receives, not a helper's output)", async () => {
+    expect(await sentBody("Your check-in is logged.")).toBe(
+      "Your check-in is logged. - ShrineAI, an AI assistant",
+    );
+  });
+
+  it("a long reply is fitted to Twilio's 1600-char limit with the sign-off kept", async () => {
+    const body = await sentBody("x".repeat(4000));
+    expect(body.length).toBeLessThanOrEqual(1600);
+    expect(body.endsWith("- ShrineAI, an AI assistant")).toBe(true);
+  });
+});
+
+describe("★ consent gate — the agent may only text US numbers that texted us first", () => {
+  async function send(to: string, contacts: SmsContactStore) {
+    const fetchImpl = okFetch({ sid: "SM1", status: "queued" });
+    const a = buildSmsOutboundAdapter({
+      resolveConfig: () => CONFIG,
+      store: emptyStore,
+      contacts,
+      fetchImpl,
+    });
+    const r = await a.sendText!(ctx(to, "hello"));
+    return { r, fetchImpl };
+  }
+
+  it("a number that has texted us is sent to", async () => {
+    const { r, fetchImpl } = await send("+15557654321", contactsWith(["+15557654321"]));
+    expect(r.messageId).toBe("SM1");
+    expect(fetchImpl).toHaveBeenCalledTimes(1);
+  });
+
+  it("a third-party number that never texted us is REFUSED, terminally, with no network send", async () => {
+    const { r, fetchImpl } = await send("+15559990000", contactsWith(["+15557654321"]));
+    expect(r.messageId).toBe(SMS_NO_CONSENT_SUPPRESSED);
+    expect(r.meta).toMatchObject({ suppressed: true, reason: "no-consent" });
+    expect(fetchImpl).not.toHaveBeenCalled();
+  });
+
+  it("a non-US number is refused even with a contact record", async () => {
+    const { r, fetchImpl } = await send("+447700900123", contactsWith(["+447700900123"]));
+    expect(r.messageId).toBe(SMS_NO_CONSENT_SUPPRESSED);
+    expect(fetchImpl).not.toHaveBeenCalled();
+  });
+
+  it("a consent-store error refuses (fail closed)", async () => {
+    const { r, fetchImpl } = await send("+15557654321", contactsWith([], { throws: true }));
+    expect(r.messageId).toBe(SMS_NO_CONSENT_SUPPRESSED);
+    expect(fetchImpl).not.toHaveBeenCalled();
   });
 });
