@@ -12,6 +12,9 @@
  * - after it, the next call makes exactly one attempt, shared by concurrent
  *   callers;
  * - once an attempt succeeds, init never runs again.
+ *
+ * Only errors that REACH this wrapper are retried: an init that catches its own
+ * failure and returns normally has, from here, succeeded.
  */
 export type RetryingInitOptions = {
   logger: { error: (message: string) => void; info: (message: string) => void };
@@ -43,7 +46,11 @@ export function createRetryingInit(
     }
     inFlight ??= (async () => {
       try {
-        await init();
+        // Via a resolved promise so an init that throws SYNCHRONOUSLY becomes a
+        // rejection here. Calling init() directly let a sync throw run this whole
+        // body — finally included — before `inFlight` was assigned, leaving a
+        // rejected promise stored forever: the "cached forever" defect again.
+        await Promise.resolve().then(init);
         ready = true;
         failures = 0;
         lastError = null;

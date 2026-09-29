@@ -147,3 +147,23 @@ describe("secretNameFor helper", () => {
     expect(() => secretNameForUser("")).toThrow(/userId/);
   });
 });
+
+describe("vaultRpcsInstalled — a failed probe is an error, not 'absent'", () => {
+  test("throws when the query fails (was swallowed as false -> silent plaintext path)", async () => {
+    const { vaultRpcsInstalled } = await import("./vault.js");
+    const sql = (() => Promise.reject(new Error("too many connections for role"))) as never;
+    await expect(vaultRpcsInstalled(sql)).rejects.toThrow("too many connections");
+  });
+
+  test("returns false only for a SUCCESSFUL query that finds no function", async () => {
+    const { vaultRpcsInstalled } = await import("./vault.js");
+    const sql = (() => Promise.resolve([{ exists: false }])) as never;
+    await expect(vaultRpcsInstalled(sql)).resolves.toBe(false);
+  });
+
+  test("returns true when the RPC exists", async () => {
+    const { vaultRpcsInstalled } = await import("./vault.js");
+    const sql = (() => Promise.resolve([{ exists: true }])) as never;
+    await expect(vaultRpcsInstalled(sql)).resolves.toBe(true);
+  });
+});
