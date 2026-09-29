@@ -14,8 +14,8 @@ import { type SqlTag } from "./optout-store.js";
 export type SmsPgClient = postgres.Sql;
 
 /** Create the extension's pg pool. Small `max` — opt-out traffic is very light. */
-export function createSmsPgClient(databaseUrl: string): SmsPgClient {
-  return postgres(databaseUrl, { max: 3 });
+export function createSmsPgClient(databaseUrl: string, max: number): SmsPgClient {
+  return postgres(databaseUrl, { max });
 }
 
 /** Narrow the pg client to the structural {@link SqlTag} the opt-out store needs. */

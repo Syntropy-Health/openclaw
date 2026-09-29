@@ -32,8 +32,8 @@ export type ResolvedIdentity = UserRow & {
 // Client
 // ---------------------------------------------------------------------------
 
-export function createPgClient(databaseUrl: string) {
-  return postgres(databaseUrl, { max: 10 });
+export function createPgClient(databaseUrl: string, max: number) {
+  return postgres(databaseUrl, { max });
 }
 
 // ---------------------------------------------------------------------------

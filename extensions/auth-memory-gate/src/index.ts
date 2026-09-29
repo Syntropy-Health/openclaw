@@ -1,4 +1,4 @@
-import type { OpenClawPluginApi } from "openclaw/plugin-sdk";
+import { type OpenClawPluginApi, resolvePgPoolMax } from "openclaw/plugin-sdk";
 import postgres from "postgres";
 import {
   deriveChannel,
@@ -41,7 +41,9 @@ const authMemoryGatePlugin = {
     api.logger.info(
       `auth-memory-gate: connecting to PostgreSQL (hardGate=${hardGate}, requireVerified=${scopeConfig.requireVerified})`,
     );
-    const sql = postgres(databaseUrl, { max: 10 });
+    const pgPool = resolvePgPoolMax();
+    if (pgPool.invalid) api.logger.warn(`auth-memory-gate: ${pgPool.invalid}`);
+    const sql = postgres(databaseUrl, { max: pgPool.max });
 
     // Lazy init: verify DB connectivity on first hook call, cache errors
     let dbReady = false;

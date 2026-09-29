@@ -18,6 +18,7 @@ import {
   normalizeE164,
   type OpenClawConfig,
   type OpenClawPluginApi,
+  resolvePgPoolMax,
 } from "openclaw/plugin-sdk";
 import { type OptOutStore } from "../../twilio/src/compliance.js";
 import { asSqlTag, createSmsPgClient, type SmsPgClient } from "../../twilio/src/db.js";
@@ -184,7 +185,9 @@ const kapsoWhatsappPlugin = {
       // register() before the outbound transport is registered — otherwise a
       // selected `transport: "kapso"` would fail-open to unguarded Baileys.
       try {
-        sql = createSmsPgClient(databaseUrl);
+        const pgPool = resolvePgPoolMax();
+        if (pgPool.invalid) api.logger.warn(`kapso: ${pgPool.invalid}`);
+        sql = createSmsPgClient(databaseUrl, pgPool.max);
         await ensureOptOutSchema(asSqlTag(sql));
         store = createPgOptOutStore(asSqlTag(sql));
         api.logger.info("kapso: opt-out store ready (pg, shared with sms)");

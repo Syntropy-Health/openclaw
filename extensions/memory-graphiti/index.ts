@@ -10,7 +10,7 @@
  */
 
 import { Type } from "@sinclair/typebox";
-import type { OpenClawPluginApi } from "openclaw/plugin-sdk";
+import { type OpenClawPluginApi, resolvePgPoolMax } from "openclaw/plugin-sdk";
 import postgres from "postgres";
 import {
   GraphitiRestClient,
@@ -228,7 +228,7 @@ const memoryPlugin = {
     // Identity DB connection — only created when using "identity" strategy
     const identitySql =
       cfg.groupIdStrategy === "identity" && cfg.databaseUrl
-        ? postgres(cfg.databaseUrl, { max: 5 })
+        ? postgres(cfg.databaseUrl, { max: resolvePgPoolMax().max })
         : null;
 
     api.logger.info(

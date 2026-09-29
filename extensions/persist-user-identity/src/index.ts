@@ -1,4 +1,4 @@
-import type { OpenClawPluginApi } from "openclaw/plugin-sdk";
+import { type OpenClawPluginApi, resolvePgPoolMax } from "openclaw/plugin-sdk";
 // Gateway Clerk-verify + session deny-list — extension→src deep import per the
 // established convention (kapso precedent); src never imports extensions.
 import { authorizeClerkJwt, resolveClerkAuth } from "../../../src/gateway/auth.js";
@@ -58,7 +58,9 @@ const persistUserIdentityPlugin = {
     const pendingIdentify = new Map<string, { email: string; userId: string; expiresAt: number }>();
 
     api.logger.info("persist-user-identity: connecting to PostgreSQL");
-    const sql = createPgClient(databaseUrl);
+    const pgPool = resolvePgPoolMax();
+    if (pgPool.invalid) api.logger.warn(`persist-user-identity: ${pgPool.invalid}`);
+    const sql = createPgClient(databaseUrl, pgPool.max);
     let schemaReady = false;
     let initError: unknown = null;
     // SYN-281: resolved lazily inside ensureReady() (vaultRpcsInstalled is an
