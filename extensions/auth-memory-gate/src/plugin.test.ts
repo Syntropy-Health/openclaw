@@ -172,10 +172,10 @@ describe("auth-memory-gate before_agent_start hook", () => {
     );
   });
 
-  // R5: the init error is no longer cached FOREVER — only for a backoff window
-  // (retry behaviour is proven in fail-closed.test.ts). Within the window a
-  // second call must not re-probe.
-  test("within the backoff window, a second call does not re-probe", async () => {
+  // R5: the init error is no longer cached forever — only for a backoff window.
+  // The window/retry CONTRACT is proven with fake timers in fail-closed.test.ts;
+  // this real-DB-address test pins only the log wording, which is timing-free.
+  test("an unreachable DB logs the failure with its retry delay (not 'will not retry')", async () => {
     const { default: plugin } = await import("./index.js");
     const api = createMockApi({
       pluginConfig: { databaseUrl: "postgresql://invalid:invalid@127.0.0.1:1/nope" },
@@ -191,15 +191,9 @@ describe("auth-memory-gate before_agent_start hook", () => {
       expect.stringContaining("init failed (attempt 1, retry in 1s)"),
     );
 
-    // Clear mock to verify second call behavior
-    (api.logger.error as ReturnType<typeof vi.fn>).mockClear();
-
-    // Second call (immediately, inside the 1s window) fails fast, no re-probe
-    await hook!.handler({ prompt: "msg2" }, { sessionKey: "agent:main:telegram:user2" });
-    expect(api.logger.error).toHaveBeenCalledWith(
-      expect.stringContaining("before_agent_start error"),
-    );
-    expect(api.logger.error).not.toHaveBeenCalledWith(expect.stringContaining("init failed"));
+    // Checked against the SAME call log (no mockClear — clearing first would make
+    // this negative assertion pass vacuously).
+    expect(api.logger.error).not.toHaveBeenCalledWith(expect.stringContaining("will not retry"));
   });
 });
 

@@ -22,6 +22,12 @@ const db = vi.hoisted(() => ({
   /** Row returned by the identity lookup (null = unregistered peer). */
   identity: null as null | Record<string, unknown>,
   initProbes: 0,
+  /** Identity lookups attempted (non-init queries). */
+  lookups: 0,
+  /** Connection-level outage: probes AND lookups fail while true. */
+  down: false,
+  /** Pools opened through the driver factory (must stay 1 across retries). */
+  opens: 0,
 }));
 
 vi.mock("postgres", () => {
@@ -29,20 +35,27 @@ vi.mock("postgres", () => {
     const text = strings.join("?");
     if (/SELECT 1/.test(text)) {
       db.initProbes += 1;
-      if (db.failInits > 0) {
-        db.failInits -= 1;
+      if (db.down || db.failInits > 0) {
+        if (db.failInits > 0) db.failInits -= 1;
         return Promise.reject(new Error('too many connections for role "openclaw_app"'));
       }
       return Promise.resolve([{ "?column?": 1 }]);
     }
-    if (db.queryDown) return Promise.reject(new Error("Connection terminated unexpectedly"));
+    db.lookups += 1;
+    if (db.down || db.queryDown)
+      return Promise.reject(new Error("Connection terminated unexpectedly"));
     return Promise.resolve(db.identity ? [db.identity] : []);
   }) as unknown as {
     (s: TemplateStringsArray, ...v: unknown[]): Promise<unknown[]>;
     end: () => Promise<void>;
   };
   sql.end = () => Promise.resolve();
-  return { default: () => sql };
+  return {
+    default: () => {
+      db.opens += 1;
+      return sql;
+    },
+  };
 });
 
 type MockApi = OpenClawPluginApi & {
@@ -114,6 +127,9 @@ beforeEach(() => {
   db.queryDown = false;
   db.identity = null;
   db.initProbes = 0;
+  db.lookups = 0;
+  db.down = false;
+  db.opens = 0;
   vi.useFakeTimers();
   vi.setSystemTime(new Date("2026-09-29T00:00:00Z"));
 });
@@ -122,8 +138,12 @@ afterEach(() => {
 });
 
 describe("R5 — hardGate fails CLOSED on DB error", () => {
-  test("init failure (e.g. role connection limit) GATES the turn — not {}", async () => {
-    db.failInits = 1;
+  // Differential control: the peer is REGISTERED and the DB is down at the
+  // connection level, so the ONLY route to [IDENTITY_GATE] is the fail-closed
+  // catch — the ordinary "unregistered peer" branch cannot produce it.
+  test("init failure (e.g. role connection limit) GATES a REGISTERED peer — not {}", async () => {
+    db.identity = REGISTERED;
+    db.down = true;
     const { turn } = await setup({ hardGate: true });
     const res = await turn();
     expect(res.prependContext).toContain("[IDENTITY_GATE]");
@@ -131,7 +151,8 @@ describe("R5 — hardGate fails CLOSED on DB error", () => {
   });
 
   test("the gated peer also gets the safety-net append on the outbound reply", async () => {
-    db.failInits = 1;
+    db.identity = REGISTERED;
+    db.down = true;
     const { turn, send } = await setup({ hardGate: true });
     await turn();
     const out = await send();
@@ -144,12 +165,66 @@ describe("R5 — hardGate fails CLOSED on DB error", () => {
     expect((await turn()).prependContext).toContain("[MEMORY_SCOPE]"); // healthy baseline
     db.queryDown = true;
     expect((await turn()).prependContext).toContain("[IDENTITY_GATE]");
+    expect(db.initProbes).toBe(1); // a lookup failure is not a probe storm
+  });
+
+  test("lookup failure also arms the outbound safety-net append", async () => {
+    db.identity = REGISTERED;
+    const { turn, send } = await setup({ hardGate: true });
+    await turn();
+    db.queryDown = true;
+    await turn();
+    expect((await send()).content).toBe("hi" + formatHardGateReplyAppend());
+  });
+
+  test("hardGate OFF: a lookup failure after a good init returns {} (soft)", async () => {
+    db.identity = REGISTERED;
+    const { turn } = await setup({ hardGate: false });
+    await turn();
+    db.queryDown = true;
+    expect(await turn()).toEqual({});
   });
 
   test("hardGate OFF keeps the soft behaviour: DB error -> {} (no gate imposed)", async () => {
     db.failInits = 1;
     const { turn } = await setup({ hardGate: false });
     expect(await turn()).toEqual({});
+  });
+});
+
+describe("R5 — a DB lost AFTER a good init also backs off (no per-turn stall)", () => {
+  test("after a failed lookup, turns inside the window are gated WITHOUT touching the DB", async () => {
+    db.identity = REGISTERED;
+    const { turn } = await setup({ hardGate: true });
+    await turn(); // healthy: probe + lookup
+    db.queryDown = true;
+    expect((await turn()).prependContext).toContain("[IDENTITY_GATE]"); // lookup fails
+    const lookupsAfterFailure = db.lookups;
+    const probesAfterFailure = db.initProbes;
+    // Inside the 1s window: gated, and no new lookup or probe hits the dead DB.
+    expect((await turn()).prependContext).toContain("[IDENTITY_GATE]");
+    expect((await turn()).prependContext).toContain("[IDENTITY_GATE]");
+    expect(db.lookups).toBe(lookupsAfterFailure);
+    expect(db.initProbes).toBe(probesAfterFailure);
+  });
+
+  test("after the window, a re-probe runs; when the DB is back the gate clears", async () => {
+    db.identity = REGISTERED;
+    const { turn } = await setup({ hardGate: true });
+    await turn();
+    db.queryDown = true;
+    await turn(); // fails -> backoff
+    db.queryDown = false;
+    vi.advanceTimersByTime(1_000);
+    const back = await turn();
+    expect(back.prependContext).toContain("[MEMORY_SCOPE]");
+    expect(back.prependContext).not.toContain("[IDENTITY_GATE]");
+  });
+
+  test("concurrent turns share ONE in-flight probe", async () => {
+    const { turn } = await setup({ hardGate: true });
+    await Promise.all([turn(), turn(), turn()]);
+    expect(db.initProbes).toBe(1);
   });
 });
 
@@ -179,6 +254,7 @@ describe("R5 — a failed init RETRIES with backoff (not cached forever)", () =>
     vi.advanceTimersByTime(1_000);
     expect((await turn()).prependContext).toContain("[IDENTITY_GATE]");
     expect(db.initProbes).toBe(2);
+    expect(db.opens).toBe(1); // retries re-probe the SAME pool, never open a new one
   });
 
   test("backoff grows and is capped at 60s", async () => {

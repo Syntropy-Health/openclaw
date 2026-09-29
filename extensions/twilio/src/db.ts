@@ -10,10 +10,10 @@
 
 import { openPluginPool } from "openclaw/plugin-sdk";
 import postgres from "postgres";
+import { type SqlTag } from "./optout-store.js";
 
 /** Minimal logger the pool helper needs (the plugin api logger satisfies it). */
 type PoolLogger = { warn: (message: string) => void };
-import { type SqlTag } from "./optout-store.js";
 
 export type SmsPgClient = postgres.Sql;
 

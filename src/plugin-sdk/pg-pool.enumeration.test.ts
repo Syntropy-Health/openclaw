@@ -1,35 +1,36 @@
 /**
- * Deployment budget guard for plugin Postgres pools.
+ * Deployment guard for plugin Postgres connections.
  *
  * openclaw's database is a dedicated schema in a shared Supabase project; its
- * role `openclaw_app` has CONNECTION LIMIT 20 (devex, 2026-09-28). The total
- * connections the gateway can open is (pool instances) x (per-pool max), and
- * during a deploy two processes can overlap. This test keeps that product
- * inside the limit by making two things true of the source:
+ * role `openclaw_app` has CONNECTION LIMIT 20 (devex, 2026-09-28). The budget is
+ * enforced at RUNTIME by `openPluginPool`: all plugins in a process share one
+ * pool per URL, so a process holds at most `max` connections (<= the ceiling),
+ * however many plugins, loops or wrappers open "their" pool.
  *
- *  1. Nothing opens a pool except through `openPluginPool` — no production code
- *     calls the driver directly, aliases it, or uses a different driver. That
- *     makes "a pool that forgot its max" (driver default 10) IMPOSSIBLE rather
- *     than something a pattern has to spot.
- *  2. The number of pool INSTANCES is exactly the enumerated list. Instances are
- *     direct `openPluginPool(` calls plus calls to FACTORIES — functions whose
- *     body calls `openPluginPool(`, discovered from the source rather than kept
- *     by hand (kapso opens a pool by calling twilio's factory).
+ * That guarantee holds only if nothing reaches the driver another way. This
+ * test checks the source (TypeScript AST — comments, strings, template and regex
+ * literals cannot fool it) for exactly that:
  *
- * It parses each file with the TypeScript compiler and inspects the AST, so
- * comments, strings, template literals and regex literals can neither satisfy
- * nor hide a check (a text scanner was tried first and a regex literal
- * containing a quote character made it blank out a real call).
+ *  - the `postgres` driver binding is used only as `openPluginPool`'s first
+ *    argument (or in type positions) — no direct call, `new`, rename, or pass-
+ *    through;
+ *  - no DB driver module is loaded any other way: no dynamic `import()`,
+ *    `require()`, re-export, or a different driver package.
+ *
+ * And it pins the arithmetic that makes the ceiling safe.
+ *
+ * Scope limits, stated so they are not read as covered: it scans `.ts/.mts/.js/
+ * .mjs` production files under `extensions/` and `src/` (tests, e2e helpers and
+ * symlinks excluded); a driver package not in DB_DRIVER_MODULES is invisible.
  */
 import { lstatSync, readdirSync, readFileSync } from "node:fs";
 import { join, relative } from "node:path";
 import ts from "typescript";
 import { describe, expect, it } from "vitest";
-import { DEFAULT_PG_POOL_MAX } from "./pg-pool.js";
+import { DEFAULT_PG_POOL_MAX, PG_POOL_MAX_CEILING } from "./pg-pool.js";
 
 const ROOT = join(import.meta.dirname, "..", "..");
 const SCAN_DIRS = ["extensions", "src"].map((d) => join(ROOT, d));
-const SELF = "src/plugin-sdk/pg-pool.ts";
 
 /** CONNECTION LIMIT on the Supabase role openclaw_app. */
 const ROLE_CONNECTION_LIMIT = 20;
@@ -38,16 +39,15 @@ const OPERATOR_RESERVE = 2;
 /** Gateway processes that can hold pools at once (old + new during a deploy). */
 const CONCURRENT_PROCESSES = 2;
 
-/** Pool instances (enumerated 2026-09-28), one entry per opening call site. */
-const EXPECTED_INSTANCES = [
-  "extensions/auth-memory-gate/src/index.ts",
-  "extensions/kapso/src/index.ts",
-  "extensions/memory-graphiti/index.ts",
-  "extensions/persist-postgres/src/index.ts",
-  "extensions/persist-user-identity/src/index.ts",
-  "extensions/syntropy/src/index.ts",
-  "extensions/twilio/src/index.ts",
-].toSorted();
+/** Database driver packages. Only `postgres`, only via openPluginPool. */
+const DB_DRIVER_MODULES = new Set([
+  "postgres",
+  "pg",
+  "pg-pool",
+  "@neondatabase/serverless",
+  "@vercel/postgres",
+  "@supabase/postgres-js",
+]);
 
 function walk(dir: string, out: string[] = []): string[] {
   for (const name of readdirSync(dir)) {
@@ -55,9 +55,7 @@ function walk(dir: string, out: string[] = []): string[] {
       continue;
     }
     const p = join(dir, name);
-    // lstat, not stat: the tree carries symlinks (some dangling, e.g. a CLAUDE.md
-    // alias) and a symlinked file is scanned at its real path if it is in-tree.
-    const st = lstatSync(p);
+    const st = lstatSync(p); // lstat: skip symlinks (some are dangling)
     if (st.isSymbolicLink()) {
       continue;
     }
@@ -84,145 +82,127 @@ function visit(node: ts.Node, fn: (n: ts.Node) => void): void {
   ts.forEachChild(node, (c) => visit(c, fn));
 }
 
-/** Name a call is made through: `foo(...)` -> "foo", `a.b.foo(...)` -> "foo". */
-function calleeName(call: ts.CallExpression): string | undefined {
-  const e = call.expression;
-  if (ts.isIdentifier(e)) {
-    return e.text;
-  }
-  if (ts.isPropertyAccessExpression(e)) {
-    return e.name.text;
-  }
-  return undefined;
-}
-
-function callsNamed(node: ts.Node, name: string): number {
-  let n = 0;
-  visit(node, (x) => {
-    if (ts.isCallExpression(x) && calleeName(x) === name) {
-      n += 1;
+function inTypePosition(n: ts.Node): boolean {
+  for (let p: ts.Node | undefined = n.parent; p; p = p.parent) {
+    if (ts.isTypeNode(p) || ts.isTypeAliasDeclaration(p) || ts.isInterfaceDeclaration(p)) {
+      return true;
     }
-  });
-  return n;
+    if (ts.isStatement(p)) {
+      return false;
+    }
+  }
+  return false;
 }
 
-/** Functions (declarations or const = function/arrow) whose body calls openPluginPool. */
-function findFactories(all: Parsed[]): { name: string; file: string; node: ts.Node }[] {
-  const found: { name: string; file: string; node: ts.Node }[] = [];
+function isOpenPluginPoolFirstArg(n: ts.Node): boolean {
+  const call = n.parent;
+  return (
+    !!call &&
+    ts.isCallExpression(call) &&
+    call.arguments[0] === n &&
+    ((ts.isIdentifier(call.expression) && call.expression.text === "openPluginPool") ||
+      (ts.isPropertyAccessExpression(call.expression) &&
+        call.expression.name.text === "openPluginPool"))
+  );
+}
+
+/** Every way production code reaches a DB driver other than openPluginPool(postgres, …). */
+function driverViolations(all: Parsed[]): string[] {
+  const bad: string[] = [];
   for (const { file, sf } of all) {
-    if (file === SELF) {
-      continue;
-    }
+    const bindings = new Set<string>();
     visit(sf, (n) => {
-      if (ts.isFunctionDeclaration(n) && n.name && n.body && callsNamed(n.body, "openPluginPool")) {
-        found.push({ name: n.name.text, file, node: n });
-      } else if (
-        ts.isVariableDeclaration(n) &&
-        ts.isIdentifier(n.name) &&
-        n.initializer &&
-        (ts.isArrowFunction(n.initializer) || ts.isFunctionExpression(n.initializer)) &&
-        callsNamed(n.initializer.body, "openPluginPool")
-      ) {
-        found.push({ name: n.name.text, file, node: n });
-      }
-    });
-  }
-  return found;
-}
+      const specText = (e: ts.Expression | undefined) =>
+        e && ts.isStringLiteralLike(e) ? e.text : undefined;
 
-function poolInstances(all: Parsed[]): string[] {
-  const factories = findFactories(all);
-  const names = new Set(factories.map((f) => f.name));
-  const insideFactory = (n: ts.Node) =>
-    factories.some(
-      (f) =>
-        n.pos >= f.node.pos && n.end <= f.node.end && f.node.getSourceFile() === n.getSourceFile(),
-    );
-  const instances: string[] = [];
-  for (const { file, sf } of all) {
-    if (file === SELF) {
-      continue;
-    }
-    visit(sf, (n) => {
-      if (!ts.isCallExpression(n)) {
-        return;
-      }
-      const name = calleeName(n);
-      if (name === "openPluginPool" && !insideFactory(n)) {
-        instances.push(file);
-      } else if (name && names.has(name)) {
-        instances.push(file);
-      }
-    });
-  }
-  return instances.toSorted();
-}
-
-describe("plugin Postgres pools — deployment budget guard", () => {
-  const all = parseAll();
-
-  it("no production code calls the postgres driver directly", () => {
-    const direct: string[] = [];
-    for (const { file, sf } of all) {
-      if (callsNamed(sf, "postgres") > 0) {
-        direct.push(file);
-      }
-    }
-    expect(direct).toEqual([]);
-  });
-
-  it("the driver is only ever imported under its own name, and no other driver is used", () => {
-    const bad: string[] = [];
-    for (const { file, sf } of all) {
-      visit(sf, (n) => {
-        if (ts.isImportDeclaration(n) && ts.isStringLiteral(n.moduleSpecifier)) {
-          const mod = n.moduleSpecifier.text;
-          if (mod === "pg") {
-            bad.push(`${file}: imports "pg"`);
-          }
-          if (mod !== "postgres" || !n.importClause || n.importClause.isTypeOnly) {
-            return;
-          }
-          const c = n.importClause;
-          if (c.name && c.name.text !== "postgres") {
-            bad.push(`${file}: imports postgres as ${c.name.text}`);
-          }
-          if (c.namedBindings && ts.isNamespaceImport(c.namedBindings)) {
-            bad.push(`${file}: imports postgres as namespace ${c.namedBindings.name.text}`);
-          }
+      if (ts.isImportDeclaration(n)) {
+        const mod = specText(n.moduleSpecifier);
+        if (!mod || !DB_DRIVER_MODULES.has(mod)) {
+          return;
+        }
+        const c = n.importClause;
+        if (!c || c.isTypeOnly) {
+          return;
+        }
+        if (mod !== "postgres") {
+          bad.push(`${file}: imports driver "${mod}"`);
+        } else if (c.name?.text !== "postgres") {
+          bad.push(`${file}: imports postgres as ${c.name?.text}`);
         }
         if (
-          ts.isCallExpression(n) &&
-          calleeName(n) === "require" &&
-          n.arguments[0] &&
-          ts.isStringLiteral(n.arguments[0]) &&
-          (n.arguments[0].text === "postgres" || n.arguments[0].text === "pg")
+          c.namedBindings &&
+          !(
+            ts.isNamedImports(c.namedBindings) &&
+            c.namedBindings.elements.every((e) => e.isTypeOnly)
+          )
         ) {
-          bad.push(`${file}: require()s ${n.arguments[0].text}`);
+          bad.push(`${file}: imports named/namespace bindings from "${mod}"`);
+        }
+        if (c.name) {
+          bindings.add(c.name.text);
+        }
+      }
+      if (ts.isExportDeclaration(n) && DB_DRIVER_MODULES.has(specText(n.moduleSpecifier) ?? "")) {
+        bad.push(`${file}: re-exports "${specText(n.moduleSpecifier)}"`);
+      }
+      if (
+        ts.isCallExpression(n) &&
+        (n.expression.kind === ts.SyntaxKind.ImportKeyword ||
+          (ts.isIdentifier(n.expression) && n.expression.text === "require")) &&
+        DB_DRIVER_MODULES.has(specText(n.arguments[0]) ?? "")
+      ) {
+        bad.push(`${file}: dynamically loads "${specText(n.arguments[0])}"`);
+      }
+    });
+    // Uses of the driver binding: only as openPluginPool's first argument, or in types.
+    visit(sf, (n) => {
+      if (!ts.isIdentifier(n) || !bindings.has(n.text)) {
+        return;
+      }
+      const p = n.parent;
+      if (p && (ts.isImportClause(p) || ts.isImportSpecifier(p))) {
+        return;
+      }
+      if (p && ts.isPropertyAccessExpression(p) && p.name === n) {
+        return;
+      } // x.postgres (a property)
+      if (inTypePosition(n) || isOpenPluginPoolFirstArg(n)) {
+        return;
+      }
+      const { line } = sf.getLineAndCharacterOfPosition(n.getStart());
+      bad.push(`${file}:${line + 1}: driver "${n.text}" used outside openPluginPool`);
+    });
+  }
+  return bad.toSorted();
+}
+
+describe("plugin Postgres connections — deployment guard", () => {
+  const all = parseAll();
+
+  it("no production code reaches a DB driver except via openPluginPool(postgres, …)", () => {
+    expect(driverViolations(all)).toEqual([]);
+  });
+
+  it("budget: concurrent processes x pool ceiling fits the role limit with operator headroom", () => {
+    expect(CONCURRENT_PROCESSES * PG_POOL_MAX_CEILING).toBeLessThanOrEqual(
+      ROLE_CONNECTION_LIMIT - OPERATOR_RESERVE,
+    );
+    expect(DEFAULT_PG_POOL_MAX).toBeLessThanOrEqual(PG_POOL_MAX_CEILING);
+  });
+
+  it("control: the scan sees the real pool opens (an empty scan would pass vacuously)", () => {
+    let opens = 0;
+    for (const { sf } of all) {
+      visit(sf, (n) => {
+        if (
+          ts.isCallExpression(n) &&
+          ts.isIdentifier(n.expression) &&
+          n.expression.text === "openPluginPool"
+        ) {
+          opens += 1;
         }
       });
     }
-    expect(bad).toEqual([]);
-  });
-
-  it("pool instances are exactly the enumerated seven", () => {
-    expect(poolInstances(all)).toEqual(EXPECTED_INSTANCES);
-  });
-
-  it("budget: processes x instances x default max fits the role limit with operator headroom", () => {
-    const total = CONCURRENT_PROCESSES * poolInstances(all).length * DEFAULT_PG_POOL_MAX;
-    expect(total).toBeLessThanOrEqual(ROLE_CONNECTION_LIMIT - OPERATOR_RESERVE);
-  });
-
-  it("control: the factories are discovered, not assumed", () => {
-    expect(
-      findFactories(all)
-        .map((f) => `${f.file}#${f.name}`)
-        .toSorted(),
-    ).toEqual([
-      "extensions/persist-postgres/src/db.ts#createPgClient",
-      "extensions/persist-user-identity/src/db.ts#createPgClient",
-      "extensions/twilio/src/db.ts#createSmsPgClient",
-    ]);
+    expect(opens).toBeGreaterThanOrEqual(6);
   });
 });
