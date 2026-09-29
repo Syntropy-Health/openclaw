@@ -158,3 +158,16 @@ describe("★ BEHAVIORAL PIN — a STOP'd number receives ZERO subsequent sends"
     expect(fetchImpl).not.toHaveBeenCalled();
   });
 });
+
+describe("FCC consent-revocation words (47 CFR 64.1200(a)(10))", () => {
+  it.each(["REVOKE", "revoke", "OPT OUT", "opt out", "Opt  Out.", "OPTOUT", "opt-out"])(
+    "%j opts out",
+    (w) => {
+      expect(classifyCompliance(w)).toBe("stop");
+    },
+  );
+  it("sentences containing them still do not", () => {
+    expect(classifyCompliance("please don't opt out my mom")).toBeNull();
+    expect(classifyCompliance("revoke my last order")).toBeNull();
+  });
+});

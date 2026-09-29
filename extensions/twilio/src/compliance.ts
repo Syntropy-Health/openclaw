@@ -25,7 +25,20 @@ export type OptOutStore = {
 export type ComplianceKeyword = "stop" | "start" | "help";
 
 // Twilio standard opt-out / opt-in / help keyword sets (exact-match).
-const STOP_WORDS = new Set(["STOP", "STOPALL", "UNSUBSCRIBE", "CANCEL", "END", "QUIT"]);
+// REVOKE / OPT OUT / OPTOUT: the FCC 2024 consent-revocation order (47 CFR
+// 64.1200(a)(10)) names them alongside the classic set.
+const STOP_WORDS = new Set([
+  "STOP",
+  "STOPALL",
+  "UNSUBSCRIBE",
+  "CANCEL",
+  "END",
+  "QUIT",
+  "REVOKE",
+  "OPTOUT",
+  "OPT OUT",
+  "OPT-OUT",
+]);
 const START_WORDS = new Set(["START", "YES", "UNSTOP"]);
 const HELP_WORDS = new Set(["HELP", "INFO"]);
 
@@ -39,7 +52,8 @@ export function classifyCompliance(body: string): ComplianceKeyword | null {
     .trim()
     .toUpperCase()
     .replace(/[.!?]+$/, "")
-    .trim();
+    .trim()
+    .replace(/\s+/g, " ");
   if (STOP_WORDS.has(normalized)) return "stop";
   if (START_WORDS.has(normalized)) return "start";
   if (HELP_WORDS.has(normalized)) return "help";

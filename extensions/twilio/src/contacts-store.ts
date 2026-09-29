@@ -13,6 +13,10 @@ export interface SmsContactStore {
   /** Record `e164` as confirmed. Resolves true iff this call created the record,
    * i.e. the number had never been confirmed before. */
   recordFirstContact: (e164: string) => Promise<boolean> | boolean;
+  /** Undo a record whose opt-in confirmation was NOT delivered, so the next message retries it. */
+  forgetContact: (e164: string) => Promise<void> | void;
+  /** Consent check for AGENT-INITIATED sends: only numbers that texted us first. */
+  hasContact: (e164: string) => Promise<boolean> | boolean;
 }
 
 /** Idempotent DDL. Safe to call on every startup. */
@@ -34,6 +38,15 @@ export function createPgContactStore(sql: SqlTag): SmsContactStore {
         INSERT INTO lp_sms_contacts (channel_peer_id) VALUES (${e164})
         ON CONFLICT (channel_peer_id) DO NOTHING
         RETURNING channel_peer_id
+      `;
+      return rows.length > 0;
+    },
+    forgetContact: async (e164) => {
+      await sql`DELETE FROM lp_sms_contacts WHERE channel_peer_id = ${e164}`;
+    },
+    hasContact: async (e164) => {
+      const rows = await sql`
+        SELECT 1 FROM lp_sms_contacts WHERE channel_peer_id = ${e164} LIMIT 1
       `;
       return rows.length > 0;
     },

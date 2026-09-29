@@ -34,7 +34,7 @@ function memStore(seed: string[] = []): OptOutStore & { set: Set<string> } {
 
 /** Every number already confirmed — keeps pre-existing tests on the agent path only. */
 function seenContacts(): SmsContactStore {
-  return { recordFirstContact: () => false };
+  return { recordFirstContact: () => false, forgetContact: () => {}, hasContact: () => true };
 }
 
 /** A real in-memory first-contact record. */
@@ -47,6 +47,8 @@ function memContacts(seed: string[] = []): SmsContactStore & { set: Set<string> 
       set.add(n);
       return true;
     },
+    forgetContact: (n) => void set.delete(n),
+    hasContact: (n) => set.has(n),
   };
 }
 
@@ -395,6 +397,8 @@ describe("mobile-originated opt-in — the first message IS the opt-in (register
       recordFirstContact: () => {
         throw new Error("db down");
       },
+      forgetContact: () => {},
+      hasContact: () => false,
     };
     await send("hi", {
       store: memStore(),
@@ -405,5 +409,99 @@ describe("mobile-originated opt-in — the first message IS the opt-in (register
     });
     expect(calls).toEqual([{ to: FROM, body: OPT_IN_REPLY }]);
     expect(warn).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("review fixes — opted-out numbers, undelivered confirmations", () => {
+  const FROM = "+15557654321";
+  function failingFetch() {
+    const calls: string[] = [];
+    const fn = vi.fn(async (_u: string, init: RequestInit) => {
+      calls.push((init.body as URLSearchParams).get("Body") ?? "");
+      return new Response(JSON.stringify({ message: "busy" }), { status: 503 });
+    }) as unknown as typeof fetch;
+    return { fn, calls };
+  }
+
+  it("an opted-out number gets NO agent turn (and nothing is sent)", async () => {
+    const { fn, calls } = recordingFetch();
+    const dispatch = vi.fn(async () => {});
+    const out = await handleInboundSms({
+      inbound: { from: FROM, body: "hello?" },
+      cfg: CFG,
+      config: BASE,
+      store: memStore([FROM]),
+      contacts: memContacts(),
+      fetchImpl: fn,
+      dispatch,
+    });
+    expect(out).toBe("opted_out");
+    expect(dispatch).not.toHaveBeenCalled();
+    expect(calls).toHaveLength(0);
+  });
+
+  it("an opt-out store ERROR also skips the agent turn (replies would fail closed anyway)", async () => {
+    const dispatch = vi.fn(async () => {});
+    const broken: OptOutStore = {
+      isOptedOut: () => {
+        throw new Error("db down");
+      },
+      optOut: () => {},
+      optIn: () => {},
+    };
+    const out = await handleInboundSms({
+      inbound: { from: FROM, body: "hello?" },
+      cfg: CFG,
+      config: BASE,
+      store: broken,
+      contacts: memContacts(),
+      fetchImpl: recordingFetch().fn,
+      dispatch,
+    });
+    expect(out).toBe("opted_out");
+    expect(dispatch).not.toHaveBeenCalled();
+  });
+
+  it("a confirmation Twilio did not accept is NOT recorded — the next message retries it", async () => {
+    const contacts = memContacts();
+    const bad = failingFetch();
+    await handleInboundSms({
+      inbound: { from: FROM, body: "hi" },
+      cfg: CFG,
+      config: BASE,
+      store: memStore(),
+      contacts,
+      fetchImpl: bad.fn,
+      dispatch: vi.fn(async () => {}),
+    });
+    expect(bad.calls).toEqual([OPT_IN_REPLY]);
+    expect(contacts.set.has(FROM)).toBe(false);
+
+    const good = recordingFetch();
+    await handleInboundSms({
+      inbound: { from: FROM, body: "hi again" },
+      cfg: CFG,
+      config: BASE,
+      store: memStore(),
+      contacts,
+      fetchImpl: good.fn,
+      dispatch: vi.fn(async () => {}),
+    });
+    expect(good.calls.map((c) => c.body)).toEqual([OPT_IN_REPLY]);
+    expect(contacts.set.has(FROM)).toBe(true);
+  });
+
+  it("a START whose ack did not go out is NOT recorded as confirmed", async () => {
+    const contacts = memContacts();
+    await handleInboundSms({
+      inbound: { from: FROM, body: "START" },
+      cfg: CFG,
+      config: BASE,
+      store: memStore(),
+      contacts,
+      fetchImpl: failingFetch().fn,
+      dispatch: vi.fn(async () => {}),
+    });
+    expect(contacts.set.has(FROM)).toBe(false);
   });
 });

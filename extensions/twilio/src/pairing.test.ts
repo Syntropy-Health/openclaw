@@ -20,10 +20,16 @@ import { describe, expect, it } from "vitest";
 import { createSmsPlugin } from "./channel.js";
 import type { OptOutStore } from "./compliance.js";
 
+const NO_CONTACTS = {
+  recordFirstContact: () => false,
+  forgetContact: () => {},
+  hasContact: () => false,
+};
+
 const STORE: OptOutStore = { isOptedOut: () => false, optOut: () => {}, optIn: () => {} };
 
 function plugin() {
-  return createSmsPlugin({ store: STORE });
+  return createSmsPlugin({ store: STORE, contacts: NO_CONTACTS });
 }
 
 describe("SYN-272 P1 — sms pairing adapter", () => {

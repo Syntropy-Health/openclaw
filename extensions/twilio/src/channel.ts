@@ -19,6 +19,7 @@ import {
   type ResolvedSmsAccount,
 } from "./accounts.js";
 import { type OptOutStore } from "./compliance.js";
+import { type SmsContactStore } from "./contacts-store.js";
 import { buildSmsOutboundAdapter } from "./outbound.js";
 import { type SmsFetch } from "./send.js";
 
@@ -32,6 +33,8 @@ const meta = {
 
 export type SmsPluginDeps = {
   store: OptOutStore;
+  /** Consent record gating agent-initiated sends (see outbound.ts). */
+  contacts: SmsContactStore;
   /** Test seam threaded to the outbound sender. */
   fetchImpl?: SmsFetch;
 };
@@ -62,6 +65,7 @@ export function createSmsPlugin(deps: SmsPluginDeps): ChannelPlugin<ResolvedSmsA
     outbound: buildSmsOutboundAdapter({
       resolveConfig: (cfg) => resolveSmsAccount(cfg).config,
       store: deps.store,
+      contacts: deps.contacts,
       fetchImpl: deps.fetchImpl,
     }),
   };

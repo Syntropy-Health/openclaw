@@ -37,7 +37,7 @@ import { sendSms, type SmsFetch } from "./send.js";
 import { withShrineAiSignOff } from "./signoff.js";
 import { type InboundSms } from "./webhook.js";
 
-export type InboundOutcome = "stop" | "start" | "help" | "blocked" | "agent";
+export type InboundOutcome = "stop" | "start" | "help" | "blocked" | "opted_out" | "agent";
 
 /** Minimal logger for the rare failure paths (store errors). */
 export type InboundLogger = { warn: (m: string) => void };
@@ -159,6 +159,22 @@ async function isFirstContact(deps: HandleInboundDeps): Promise<boolean> {
   }
 }
 
+async function forgetContact(deps: HandleInboundDeps): Promise<void> {
+  try {
+    await deps.contacts.forgetContact(deps.inbound.from);
+  } catch (err) {
+    deps.logger?.warn(`twilio: could not clear an undelivered opt-in record: ${String(err)}`);
+  }
+}
+
+async function optedOutOrUnknown(deps: HandleInboundDeps): Promise<boolean> {
+  try {
+    return await deps.store.isOptedOut(deps.inbound.from);
+  } catch {
+    return true;
+  }
+}
+
 /** Compliance-first → policy → agent. Returns the branch taken (for tests/telemetry). */
 export async function handleInboundSms(deps: HandleInboundDeps): Promise<InboundOutcome> {
   const { inbound, config, store, contacts } = deps;
@@ -174,20 +190,35 @@ export async function handleInboundSms(deps: HandleInboundDeps): Promise<Inbound
     // message does not confirm the opt-in a second time.
     if (outcome.kind === "start") await isFirstContact(deps);
     // UNGUARDED mandated ack — see module header.
-    await sendSms({ config, to: inbound.from, body: outcome.reply, fetchImpl: deps.fetchImpl });
+    const ack = await sendSms({
+      config,
+      to: inbound.from,
+      body: outcome.reply,
+      fetchImpl: deps.fetchImpl,
+    });
+    // START's ack IS the opt-in confirmation: if it did not go out, forget the
+    // record so the next message confirms instead of silently skipping it.
+    if (outcome.kind === "start" && !ack.ok) await forgetContact(deps);
     return outcome.kind;
   }
 
   if (!inboundAllowed(config, inbound.from)) return "blocked";
 
+  // An opted-out number gets no agent turn at all: every reply would be
+  // suppressed anyway, so running the LLM is pure cost. Unknown (store error)
+  // is treated the same — replies would fail closed too.
+  if (await optedOutOrUnknown(deps)) return "opted_out";
+
   if (await isFirstContact(deps)) {
     // Opt-in confirmation (registered copy, unsigned). GUARDED, unlike the keyword
-    // acks: this is not a reply to STOP, so a number already on the opt-out list
-    // (e.g. STOP'd before this table existed) must not receive it.
-    await guardedSendSms(
+    // acks: this is not a reply to STOP.
+    const sent = await guardedSendSms(
       { config, to: inbound.from, body: SMS_CAMPAIGN_COPY.start, fetchImpl: deps.fetchImpl },
       store,
     );
+    // Recorded before sending (atomic dedupe); undo it if nothing was delivered,
+    // so the next message confirms instead of the number never being confirmed.
+    if (!sent.ok) await forgetContact(deps);
   }
 
   const dispatch = deps.dispatch ?? routeInboundToAgent;

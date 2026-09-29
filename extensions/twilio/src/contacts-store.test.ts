@@ -30,4 +30,15 @@ describe("pg first-contact store", () => {
     );
     expect(seen[0].values).toEqual(["+15550000001"]);
   });
+
+  it("hasContact reads the row; forgetContact deletes it (parameterised)", async () => {
+    const { tag, seen } = fakeSql([[{ "?column?": 1 }], [], []]);
+    const store = createPgContactStore(tag);
+    await expect(store.hasContact("+15550000001")).resolves.toBe(true);
+    await expect(store.hasContact("+15550000002")).resolves.toBe(false);
+    await store.forgetContact("+15550000001");
+    expect(seen[0].text).toContain("SELECT 1 FROM lp_sms_contacts WHERE channel_peer_id = ?");
+    expect(seen[2].text).toBe("DELETE FROM lp_sms_contacts WHERE channel_peer_id = ?");
+    expect(seen[2].values).toEqual(["+15550000001"]);
+  });
 });

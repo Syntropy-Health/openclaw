@@ -47,6 +47,9 @@ const UNAVAILABLE_CONTACTS: SmsContactStore = {
   recordFirstContact: () => {
     throw new Error("sms first-contact store unavailable");
   },
+  forgetContact: () => {},
+  // No consent record reachable: agent-initiated sends are refused (fail closed).
+  hasContact: () => false,
 };
 
 const twilioSmsPlugin = {
@@ -147,7 +150,7 @@ const twilioSmsPlugin = {
     });
 
     // Outbound channel.
-    api.registerChannel({ plugin: createSmsPlugin({ store }) });
+    api.registerChannel({ plugin: createSmsPlugin({ store, contacts }) });
 
     // Inbound webhook: signature gate → compliance-first → agent.
     api.registerHttpRoute({
