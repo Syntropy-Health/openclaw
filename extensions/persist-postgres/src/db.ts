@@ -1,4 +1,8 @@
+import { openPluginPool } from "openclaw/plugin-sdk";
 import postgres from "postgres";
+
+/** Minimal logger the pool helper needs (the plugin api logger satisfies it). */
+type PoolLogger = { warn: (message: string) => void };
 
 export type PgSessionRow = {
   id: string;
@@ -20,8 +24,8 @@ export type PgMessageRow = {
   metadata: Record<string, unknown>;
 };
 
-export function createPgClient(databaseUrl: string) {
-  return postgres(databaseUrl, { max: 10 });
+export function createPgClient(databaseUrl: string, logger: PoolLogger) {
+  return openPluginPool(postgres, databaseUrl, { logger, plugin: "persist-postgres" });
 }
 
 /**

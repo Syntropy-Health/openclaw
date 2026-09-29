@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { deriveChannel, derivePeerId } from "./session-key.js";
+import { deriveChannel, deriveIdentityPeer, derivePeerId } from "./session-key.js";
 
 // Canonical contract for the session-key parser shared by persist-user-identity,
 // auth-memory-gate, and syntropy (oc-hygiene #7). The per-extension suites
@@ -41,5 +41,28 @@ describe("derivePeerId (shared)", () => {
   it("returns 'main' for the shared (no-peer) session and echoes non-agent keys", () => {
     expect(derivePeerId("agent:main:main")).toBe("main");
     expect(derivePeerId("some-other-key")).toBe("some-other-key");
+  });
+});
+
+describe("deriveIdentityPeer — a malformed deviceId cannot throw", () => {
+  // A client can send any JSON type in the device-id header path. This runs
+  // OUTSIDE auth-memory-gate's try (peer derivation must precede DB calls so the
+  // R5 fail-closed path knows whom to gate), so a throw here would ungate the turn.
+  it.each([[123], [{}], [[]], [true]])(
+    "non-string deviceId %j falls back to the session-key peer",
+    (bad) => {
+      const ctx = {
+        sessionKey: "agent:abc:telegram:direct:user123",
+        deviceId: bad as unknown as string,
+      };
+      expect(() => deriveIdentityPeer(ctx)).not.toThrow();
+      expect(deriveIdentityPeer(ctx)).toBe(derivePeerId(ctx.sessionKey));
+    },
+  );
+
+  it("a string deviceId still wins (trimmed)", () => {
+    expect(deriveIdentityPeer({ sessionKey: "agent:abc:x:direct:u", deviceId: "  dev-1 " })).toBe(
+      "dev-1",
+    );
   });
 });

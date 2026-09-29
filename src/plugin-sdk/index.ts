@@ -89,6 +89,8 @@ export type { OpenClawConfig as ClawdbotConfig } from "../config/config.js";
 
 export type { FileLockHandle, FileLockOptions } from "./file-lock.js";
 export { acquireFileLock, withFileLock } from "./file-lock.js";
+export type { PgPoolFactory, PgPoolMaxResolution, PgPoolOptions } from "./pg-pool.js";
+export { openPluginPool, resolvePgPoolMax, sharedPgPoolHolders } from "./pg-pool.js";
 export { normalizeWebhookPath, resolveWebhookPath } from "./webhook-path.js";
 export {
   registerWebhookTarget,

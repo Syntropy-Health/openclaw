@@ -1,4 +1,4 @@
-import type { OpenClawPluginApi } from "openclaw/plugin-sdk";
+import { openPluginPool, type OpenClawPluginApi } from "openclaw/plugin-sdk";
 import postgres from "postgres";
 import {
   deriveChannel,
@@ -41,28 +41,57 @@ const authMemoryGatePlugin = {
     api.logger.info(
       `auth-memory-gate: connecting to PostgreSQL (hardGate=${hardGate}, requireVerified=${scopeConfig.requireVerified})`,
     );
-    const sql = postgres(databaseUrl, { max: 10 });
+    const sql = openPluginPool(postgres, databaseUrl, {
+      logger: api.logger,
+      plugin: "auth-memory-gate",
+    });
 
-    // Lazy init: verify DB connectivity on first hook call, cache errors
+    // DB readiness with RETRY (R5). Any DB failure — the connectivity probe or a
+    // later identity lookup — puts the DB in a backoff window (1s, 2s, 4s ...
+    // capped at 60s). Inside the window turns are gated immediately without
+    // touching the DB (no probe storm, and no per-turn stall waiting on a dead
+    // connection); after it, one probe runs and concurrent turns share it.
+    // Never cached for the life of the process: that left a transient boot-time
+    // failure (e.g. "too many connections for role") in place until restart.
     let dbReady = false;
-    let initError: unknown = null;
+    let lastDbError: unknown = null;
+    let dbFailures = 0;
+    let nextProbeAt = 0;
+    let probeInFlight: Promise<void> | null = null;
+
+    function markDbFailed(err: unknown, stage: "init" | "lookup") {
+      dbReady = false;
+      dbFailures += 1;
+      const delayMs = Math.min(1_000 * 2 ** (dbFailures - 1), 60_000);
+      lastDbError = err ?? new Error("unknown database error");
+      nextProbeAt = Date.now() + delayMs;
+      api.logger.error(
+        `auth-memory-gate: ${stage} failed (attempt ${dbFailures}, retry in ${delayMs / 1000}s): ${err}`,
+      );
+    }
 
     async function ensureReady() {
       if (dbReady) {
         return;
       }
-      if (initError) {
-        throw initError;
+      if (lastDbError && Date.now() < nextProbeAt) {
+        throw lastDbError;
       }
-      try {
-        await sql`SELECT 1`;
-        dbReady = true;
-        api.logger.info("auth-memory-gate: DB connection verified");
-      } catch (err) {
-        initError = err;
-        api.logger.error(`auth-memory-gate: init failed (will not retry): ${err}`);
-        throw err;
-      }
+      probeInFlight ??= (async () => {
+        try {
+          await sql`SELECT 1`;
+          dbReady = true;
+          lastDbError = null;
+          dbFailures = 0;
+          api.logger.info("auth-memory-gate: DB connection verified");
+        } catch (err) {
+          markDbFailed(err, "init");
+          throw err;
+        } finally {
+          probeInFlight = null;
+        }
+      })();
+      await probeInFlight;
     }
 
     // Track gated peers in memory for the message_sending safety net.
@@ -78,28 +107,36 @@ const authMemoryGatePlugin = {
     api.on(
       "before_agent_start",
       async (_event, ctx) => {
+        // Peer derivation is pure (no DB), so it happens BEFORE any DB call:
+        // the fail-closed path below must know whom to gate.
+        const sessionKey = ctx?.sessionKey ?? "";
+        const channel = ctx?.messageProvider ?? deriveChannel(sessionKey);
+        // Canonical peer via the SHARED helper (device-id when threaded, else
+        // session-key-derived) — MUST match persist-user-identity's [G1] bind
+        // key, or the gate would miss the just-bound mobile row (A&D §7).
+        const peerId = deriveIdentityPeer(ctx);
+
+        if (!peerId || peerId === "main" || peerId === "unknown") {
+          return {};
+        }
+
+        const gateKey = `${channel}:${peerId}`;
         try {
           await ensureReady();
-          const sessionKey = ctx?.sessionKey ?? "";
-          const channel = ctx?.messageProvider ?? deriveChannel(sessionKey);
-          // Canonical peer via the SHARED helper (device-id when threaded, else
-          // session-key-derived) — MUST match persist-user-identity's [G1] bind
-          // key, or the gate would miss the just-bound mobile row (A&D §7).
-          const peerId = deriveIdentityPeer(ctx);
-
-          if (!peerId || peerId === "main" || peerId === "unknown") {
-            return {};
-          }
-
-          const gateKey = `${channel}:${peerId}`;
           // Cross-check the peer row against the turn's VERIFIED identity
           // (fail-closed defense-in-depth): on a verified turn a stale/contested
           // row keyed by the client-supplied device id must NEVER key this turn
           // onto another user's scope — treat it as unidentified instead.
-          const identity = reconcileVerifiedIdentity(
-            await findUserByChannelPeer(sql, channel, peerId),
-            ctx?.externalId,
-          );
+          let row: Awaited<ReturnType<typeof findUserByChannelPeer>>;
+          try {
+            row = await findUserByChannelPeer(sql, channel, peerId);
+          } catch (err) {
+            // A DB lost after a good init: enter the same backoff so the next
+            // turns fail fast (gated) instead of each waiting on a dead pool.
+            markDbFailed(err, "lookup");
+            throw err;
+          }
+          const identity = reconcileVerifiedIdentity(row, ctx?.externalId);
 
           if (!identity) {
             // User not registered
@@ -133,6 +170,14 @@ const authMemoryGatePlugin = {
           return { prependContext };
         } catch (err) {
           api.logger.error(`auth-memory-gate: before_agent_start error: ${err}`);
+          // R5: with hardGate on, an unknown identity (DB down, role connection
+          // limit, lookup failure) is treated as UNVERIFIED — gate the turn.
+          // Returning {} here was a fail-OPEN: every peer ungated while the DB
+          // was unreachable. Without hardGate the gate is advisory, so {} stays.
+          if (hardGate) {
+            gatedPeers.add(gateKey);
+            return { prependContext: formatHardGateSystemPrompt(channel, peerId) };
+          }
           return {};
         }
       },

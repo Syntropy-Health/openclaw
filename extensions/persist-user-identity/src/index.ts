@@ -58,7 +58,7 @@ const persistUserIdentityPlugin = {
     const pendingIdentify = new Map<string, { email: string; userId: string; expiresAt: number }>();
 
     api.logger.info("persist-user-identity: connecting to PostgreSQL");
-    const sql = createPgClient(databaseUrl);
+    const sql = createPgClient(databaseUrl, api.logger);
     let schemaReady = false;
     let initError: unknown = null;
     // SYN-281: resolved lazily inside ensureReady() (vaultRpcsInstalled is an

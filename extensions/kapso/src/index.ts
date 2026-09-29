@@ -184,7 +184,7 @@ const kapsoWhatsappPlugin = {
       // register() before the outbound transport is registered — otherwise a
       // selected `transport: "kapso"` would fail-open to unguarded Baileys.
       try {
-        sql = createSmsPgClient(databaseUrl);
+        sql = createSmsPgClient(databaseUrl, { logger: api.logger, plugin: "kapso" });
         await ensureOptOutSchema(asSqlTag(sql));
         store = createPgOptOutStore(asSqlTag(sql));
         api.logger.info("kapso: opt-out store ready (pg, shared with sms)");

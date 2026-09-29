@@ -19,7 +19,7 @@ const persistPostgresPlugin = {
     }
 
     api.logger.info(`persist-postgres: connecting to PostgreSQL`);
-    const sql = createPgClient(databaseUrl);
+    const sql = createPgClient(databaseUrl, api.logger);
     let schemaReady = false;
     let initError: unknown = null;
 

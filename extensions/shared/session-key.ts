@@ -72,7 +72,11 @@ export function deriveIdentityPeer(ctx?: {
   sessionKey?: string;
   deviceId?: string | null;
 }): string {
-  const deviceId = ctx?.deviceId?.trim();
+  // Type-guard, not just optional-chain: the device id arrives from a client, and
+  // a non-string value must fall back rather than throw — this runs outside
+  // auth-memory-gate's try, where a throw would leave the turn ungated.
+  const rawDeviceId: unknown = ctx?.deviceId;
+  const deviceId = typeof rawDeviceId === "string" ? rawDeviceId.trim() : "";
   if (deviceId) {
     return deviceId;
   }
