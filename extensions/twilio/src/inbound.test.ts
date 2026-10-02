@@ -505,3 +505,54 @@ describe("review fixes — opted-out numbers, undelivered confirmations", () => 
     expect(contacts.set.has(FROM)).toBe(false);
   });
 });
+
+describe('keywordReplies: "twilio" — Twilio Advanced Opt-Out sends keyword replies', () => {
+  const FROM = "+15557654321";
+  async function run(body: string, store = memStore(), contacts = memContacts()) {
+    const { fn, calls } = recordingFetch();
+    const dispatch = vi.fn(async () => {});
+    const out = await handleInboundSms({
+      inbound: { from: FROM, body },
+      cfg: CFG,
+      config: BASE,
+      store,
+      contacts,
+      fetchImpl: fn,
+      dispatch: dispatch as unknown as HandleInboundDeps["dispatch"],
+      keywordReplies: "twilio",
+    });
+    return { out, calls, dispatch };
+  }
+
+  it.each(["STOP", "HELP", "START"])("%s sends NOTHING from openclaw", async (kw) => {
+    const { out, calls, dispatch } = await run(kw);
+    expect(out).toBe(kw.toLowerCase());
+    expect(calls).toHaveLength(0);
+    expect(dispatch).not.toHaveBeenCalled();
+  });
+
+  it("STOP is still RECORDED, and a later ordinary message gets no agent turn", async () => {
+    const store = memStore();
+    await run("STOP", store);
+    expect(store.set.has(FROM)).toBe(true);
+    const next = await run("hello?", store);
+    expect(next.out).toBe("opted_out");
+    expect(next.dispatch).not.toHaveBeenCalled();
+  });
+
+  it("START is still recorded (opt-in + contact), so the first-message confirmation is not re-sent", async () => {
+    const store = memStore([FROM]);
+    const contacts = memContacts();
+    await run("START", store, contacts);
+    expect(store.set.has(FROM)).toBe(false);
+    expect(contacts.set.has(FROM)).toBe(true);
+    const next = await run("hi", store, contacts);
+    expect(next.calls).toHaveLength(0);
+    expect(next.dispatch).toHaveBeenCalledTimes(1);
+  });
+
+  it("the first-message opt-in confirmation is still OURS (Advanced Opt-Out does not send one)", async () => {
+    const { calls } = await run("hi");
+    expect(calls).toEqual([{ to: FROM, body: OPT_IN_REPLY }]);
+  });
+});

@@ -125,6 +125,13 @@ export async function routeInboundToAgent(params: {
 }
 
 export type HandleInboundDeps = {
+  /**
+   * Who sends the STOP/HELP/START replies. "openclaw" (default): we send the
+   * registered copy. "twilio": Twilio Advanced Opt-Out sends it, so we stay silent
+   * on keywords but still record opt-out/opt-in. The first-message opt-in
+   * confirmation is ours either way (Advanced Opt-Out does not send one).
+   */
+  keywordReplies?: "openclaw" | "twilio";
   inbound: InboundSms;
   cfg: OpenClawConfig;
   config: ResolvedTwilioSmsConfig;
@@ -189,6 +196,13 @@ export async function handleInboundSms(deps: HandleInboundDeps): Promise<Inbound
     // START sends OPT_IN_REPLY itself; record the number so a following ordinary
     // message does not confirm the opt-in a second time.
     if (outcome.kind === "start") await isFirstContact(deps);
+    if (deps.keywordReplies === "twilio") {
+      // Twilio Advanced Opt-Out sends the registered STOP/HELP/START replies on
+      // this Messaging Service. Sending ours too would double-reply, and after
+      // STOP Twilio rejects our send (21610). The opt-out / opt-in is STILL
+      // recorded above, so the agent never runs for a STOP'd number.
+      return outcome.kind;
+    }
     // UNGUARDED mandated ack — see module header.
     const ack = await sendSms({
       config,
