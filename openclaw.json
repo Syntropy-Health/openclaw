@@ -48,8 +48,7 @@
         "config": {
           "auth": {
             "mode": "passcode-endpoint",
-            "passcodeVerifyUrl": "https://syntropy-api-production.up.railway.app/api/ext/pairing/verify",
-            "userLookupUrl": "https://syntropy-api-production.up.railway.app/api/ext/users/search",
+            "passcodeVerifyUrl": "https://syntropy-api-test.shrinelongevity.com/api/ext/pairing/verify",
             "apiToken": ""
           }
         }
@@ -103,7 +102,7 @@
       "syntropy": {
         "enabled": true,
         "config": {
-          "syntropyBaseUrl": "https://syntropy-api-production.up.railway.app"
+          "syntropyBaseUrl": "https://syntropy-api-test.shrinelongevity.com"
         }
       },
       "twilio": {

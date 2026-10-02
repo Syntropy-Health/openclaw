@@ -209,6 +209,15 @@ export function registerIdentityCommands(api: OpenClawPluginApi, deps: IdentityC
       if (!authConfig || authConfig.mode !== "passcode-endpoint") {
         return { text: "Name-based identification is not configured on this agent." };
       }
+      if (!authConfig.userLookupUrl) {
+        // No lookup endpoint: answering "name not found" would tell a correctly
+        // registered user their name is wrong. !verify works without !identify.
+        return {
+          text:
+            "Name lookup isn't available here. Get a 6-digit code from the Syntropy " +
+            "Journals app and send: !verify <code>",
+        };
+      }
 
       try {
         await ensureReady();

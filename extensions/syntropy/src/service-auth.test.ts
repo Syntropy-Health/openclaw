@@ -433,7 +433,7 @@ describe("Bearer attached to the SJ /mcp request path", () => {
     expect(viaHelper.Authorization).toBe(`Bearer ${token}`);
   });
 
-  test("callMcpToolWithServiceAuth sends the M2M Bearer + correct JSON-RPC envelope to <baseUrl>/mcp", async () => {
+  test("callMcpToolWithServiceAuth sends the M2M Bearer + correct JSON-RPC envelope to <baseUrl>/mcp/", async () => {
     const expSec = Math.floor(Date.now() / 1000) + 3600;
     const token = makeJwt(SJ_MCP, expSec);
     const provider = { getToken: async () => token };
@@ -460,7 +460,8 @@ describe("Bearer attached to the SJ /mcp request path", () => {
         { foo: "bar" },
         { label: "Syntropy" },
       );
-      expect(captured.url).toBe("https://shrine-api-test.up.railway.app/mcp");
+      // SJ serves MCP at /mcp/ only (Starlette Mount, no redirect).
+      expect(captured.url).toBe("https://shrine-api-test.up.railway.app/mcp/");
       expect(captured.auth).toBe(`Bearer ${token}`);
       // F6: assert the JSON-RPC envelope, not just URL + auth.
       expect(captured.body?.jsonrpc).toBe("2.0");
