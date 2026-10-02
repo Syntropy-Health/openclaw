@@ -7,6 +7,11 @@
  * configured), the gateway rewrites /data/openclaw.json on every boot with a new
  * hash, and the next boot resets it again (CTO #13223, MEASURED: data mtime ==
  * boot time, image allow lacked slack, entries lacked whatsapp/slack).
+ *
+ * SCOPE: this evaluates the IMAGE's `channels`. At runtime auto-enable reads
+ * /data's channels (bootstrap does not sync channels), so this guarantee holds
+ * while /data's configured channels match the image's. A new channel configured
+ * only on /data (or TELEGRAM/DISCORD/IRC env) would make auto-enable fire again.
  */
 import { readFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
@@ -27,12 +32,16 @@ describe("shipped openclaw.json is a fixed point of plugin auto-enable", () => {
     delete stripped.plugins.entries.whatsapp;
     delete stripped.plugins.entries.slack;
     const r = applyPluginAutoEnable({ config: stripped, env: {} });
-    expect(r.changes.length).toBeGreaterThan(0);
+    // Both halves of the claim: EACH shipped channel triggers auto-enable.
+    const out = r.config as typeof stripped;
+    expect(out.plugins.entries.whatsapp).toMatchObject({ enabled: true });
+    expect(out.plugins.entries.slack).toMatchObject({ enabled: true });
+    expect(out.plugins.allow).toContain("slack");
   });
 
   it.each([
     ["no channel env", {}],
-    ["Slack/WhatsApp credentials present", { SLACK_BOT_TOKEN: "x", SLACK_APP_TOKEN: "y" }],
+    ["Slack token env present", { SLACK_BOT_TOKEN: "x", SLACK_APP_TOKEN: "y" }],
   ])("the shipped config produces NO auto-enable changes (%s)", (_label, env) => {
     const r = applyPluginAutoEnable({ config: shipped, env });
     expect(r.changes).toEqual([]);
