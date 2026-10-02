@@ -247,16 +247,30 @@ async function postMcpRequest(
  *                            streamable-http servers. Absent → bare transport,
  *                            byte-identical to before (the SJ path).
  */
+/**
+ * SJ serves MCP ONLY at the trailing-slash path `/mcp/`: it is a Starlette
+ * `Mount("/mcp", …)`, which matches paths under the mount and emits no redirect,
+ * so a bare `/mcp` is a 404 even when MCP is live (SJ scripts/qa/deploy_smoke.py
+ * documents and probes exactly this). Every SJ call passes this path.
+ */
+export const SJ_MCP_PATH = "/mcp/";
+
 export async function callMcpTool(
   baseUrl: string,
   authToken: string,
   toolName: string,
   args: Record<string, unknown>,
-  opts: { label: string; toolErrorLabel?: string; session?: McpSession },
+  opts: {
+    label: string;
+    toolErrorLabel?: string;
+    session?: McpSession;
+    /** MCP endpoint path on `baseUrl`. Default `/mcp` (kg-mcp); SJ passes {@link SJ_MCP_PATH}. */
+    mcpPath?: string;
+  },
 ): Promise<McpToolResult> {
   const { label } = opts;
   const toolErrorLabel = opts.toolErrorLabel ?? label;
-  const url = `${baseUrl}/mcp`;
+  const url = `${baseUrl.replace(/\/+$/, "")}${opts.mcpPath ?? "/mcp"}`;
 
   try {
     const resp = await postMcpRequest(
@@ -435,7 +449,11 @@ export async function callMcpToolWithServiceAuth(
     const msg = err instanceof Error ? err.message : String(err);
     return { data: null, ok: false, error: `${label} service-auth failed: ${msg}` };
   }
-  return callMcpTool(baseUrl, token, toolName, args, { label, toolErrorLabel });
+  return callMcpTool(baseUrl, token, toolName, args, {
+    label,
+    toolErrorLabel,
+    mcpPath: SJ_MCP_PATH,
+  });
 }
 
 /**
@@ -457,5 +475,6 @@ export function callSyntropyTool(
   return callMcpTool(baseUrl, authToken, toolName, args, {
     label: "Syntropy",
     toolErrorLabel: "MCP",
+    mcpPath: SJ_MCP_PATH,
   });
 }
