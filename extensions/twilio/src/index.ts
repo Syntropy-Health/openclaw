@@ -101,6 +101,13 @@ const twilioSmsPlugin = {
         "record, STOP pin) apply downstream.",
     );
 
+    // Who sends STOP/HELP/START replies. Strict: only the exact string "twilio"
+    // hands them to Twilio Advanced Opt-Out; anything else keeps ours, so a typo
+    // can never leave a keyword unanswered.
+    const keywordReplies: "openclaw" | "twilio" =
+      api.pluginConfig?.keywordReplies === "twilio" ? "twilio" : "openclaw";
+    api.logger.info(`twilio: keyword replies sent by ${keywordReplies}`);
+
     // Durable opt-out store — ADR 0001: OpenClaw's OWN Postgres (DATABASE_URL), never the Journal PHI DB.
     const databaseUrl =
       (api.pluginConfig?.databaseUrl as string | undefined) ?? process.env.DATABASE_URL ?? "";
@@ -168,6 +175,7 @@ const twilioSmsPlugin = {
             store,
             contacts,
             logger: api.logger,
+            keywordReplies,
           });
         },
       }),

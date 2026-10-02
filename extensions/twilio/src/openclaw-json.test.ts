@@ -18,7 +18,12 @@ describe("shipped openclaw.json — ShrineAI SMS", () => {
   it("allows and enables the twilio plugin with smsEnabled: true (strict boolean)", () => {
     expect(cfg.plugins?.allow).toContain("twilio");
     expect(cfg.plugins?.entries?.twilio?.enabled).toBe(true);
-    expect(cfg.plugins?.entries?.twilio?.config).toEqual({ smsEnabled: true });
+    // keywordReplies "twilio": Twilio Advanced Opt-Out on MG…447e sends the registered
+    // STOP/HELP/START copy (devex #13192 option A); openclaw only records state.
+    expect(cfg.plugins?.entries?.twilio?.config).toEqual({
+      smsEnabled: true,
+      keywordReplies: "twilio",
+    });
   });
 
   it("carries NO Twilio credential or number (env only)", () => {

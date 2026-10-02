@@ -505,3 +505,119 @@ describe("review fixes — opted-out numbers, undelivered confirmations", () => 
     expect(contacts.set.has(FROM)).toBe(false);
   });
 });
+
+describe("keywordReplies twilio: Twilio's OptOutType is authoritative", () => {
+  const FROM = "+15557654321";
+  async function run(
+    body: string,
+    optOutType?: "STOP" | "START" | "HELP",
+    store = memStore(),
+    contacts = memContacts(),
+  ) {
+    const { fn, calls } = recordingFetch();
+    const dispatch = vi.fn(async () => {});
+    const out = await handleInboundSms({
+      inbound: { from: FROM, body, ...(optOutType ? { optOutType } : {}) },
+      cfg: CFG,
+      config: BASE,
+      store,
+      contacts,
+      fetchImpl: fn,
+      dispatch: dispatch as unknown as HandleInboundDeps["dispatch"],
+      keywordReplies: "twilio",
+    });
+    return { out, calls, dispatch };
+  }
+
+  it.each([
+    ["STOP", "STOP"],
+    ["HELP", "HELP"],
+    ["START", "START"],
+  ] as const)("%s that Twilio handled (OptOutType=%s): openclaw sends NOTHING", async (kw, t) => {
+    const { out, calls, dispatch } = await run(kw, t);
+    expect(out).toBe(kw.toLowerCase());
+    expect(calls).toHaveLength(0);
+    expect(dispatch).not.toHaveBeenCalled();
+  });
+
+  it("a Twilio-handled STOP is recorded; the next ordinary message gets no agent turn", async () => {
+    const store = memStore();
+    await run("STOP", "STOP", store);
+    expect(store.set.has(FROM)).toBe(true);
+    const next = await run("hello?", undefined, store);
+    expect(next.out).toBe("opted_out");
+    expect(next.dispatch).not.toHaveBeenCalled();
+  });
+
+  it("a console-added keyword our classifier does not know is still recorded from OptOutType", async () => {
+    const store = memStore();
+    const { out, calls, dispatch } = await run("UNSUBSCRIBEME", "STOP", store);
+    expect(out).toBe("stop");
+    expect(store.set.has(FROM)).toBe(true);
+    expect(calls).toHaveLength(0);
+    expect(dispatch).not.toHaveBeenCalled();
+  });
+
+  it("a Twilio-handled START opts in and records the contact (no second confirmation)", async () => {
+    const store = memStore([FROM]);
+    const contacts = memContacts();
+    await run("START", "START", store, contacts);
+    expect(store.set.has(FROM)).toBe(false);
+    expect(contacts.set.has(FROM)).toBe(true);
+    const next = await run("hi", undefined, store, contacts);
+    expect(next.calls).toHaveLength(0);
+    expect(next.dispatch).toHaveBeenCalledTimes(1);
+  });
+
+  // Our classifier matched but Twilio did NOT (no OptOutType): nobody else will
+  // confirm, so WE send the registered reply — a keyword never goes unanswered.
+  it.each([
+    ["Opt out", OPT_OUT_REPLY],
+    ["Stop.", OPT_OUT_REPLY],
+    ["REVOKE", OPT_OUT_REPLY],
+    ["info", HELP_REPLY],
+  ] as const)(
+    "%j unmatched by Twilio: openclaw sends the registered reply",
+    async (body, reply) => {
+      const { calls, dispatch } = await run(body);
+      expect(calls).toEqual([{ to: FROM, body: reply }]);
+      expect(dispatch).not.toHaveBeenCalled();
+    },
+  );
+
+  it("YES unmatched by Twilio on a NEW number: we send OPT_IN ourselves, so it is never skipped", async () => {
+    const contacts = memContacts();
+    const { fn, calls } = recordingFetch();
+    await handleInboundSms({
+      inbound: { from: FROM, body: "YES" },
+      cfg: CFG,
+      config: BASE,
+      store: memStore(),
+      contacts,
+      fetchImpl: fn,
+      dispatch: vi.fn(async () => {}) as unknown as HandleInboundDeps["dispatch"],
+      keywordReplies: "twilio",
+    });
+    expect(calls).toEqual([{ to: FROM, body: OPT_IN_REPLY }]);
+    expect(contacts.set.has(FROM)).toBe(true);
+  });
+
+  it("the first-message opt-in confirmation is still OURS (Advanced Opt-Out does not send one)", async () => {
+    const { calls } = await run("hi");
+    expect(calls).toEqual([{ to: FROM, body: OPT_IN_REPLY }]);
+  });
+
+  it("openclaw mode IGNORES OptOutType (behaviour unchanged): STOP gets our reply", async () => {
+    const { fn, calls } = recordingFetch();
+    await handleInboundSms({
+      inbound: { from: FROM, body: "STOP", optOutType: "STOP" },
+      cfg: CFG,
+      config: BASE,
+      store: memStore(),
+      contacts: memContacts(),
+      fetchImpl: fn,
+      dispatch: vi.fn(async () => {}) as unknown as HandleInboundDeps["dispatch"],
+    });
+    expect(calls).toEqual([{ to: FROM, body: OPT_OUT_REPLY }]);
+  });
+});
