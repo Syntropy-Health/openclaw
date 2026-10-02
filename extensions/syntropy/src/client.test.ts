@@ -39,7 +39,8 @@ describe("callSyntropyTool", () => {
 
     expect(mockFetch).toHaveBeenCalledTimes(1);
     const [url, init] = mockFetch.mock.calls[0]!;
-    expect(url).toBe(`${BASE_URL}/mcp`);
+    // SJ mounts MCP at /mcp/ only (Starlette Mount, no redirect): bare /mcp is a 404.
+    expect(url).toBe(`${BASE_URL}/mcp/`);
     expect(init?.method).toBe("POST");
     const headers = init?.headers as Record<string, string>;
     expect(headers["Content-Type"]).toBe("application/json");
