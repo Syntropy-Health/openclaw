@@ -67,6 +67,27 @@ describe("prepare-plugin-runtime: rewriteSpecifiers", () => {
     expect(r).toEqual({ specifiers: 3, files: 1 });
   });
 
+  it("never rewrites when a real .js sibling exists (that would switch modules)", () => {
+    const root = tree({
+      "src/a.ts": 'import { b } from "./b.js";',
+      "src/b.ts": "export const b = 1;",
+      "src/b.js": "export const b = 2;",
+    });
+    expect(rewriteSpecifiers([path.join(root, "src")])).toEqual({ specifiers: 0, files: 0 });
+    expect(fs.readFileSync(path.join(root, "src/a.ts"), "utf8")).toContain('"./b.js"');
+  });
+
+  it('does not touch non-import calls like Array.from("./x.js")', () => {
+    const root = tree({
+      "src/a.ts": 'const x = Array.from("./b.js");\nimport { b } from "./b.js";',
+      "src/b.ts": "export const b = 1;",
+    });
+    rewriteSpecifiers([path.join(root, "src")]);
+    const a = fs.readFileSync(path.join(root, "src/a.ts"), "utf8");
+    expect(a).toContain('Array.from("./b.js")');
+    expect(a).toContain('from "./b.ts"');
+  });
+
   it("is idempotent: a second pass changes nothing", () => {
     const root = tree({
       "src/a.ts": 'import { b } from "./b.js";',

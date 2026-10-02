@@ -57,7 +57,7 @@ ENV NODE_ENV=production
 # that lives in the image (os.tmpdir() is wiped on every Fly restart). See
 # scripts/fly/prepare-plugin-runtime.mjs for the measurements behind this.
 ENV OPENCLAW_JITI_CACHE_DIR=/app/.cache/jiti
-RUN node scripts/fly/prepare-plugin-runtime.mjs
+RUN node scripts/fly/prepare-plugin-runtime.mjs && test -n "$(ls -A /app/.cache/jiti)"
 
 # Allow non-root user to write temp files during runtime/tests.
 RUN chown -R node:node /app

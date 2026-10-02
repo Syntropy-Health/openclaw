@@ -29,7 +29,9 @@ import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
-const SPECIFIER = /((?:\bfrom|\bimport)\s*\(?\s*["'])(\.{1,2}\/[^"'\n]+?)\.js(["'])/g;
+// `from "…"` or `import("…")` / `import "…"` — the `(` only on the import branch,
+// so `Array.from("./x.js")` can never match.
+const SPECIFIER = /((?:\bfrom\s*|\bimport\s*\(?\s*)["'])(\.{1,2}\/[^"'\n]+?)\.js(["'])/g;
 const SKIP_DIRS = new Set(["node_modules", "dist", ".git"]);
 
 /** Rewrite relative `.js` specifiers to `.ts` where the `.ts` target exists. */
@@ -51,7 +53,10 @@ export function rewriteSpecifiers(dirs) {
       const src = fs.readFileSync(p, "utf8");
       let changed = 0;
       const out = src.replace(SPECIFIER, (m, pre, spec, post) => {
-        if (!fs.existsSync(path.resolve(path.dirname(p), `${spec}.ts`))) {
+        const base = path.resolve(path.dirname(p), spec);
+        // Only when the .ts exists AND no real .js sibling does: jiti loads the literal
+        // .js first, so rewriting would switch which module is loaded.
+        if (!fs.existsSync(`${base}.ts`) || fs.existsSync(`${base}.js`)) {
           return m;
         }
         changed += 1;
@@ -98,7 +103,7 @@ function main() {
       OPENCLAW_CONFIG_PATH: path.join(root, "openclaw.json"),
       DATABASE_URL: "",
     },
-    stdio: ["ignore", "ignore", "pipe"],
+    stdio: ["ignore", "ignore", "inherit"],
     timeout: 10 * 60_000,
   });
   const files = countFiles(cacheDir);
@@ -106,11 +111,12 @@ function main() {
     `prepare-plugin-runtime: warm load exit=${res.status} signal=${res.signal ?? "-"} ` +
       `${((Date.now() - t0) / 1000).toFixed(1)}s, cache files=${files}`,
   );
-  // EMPTY -> FAIL: an image with no cache boots slowly and nothing else would say so.
-  if (files === 0) {
-    console.error(String(res.stderr ?? "").slice(-2000));
+  // Any failure of the warm load fails the build: a crash, timeout or signal can
+  // leave a PARTIAL cache that is non-empty, and the image would ship slow silently.
+  // EMPTY -> FAIL as well: an image with no cache boots slowly and nothing else says so.
+  if (res.error || res.signal || res.status !== 0 || files === 0) {
     console.error(
-      "prepare-plugin-runtime: jiti cache is EMPTY after the warm load — failing the build",
+      `prepare-plugin-runtime: warm load did not complete cleanly (error=${res.error?.message ?? "-"}) — failing the build`,
     );
     process.exit(1);
   }
