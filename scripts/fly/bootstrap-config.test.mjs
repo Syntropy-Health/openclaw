@@ -35,6 +35,44 @@ function setupTmp() {
   return tmp;
 }
 
+function test_secondBootLeavesDataConfigUntouched() {
+  process.stdout.write("test_secondBootLeavesDataConfigUntouched\n");
+  // CTO #13223: a reboot must not rewrite /data/openclaw.json when nothing changed.
+  const tmp = setupTmp();
+  const app = path.join(tmp, "app.json");
+  const data = path.join(tmp, "data.json");
+  fs.writeFileSync(app, JSON.stringify({ plugins: { allow: ["syntropy"], entries: {} } }));
+  fs.writeFileSync(data, JSON.stringify({ gateway: { mode: "local" }, plugins: { allow: [] } }));
+  const env = { ...process.env, OPENCLAW_APP_CONFIG_PATH: app, OPENCLAW_CONFIG_PATH: data };
+  execSync(`node ${SCRIPT}`, { env, stdio: "ignore" });
+  const afterFirst = fs.readFileSync(data, "utf8");
+  assert(
+    JSON.parse(afterFirst).plugins.allow[0] === "syntropy",
+    "first boot syncs the plugins block",
+  );
+  assert(JSON.parse(afterFirst).gateway.mode === "local", "first boot preserves runtime keys");
+  const past = new Date(Date.now() - 60_000);
+  fs.utimesSync(data, past, past);
+  const mtimeBefore = fs.statSync(data).mtimeMs;
+  execSync(`node ${SCRIPT}`, { env, stdio: "ignore" });
+  assert(fs.readFileSync(data, "utf8") === afterFirst, "second boot: content identical");
+  assert(
+    fs.statSync(data).mtimeMs === mtimeBefore,
+    "second boot: file NOT rewritten (mtime unchanged)",
+  );
+  // RED arm: a real plugins change in the image IS written.
+  fs.writeFileSync(
+    app,
+    JSON.stringify({ plugins: { allow: ["syntropy", "twilio"], entries: {} } }),
+  );
+  execSync(`node ${SCRIPT}`, { env, stdio: "ignore" });
+  assert(
+    JSON.parse(fs.readFileSync(data, "utf8")).plugins.allow.includes("twilio"),
+    "a changed plugins block IS written",
+  );
+  fs.rmSync(tmp, { recursive: true, force: true });
+}
+
 function test_seedsOnFirstBoot() {
   process.stdout.write("test_seedsOnFirstBoot\n");
   const tmp = setupTmp();
@@ -117,6 +155,7 @@ function test_scriptIsExecutable() {
   }
 }
 
+test_secondBootLeavesDataConfigUntouched();
 test_seedsOnFirstBoot();
 test_mergeLogicPreservesRuntimeKeys();
 test_corruptDataConfigFallsBackToSeed();

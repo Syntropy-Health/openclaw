@@ -24,7 +24,8 @@
 import fs from "node:fs";
 import path from "node:path";
 
-const APP_CONFIG = "/app/openclaw.json";
+// Overridable for tests only; the image always uses /app/openclaw.json.
+const APP_CONFIG = process.env.OPENCLAW_APP_CONFIG_PATH ?? "/app/openclaw.json";
 const DATA_CONFIG = process.env.OPENCLAW_CONFIG_PATH ?? "/data/openclaw.json";
 
 function log(msg) {
@@ -68,7 +69,14 @@ function main() {
     dataConfig.plugins = appConfig.plugins;
   }
 
-  fs.writeFileSync(DATA_CONFIG, JSON.stringify(dataConfig, null, 2));
+  // Write only when the content changes: an unchanged config keeps its bytes and
+  // mtime, so a reboot is idempotent (CTO #13223).
+  const next = JSON.stringify(dataConfig, null, 2);
+  if (fs.readFileSync(DATA_CONFIG, "utf8") === next) {
+    log(`plugins already in sync with ${APP_CONFIG}; ${DATA_CONFIG} unchanged`);
+    return;
+  }
+  fs.writeFileSync(DATA_CONFIG, next);
   const allowCount = appConfig.plugins?.allow?.length ?? 0;
   const entriesCount = Object.keys(appConfig.plugins?.entries ?? {}).length;
   log(

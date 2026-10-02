@@ -40,9 +40,16 @@
       "whatsapp",
       "catch-phrases",
       "syntropy",
-      "twilio"
+      "twilio",
+      "slack"
     ],
     "entries": {
+      "whatsapp": {
+        "enabled": true
+      },
+      "slack": {
+        "enabled": true
+      },
       "persist-user-identity": {
         "enabled": true,
         "config": {
