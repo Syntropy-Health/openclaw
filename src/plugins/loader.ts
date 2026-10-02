@@ -179,6 +179,19 @@ function pushDiagnostics(diagnostics: PluginDiagnostic[], append: PluginDiagnost
   diagnostics.push(...append);
 }
 
+/**
+ * Where jiti keeps transpiled plugin sources. Unset: jiti's own choice, which in
+ * the Fly image is os.tmpdir() — wiped on EVERY machine restart, so each boot
+ * re-transpiled ~1.7k extension + core-src files on a throttled shared CPU
+ * (MEASURED 2026-10-02: 1659 files all written during the boot, 58% CPU steal,
+ * ~10 min to listen). The image sets OPENCLAW_JITI_CACHE_DIR to a cache warmed at
+ * build time (scripts/fly/prepare-plugin-runtime.mjs).
+ */
+export function resolveJitiFsCache(env: NodeJS.ProcessEnv = process.env): string | true {
+  const dir = env.OPENCLAW_JITI_CACHE_DIR?.trim();
+  return dir ? dir : true;
+}
+
 export function loadOpenClawPlugins(options: PluginLoadOptions = {}): PluginRegistry {
   // Test env: default-disable plugins unless explicitly configured.
   // This keeps unit/gateway suites fast and avoids loading heavyweight plugin deps by accident.
@@ -251,6 +264,7 @@ export function loadOpenClawPlugins(options: PluginLoadOptions = {}): PluginRegi
     const pluginSdkAccountIdAlias = resolvePluginSdkAccountIdAlias();
     jitiLoader = createJiti(import.meta.url, {
       interopDefault: true,
+      fsCache: resolveJitiFsCache(),
       extensions: [".ts", ".tsx", ".mts", ".cts", ".mtsx", ".ctsx", ".js", ".mjs", ".cjs", ".json"],
       ...(pluginSdkAlias || pluginSdkAccountIdAlias
         ? {
