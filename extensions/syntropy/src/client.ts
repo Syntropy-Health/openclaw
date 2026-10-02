@@ -228,6 +228,14 @@ async function postMcpRequest(
 // ---------------------------------------------------------------------------
 
 /**
+ * SJ serves MCP ONLY at the trailing-slash path `/mcp/`: it is a Starlette
+ * `Mount("/mcp", …)`, which matches paths under the mount and emits no redirect,
+ * so a bare `/mcp` is a 404 even when MCP is live (SJ scripts/qa/deploy_smoke.py
+ * documents and probes exactly this). Every SJ call passes this path.
+ */
+export const SJ_MCP_PATH = "/mcp/";
+
+/**
  * Call an MCP tool over JSON-RPC/HTTP on behalf of a verified user.
  *
  * Per ADR-001 §5, kg-mcp tool handlers return structured paywall responses
@@ -247,14 +255,6 @@ async function postMcpRequest(
  *                            streamable-http servers. Absent → bare transport,
  *                            byte-identical to before (the SJ path).
  */
-/**
- * SJ serves MCP ONLY at the trailing-slash path `/mcp/`: it is a Starlette
- * `Mount("/mcp", …)`, which matches paths under the mount and emits no redirect,
- * so a bare `/mcp` is a 404 even when MCP is live (SJ scripts/qa/deploy_smoke.py
- * documents and probes exactly this). Every SJ call passes this path.
- */
-export const SJ_MCP_PATH = "/mcp/";
-
 export async function callMcpTool(
   baseUrl: string,
   authToken: string,
