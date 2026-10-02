@@ -110,3 +110,22 @@ describe("decideInboundSms — signature validated BEFORE routing", () => {
     expect(d).toEqual({ status: 400 });
   });
 });
+
+describe("parseInboundSms — OptOutType (signed body param, set when Twilio's opt-out handling matched)", () => {
+  it.each([
+    ["STOP", "STOP"],
+    ["start", "START"],
+    [" Help ", "HELP"],
+  ])("%j -> %s", (raw, want) => {
+    const p = new URLSearchParams({ From: "+15550000001", Body: "x", OptOutType: raw });
+    expect(parseInboundSms(p)?.optOutType).toBe(want);
+  });
+  it("absent or unknown OptOutType -> no optOutType key", () => {
+    expect(parseInboundSms(new URLSearchParams({ From: "+1", Body: "x" }))).toEqual({
+      from: "+1",
+      body: "x",
+    });
+    const p = new URLSearchParams({ From: "+1", Body: "x", OptOutType: "WHATEVER" });
+    expect(parseInboundSms(p)?.optOutType).toBeUndefined();
+  });
+});

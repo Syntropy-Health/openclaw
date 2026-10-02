@@ -22,7 +22,13 @@ import type { IncomingMessage, ServerResponse } from "node:http";
 import { validateTwilioSignature } from "../../voice-call/src/webhook-security.js";
 import { type ResolvedTwilioSmsConfig } from "./config.js";
 
-export type InboundSms = { from: string; body: string };
+/**
+ * Twilio sets `OptOutType` (STOP | START | HELP) on the inbound webhook when its
+ * own opt-out handling (Advanced Opt-Out) matched the message and replied. The
+ * param is part of the signed body, so it is as trustworthy as From/Body.
+ */
+export type TwilioOptOutType = "STOP" | "START" | "HELP";
+export type InboundSms = { from: string; body: string; optOutType?: TwilioOptOutType };
 
 /**
  * Extract `{ from, body }` from Twilio inbound SMS form params. `From` is the
@@ -32,7 +38,10 @@ export type InboundSms = { from: string; body: string };
 export function parseInboundSms(params: URLSearchParams): InboundSms | null {
   const from = params.get("From");
   if (!from) return null;
-  return { from, body: params.get("Body") ?? "" };
+  const raw = (params.get("OptOutType") ?? "").trim().toUpperCase();
+  const optOutType =
+    raw === "STOP" || raw === "START" || raw === "HELP" ? (raw as TwilioOptOutType) : undefined;
+  return { from, body: params.get("Body") ?? "", ...(optOutType ? { optOutType } : {}) };
 }
 
 /** The gate's decision. 200 is the only status that carries a routable inbound. */

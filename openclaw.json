@@ -108,7 +108,8 @@
       "twilio": {
         "enabled": true,
         "config": {
-          "smsEnabled": true
+          "smsEnabled": true,
+          "keywordReplies": "twilio"
         }
       }
     },

@@ -125,6 +125,13 @@ export async function routeInboundToAgent(params: {
 }
 
 export type HandleInboundDeps = {
+  /**
+   * Who sends the STOP/HELP/START replies. "openclaw" (default): we send the
+   * registered copy. "twilio": Twilio Advanced Opt-Out sends it, so we stay silent
+   * on keywords but still record opt-out/opt-in. The first-message opt-in
+   * confirmation is ours either way (Advanced Opt-Out does not send one).
+   */
+  keywordReplies?: "openclaw" | "twilio";
   inbound: InboundSms;
   cfg: OpenClawConfig;
   config: ResolvedTwilioSmsConfig;
@@ -178,6 +185,25 @@ async function optedOutOrUnknown(deps: HandleInboundDeps): Promise<boolean> {
 /** Compliance-first → policy → agent. Returns the branch taken (for tests/telemetry). */
 export async function handleInboundSms(deps: HandleInboundDeps): Promise<InboundOutcome> {
   const { inbound, config, store, contacts } = deps;
+  const twilioMode = deps.keywordReplies === "twilio";
+  const twilioKind = twilioMode ? inbound.optOutType : undefined;
+
+  // Twilio's own keyword match is AUTHORITATIVE in twilio mode, even for a word
+  // our classifier does not know (a console-added custom keyword): Twilio already
+  // replied and (for STOP) blocks further sends, so record the same state and stay
+  // silent. Without this our store would drift and the agent would run uselessly.
+  if (twilioKind === "STOP") {
+    await store.optOut(inbound.from);
+    return "stop";
+  }
+  if (twilioKind === "START") {
+    await store.optIn(inbound.from);
+    // Twilio's START reply IS the registered opt-in confirmation: record the
+    // contact so the first-message confirmation is not sent a second time.
+    await isFirstContact(deps);
+    return "start";
+  }
+  if (twilioKind === "HELP") return "help";
 
   const outcome = await handleInboundCompliance(
     inbound.from,
@@ -189,6 +215,10 @@ export async function handleInboundSms(deps: HandleInboundDeps): Promise<Inbound
     // START sends OPT_IN_REPLY itself; record the number so a following ordinary
     // message does not confirm the opt-in a second time.
     if (outcome.kind === "start") await isFirstContact(deps);
+    // Reaching here in twilio mode means OUR classifier matched a keyword that
+    // Twilio did NOT (no OptOutType): e.g. "Opt out", "Stop.", or YES missing from
+    // the console list. Nobody else will confirm it, so we send the registered
+    // reply ourselves — a keyword must never go unanswered.
     // UNGUARDED mandated ack — see module header.
     const ack = await sendSms({
       config,

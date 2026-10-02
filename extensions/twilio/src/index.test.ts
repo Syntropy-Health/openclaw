@@ -137,3 +137,23 @@ describe("enabled-but-inert is LOUD", () => {
     }
   });
 });
+
+describe("keywordReplies config is strict", () => {
+  async function wired(value: unknown) {
+    const saved = { ...process.env };
+    delete process.env.DATABASE_URL;
+    try {
+      const { api, logs } = fakeApi({ smsEnabled: true, keywordReplies: value });
+      await twilioSmsPlugin.register(api);
+      return logs.info.join("\n");
+    } finally {
+      process.env = saved;
+    }
+  }
+  it('only the exact string "twilio" hands keyword replies to Twilio', async () => {
+    expect(await wired("twilio")).toContain("keyword replies sent by twilio");
+    for (const v of [undefined, "Twilio", "TWILIO", true, "openclaw", ""]) {
+      expect(await wired(v), String(v)).toContain("keyword replies sent by openclaw");
+    }
+  });
+});
