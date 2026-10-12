@@ -281,3 +281,53 @@ describe("R5 — a failed init RETRIES with backoff (not cached forever)", () =>
     expect(errors).not.toContain("will not retry");
   });
 });
+
+describe("logs carry a HASH of the peer id, never the raw value (E.164 on SMS/WhatsApp)", () => {
+  // Every arm asserts PRESENCE of the hashed line (so a deleted log line cannot
+  // pass) AND absence of the raw peer across every logger level.
+  function allLogText(api: MockApi): string {
+    const l = api.logger as unknown as Record<string, { mock: { calls: unknown[][] } }>;
+    return ["debug", "info", "warn", "error"]
+      .flatMap((lvl) => l[lvl].mock.calls.map((c) => c.map(String).join(" ")))
+      .join("\n");
+  }
+
+  test("hard gate (unregistered peer)", async () => {
+    const { redactPeer } = await import("./index.js");
+    const { api, turn } = await setup({ hardGate: true });
+    expect((await turn()).prependContext).toContain("[IDENTITY_GATE]");
+    const logs = allLogText(api);
+    expect(logs).toContain(`hard gate active for ${redactPeer(CHANNEL, PEER)}`);
+    expect(logs).not.toContain(PEER);
+  });
+
+  test("hard gate (registered but unverified)", async () => {
+    db.identity = REGISTERED;
+    const { redactPeer } = await import("./index.js");
+    const { api, turn } = await setup({ hardGate: true, requireVerified: true });
+    expect((await turn()).prependContext).toContain("[IDENTITY_GATE]");
+    const logs = allLogText(api);
+    expect(logs).toContain(`hard gate (unverified) for ${redactPeer(CHANNEL, PEER)}`);
+    expect(logs).not.toContain(PEER);
+  });
+
+  test("scope resolved", async () => {
+    db.identity = REGISTERED;
+    const { redactPeer } = await import("./index.js");
+    const { api, turn } = await setup({ hardGate: true });
+    expect((await turn()).prependContext).toContain("[MEMORY_SCOPE]");
+    const logs = allLogText(api);
+    expect(logs).toContain(`scope resolved for ${redactPeer(CHANNEL, PEER)} →`);
+    expect(logs).not.toContain(PEER);
+  });
+
+  test("redactPeer is stable, channel-prefixed and does not contain the input", async () => {
+    const { redactPeer } = await import("./index.js");
+    const phone = "+19785550123";
+    const a = redactPeer("sms", phone);
+    expect(a).toMatch(/^sms:sha256:[0-9a-f]{12}$/);
+    expect(a).toBe(redactPeer("sms", phone));
+    expect(a).not.toContain("9785550123");
+    expect(redactPeer("sms", "+19785550124")).not.toBe(a);
+  });
+});
