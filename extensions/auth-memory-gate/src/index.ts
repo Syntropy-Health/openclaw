@@ -1,6 +1,6 @@
-import { createHash } from "node:crypto";
 import { openPluginPool, type OpenClawPluginApi } from "openclaw/plugin-sdk";
 import postgres from "postgres";
+import { logToken, redactPeer } from "../../shared/log-redact.js";
 import {
   deriveChannel,
   deriveIdentityPeer,
@@ -12,14 +12,6 @@ import {
   formatHardGateReplyAppend,
   type ScopeConfig,
 } from "./scope.js";
-
-// Logs carry a hash of the peer id, never the raw value: for SMS/WhatsApp the
-// peer id IS the subscriber's phone number (E.164), and INFO logs ship to
-// log storage. Same sha256-prefix shape as src/logging/redact-identifier.ts.
-export function redactPeer(channel: string, peerId: string): string {
-  const digest = createHash("sha256").update(peerId).digest("hex").slice(0, 12);
-  return `${channel}:sha256:${digest}`;
-}
 
 // ---------------------------------------------------------------------------
 // Plugin
@@ -177,7 +169,7 @@ const authMemoryGatePlugin = {
 
           api.logger.info(
             `auth-memory-gate: scope resolved for ${redactPeer(channel, peerId)} → ` +
-              `key=${scope.scopeKey} verified=${scope.verified}`,
+              `key=${logToken(scope.scopeKey)} verified=${scope.verified}`,
           );
 
           return { prependContext };

@@ -12,6 +12,7 @@
 
 import type { OpenClawPluginApi } from "openclaw/plugin-sdk";
 import type postgres from "postgres";
+import { logToken, redactPeer } from "../../shared/log-redact.js";
 // SYN-281: the SINGLE vault-aware writer of `syntropy_tokens`. This consumer
 // must delegate to it, never hand-roll a second (vault-blind) INSERT.
 import { upsertSyntropyToken } from "../../syntropy/src/db.js";
@@ -152,7 +153,9 @@ export function registerIdentityCommands(api: OpenClawPluginApi, deps: IdentityC
       if (verified.authToken) {
         try {
           await upsertSyntropyToken(sql, deps.getVault(), user.id, verified.authToken, "pairing");
-          api.logger.info(`persist-user-identity: stored Syntropy auth token for user ${user.id}`);
+          api.logger.info(
+            `persist-user-identity: stored Syntropy auth token for user ${logToken(user.id)}`,
+          );
         } catch (tokenErr) {
           // NOT a silent warn-and-continue: a pairing that reports success while
           // the token never landed is indistinguishable-from-success. Log at
@@ -160,7 +163,7 @@ export function registerIdentityCommands(api: OpenClawPluginApi, deps: IdentityC
           // link already succeeded and discarding it would be worse.
           tokenPersistFailed = true;
           api.logger.error(
-            `persist-user-identity: FAILED to store Syntropy token for user ${user.id}: ${tokenErr}`,
+            `persist-user-identity: FAILED to store Syntropy token for user ${logToken(user.id)}: ${tokenErr}`,
           );
         }
       }
@@ -171,7 +174,7 @@ export function registerIdentityCommands(api: OpenClawPluginApi, deps: IdentityC
         `${user.first_name ?? verified.firstName ?? ""} ${user.last_name ?? verified.lastName ?? ""}`.trim();
 
       api.logger.info(
-        `persist-user-identity: verified ${channel}:${peerId} → user ${user.id} (${verified.externalId})`,
+        `persist-user-identity: verified ${redactPeer(channel, peerId)} → user ${logToken(user.id)} (${logToken(verified.externalId)})`,
       );
 
       return {
@@ -325,7 +328,7 @@ export function registerIdentityCommands(api: OpenClawPluginApi, deps: IdentityC
       await linkChannelToUser(sql, user.id, channel, peerId);
 
       api.logger.info(
-        `persist-user-identity: registered ${channel}:${peerId} → user ${user.id} (channel-only)`,
+        `persist-user-identity: registered ${redactPeer(channel, peerId)} → user ${logToken(user.id)} (channel-only)`,
       );
 
       return {
