@@ -32,7 +32,7 @@ function loggerCalls(src: string): string[] {
   return out;
 }
 
-const RAW = ["${peerId}", "${user.id}", "${verified.externalId}"];
+const RAW = ["${peerId}", "${peerKey}", "${channelList}", "${user.id}", "${verified.externalId}"];
 
 describe("persist-user-identity logs never carry the raw phone / account ids", () => {
   const calls = loggerCalls(SRC);
