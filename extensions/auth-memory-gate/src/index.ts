@@ -1,5 +1,6 @@
 import { openPluginPool, type OpenClawPluginApi } from "openclaw/plugin-sdk";
 import postgres from "postgres";
+import { logToken, redactPeer } from "../../shared/log-redact.js";
 import {
   deriveChannel,
   deriveIdentityPeer,
@@ -142,7 +143,9 @@ const authMemoryGatePlugin = {
             // User not registered
             if (hardGate) {
               gatedPeers.add(gateKey);
-              api.logger.info(`auth-memory-gate: hard gate active for ${gateKey}`);
+              api.logger.info(
+                `auth-memory-gate: hard gate active for ${redactPeer(channel, peerId)}`,
+              );
               return { prependContext: formatHardGateSystemPrompt(channel, peerId) };
             }
             return {};
@@ -156,15 +159,17 @@ const authMemoryGatePlugin = {
           // Gate unverified users when requireVerified + hardGate are both on
           if (scopeConfig.requireVerified && !scope.verified && hardGate) {
             gatedPeers.add(gateKey);
-            api.logger.info(`auth-memory-gate: hard gate (unverified) for ${gateKey}`);
+            api.logger.info(
+              `auth-memory-gate: hard gate (unverified) for ${redactPeer(channel, peerId)}`,
+            );
             return { prependContext: formatHardGateSystemPrompt(channel, peerId) };
           }
 
           const prependContext = formatScopeBlock(scope, scopeConfig);
 
           api.logger.info(
-            `auth-memory-gate: scope resolved for ${channel}:${peerId} → ` +
-              `key=${scope.scopeKey} verified=${scope.verified}`,
+            `auth-memory-gate: scope resolved for ${redactPeer(channel, peerId)} → ` +
+              `key=${logToken(scope.scopeKey)} verified=${scope.verified}`,
           );
 
           return { prependContext };

@@ -12,6 +12,7 @@
  */
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 import type { OpenClawPluginApi } from "../../../src/plugins/types.js";
+import { logToken, redactPeer } from "../../shared/log-redact.js";
 import { formatHardGateReplyAppend } from "./scope.js";
 
 const db = vi.hoisted(() => ({
@@ -279,5 +280,60 @@ describe("R5 — a failed init RETRIES with backoff (not cached forever)", () =>
     const errors = (api.logger.error as ReturnType<typeof vi.fn>).mock.calls.flat().join("\n");
     expect(errors).toMatch(/init failed.*retry in 1s/);
     expect(errors).not.toContain("will not retry");
+  });
+});
+
+describe("logs carry a KEYED token of the peer id, never the raw value (E.164 on SMS/WhatsApp)", () => {
+  beforeEach(() => {
+    vi.stubEnv("OPENCLAW_LOG_REDACT_KEY", "test-log-key");
+  });
+  afterEach(() => {
+    vi.unstubAllEnvs();
+  });
+  // Every arm asserts PRESENCE of the tokenised line (so a deleted log line cannot
+  // pass) AND absence of the raw peer across every logger level.
+  function allLogText(api: MockApi): string {
+    const l = api.logger as unknown as Record<string, { mock: { calls: unknown[][] } }>;
+    return ["debug", "info", "warn", "error"]
+      .flatMap((lvl) => l[lvl].mock.calls.map((c) => c.map(String).join(" ")))
+      .join("\n");
+  }
+
+  test("hard gate (unregistered peer)", async () => {
+    const { api, turn } = await setup({ hardGate: true });
+    expect((await turn()).prependContext).toContain("[IDENTITY_GATE]");
+    const logs = allLogText(api);
+    expect(logs).toContain(`hard gate active for ${redactPeer(CHANNEL, PEER)}`);
+    expect(logs).not.toContain(PEER);
+  });
+
+  test("hard gate (registered but unverified)", async () => {
+    db.identity = REGISTERED;
+    const { api, turn } = await setup({ hardGate: true, requireVerified: true });
+    expect((await turn()).prependContext).toContain("[IDENTITY_GATE]");
+    const logs = allLogText(api);
+    expect(logs).toContain(`hard gate (unverified) for ${redactPeer(CHANNEL, PEER)}`);
+    expect(logs).not.toContain(PEER);
+  });
+
+  test("no key configured: the line says 'redacted', never a plain hash or the raw peer", async () => {
+    vi.stubEnv("OPENCLAW_LOG_REDACT_KEY", "");
+    const { api, turn } = await setup({ hardGate: true });
+    await turn();
+    const logs = allLogText(api);
+    expect(logs).toContain(`hard gate active for ${CHANNEL}:redacted`);
+    expect(logs).not.toContain(PEER);
+  });
+
+  test("scope resolved", async () => {
+    db.identity = REGISTERED;
+    const { api, turn } = await setup({ hardGate: true });
+    expect((await turn()).prependContext).toContain("[MEMORY_SCOPE]");
+    const logs = allLogText(api);
+    expect(logs).toContain(`scope resolved for ${redactPeer(CHANNEL, PEER)} →`);
+    expect(logs).not.toContain(PEER);
+    // the account id on the same line is tokenised too (REGISTERED.id = "u1")
+    expect(logs).toContain(`key=${logToken("u1")} `);
+    expect(logs).not.toContain("key=u1");
   });
 });
