@@ -94,7 +94,8 @@ jobs:
             esac
 
             case "$path" in
-              apps/android/*|apps/shared/*)
+              # ci.yml itself: a change to the android job definition must run it.
+              apps/android/*|apps/shared/*|.github/workflows/ci.yml)
                 run_android=true
                 ;;
             esac
@@ -700,6 +701,11 @@ jobs:
         uses: android-actions/setup-android@v3
         with:
           accept-android-sdk-licenses: false
+          # The action's default is "tools platform-tools". The legacy `tools`
+          # package does not exist in the cmdline-tools 16.0 the action installs,
+          # so the default fails: "Failed to find package 'tools'" (mono #525).
+          # The SDK packages this job needs are installed in the next step.
+          packages: platform-tools
 
       - name: Setup Gradle
         uses: gradle/actions/setup-gradle@v4
