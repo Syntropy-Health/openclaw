@@ -702,7 +702,7 @@ jobs:
         with:
           accept-android-sdk-licenses: false
           # The action's default is "tools platform-tools". The legacy `tools`
-          # package no longer exists in cmdline-tools 16.0 (current runner image),
+          # package does not exist in the cmdline-tools 16.0 the action installs,
           # so the default fails: "Failed to find package 'tools'" (mono #525).
           # The SDK packages this job needs are installed in the next step.
           packages: platform-tools
