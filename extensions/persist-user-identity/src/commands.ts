@@ -12,7 +12,7 @@
 
 import type { OpenClawPluginApi } from "openclaw/plugin-sdk";
 import type postgres from "postgres";
-import { logToken, redactPeer, safeErr } from "../../shared/log-redact.js";
+import { logToken, maskPeerForDisplay, redactPeer, safeErr } from "../../shared/log-redact.js";
 // SYN-281: the SINGLE vault-aware writer of `syntropy_tokens`. This consumer
 // must delegate to it, never hand-roll a second (vault-blind) INSERT.
 import { upsertSyntropyToken } from "../../syntropy/src/db.js";
@@ -23,7 +23,6 @@ import {
   findUserByExternalId,
   linkChannelToUser,
   linkExternalId,
-  listUserChannels,
   updateUserName,
 } from "./db.js";
 import {
@@ -168,8 +167,9 @@ export function registerIdentityCommands(api: OpenClawPluginApi, deps: IdentityC
         }
       }
 
-      const channels = await listUserChannels(sql, user.id);
-      const channelList = channels.map((c) => `${c.channel}:${c.channel_peer_id}`).join(", ");
+      // mono #543: show ONLY the channel that issued !verify, masked. Never list the
+      // user's other linked channels (their SMS number, device ids) into this chat.
+      const thisChannel = `${channel} (${maskPeerForDisplay(peerId)})`;
       const name =
         `${user.first_name ?? verified.firstName ?? ""} ${user.last_name ?? verified.lastName ?? ""}`.trim();
 
@@ -181,7 +181,7 @@ export function registerIdentityCommands(api: OpenClawPluginApi, deps: IdentityC
         text:
           `Identity verified! Welcome${name ? `, ${name}` : ""}.\n` +
           `Your user ID: ${user.id}\n` +
-          `Linked channels: ${channelList}` +
+          `Linked channel: ${thisChannel}` +
           // SYN-281: surface a token-persist failure rather than a clean success.
           (tokenPersistFailed
             ? "\n\u26a0\ufe0f Note: your Syntropy access token could not be saved — please re-pair to enable tool actions."
@@ -252,22 +252,13 @@ export function registerIdentityCommands(api: OpenClawPluginApi, deps: IdentityC
         expiresAt: Date.now() + 15 * 60_000,
       });
 
-      if (results.length === 1) {
-        return {
-          text:
-            `I found your account, ${match.firstName}! ` +
-            "Please open the Syntropy Journals app → Settings → Pair Device, " +
-            "and enter the 6-digit code here.\n\n" +
-            "Type: !verify <6-digit-code>",
-        };
-      }
-
-      const list = results.map((r, i) => `${i + 1}. ${r.firstName} ${r.lastName}`).join("\n");
+      // mono #543: never echo names or the number of matches. !identify needs no
+      // authentication, so names here let anyone enumerate accounts (CWE-203).
       return {
         text:
-          `I found a few possible matches:\n${list}\n\n` +
-          "Please open the Syntropy Journals app → Settings → Pair Device, " +
-          "and enter the 6-digit code here to confirm your identity.\n\n" +
+          "A match was found — continue with !verify. " +
+          "Open the Syntropy Journals app → Settings → Pair Device, " +
+          "and enter the 6-digit code here.\n\n" +
           "Type: !verify <6-digit-code>",
       };
     },
@@ -365,13 +356,13 @@ export function registerIdentityCommands(api: OpenClawPluginApi, deps: IdentityC
           text:
             `You are not registered.\n` +
             `Current channel: ${channel}\n` +
-            `Channel ID: ${peerId}\n\n` +
+            `Channel ID: ${maskPeerForDisplay(peerId)}\n\n` +
             "Use !register <first_name> <last_name> or !verify <token> to set up your identity.",
         };
       }
 
-      const channels = await listUserChannels(sql, identity.id);
-      const channelList = channels.map((c) => `  - ${c.channel}: ${c.channel_peer_id}`).join("\n");
+      // mono #543: only the channel this command came from, masked.
+      const thisChannel = `  - ${channel}: ${maskPeerForDisplay(peerId)}`;
       const name = `${identity.first_name ?? ""} ${identity.last_name ?? ""}`.trim();
 
       return {
@@ -380,7 +371,7 @@ export function registerIdentityCommands(api: OpenClawPluginApi, deps: IdentityC
           (name ? `Name: ${name}\n` : "") +
           `Verified: ${identity.verified ? "yes" : "no"}\n` +
           (identity.external_id ? `External ID: ${identity.external_id}\n` : "") +
-          `Linked channels:\n${channelList}`,
+          `This channel:\n${thisChannel}`,
       };
     },
   });

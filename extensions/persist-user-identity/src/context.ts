@@ -37,7 +37,9 @@ export function formatIdentityContext(
     `external_id: ${identity.external_id ?? "none"}`,
     `name: ${name}`,
     `channel: ${identity.channel}`,
-    `channel_peer_id: ${identity.channel_peer_id}`,
+    // No channel_peer_id (mono #542): no consumer reads it from this block (9
+    // places checked, 0 readers), and it put the phone into the LLM context and
+    // the session transcript on every verified turn.
     `verified: ${identity.verified}`,
     `status: ${status}`,
     "[/USER_IDENTITY]",

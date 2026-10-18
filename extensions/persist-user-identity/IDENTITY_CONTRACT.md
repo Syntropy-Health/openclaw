@@ -14,7 +14,6 @@ user_id: <uuid>
 external_id: <string|none>
 name: <first last|unknown>
 channel: <telegram|whatsapp|slack|discord|chat|...>
-channel_peer_id: <channel-specific identifier>
 verified: <true|false>
 status: <verified|registered|unregistered|new_session>
 [/USER_IDENTITY]
@@ -22,15 +21,14 @@ status: <verified|registered|unregistered|new_session>
 
 ### Field Reference
 
-| Field             | Type             | Description                                                                                                                      |
-| ----------------- | ---------------- | -------------------------------------------------------------------------------------------------------------------------------- |
-| `user_id`         | UUID or `none`   | Canonical user ID (from `lp_users.id`). Stable across channels.                                                                  |
-| `external_id`     | string or `none` | Externally-issued ID from JWT `sub` claim or verify endpoint. Present only for verified users.                                   |
-| `name`            | string           | User's display name. `unknown` if not yet registered.                                                                            |
-| `channel`         | string           | The channel this message arrived from (e.g., `telegram`, `whatsapp`, `chat`).                                                    |
-| `channel_peer_id` | string           | Channel-specific sender identifier (e.g., Telegram user ID, phone number).                                                       |
-| `verified`        | boolean          | Whether user provided a valid external auth token.                                                                               |
-| `status`          | enum             | `verified` = token-verified user, `registered` = name only, `unregistered` = unknown peer, `new_session` = returning known user. |
+| Field         | Type             | Description                                                                                                                      |
+| ------------- | ---------------- | -------------------------------------------------------------------------------------------------------------------------------- |
+| `user_id`     | UUID or `none`   | Canonical user ID (from `lp_users.id`). Stable across channels.                                                                  |
+| `external_id` | string or `none` | Externally-issued ID from JWT `sub` claim or verify endpoint. Present only for verified users.                                   |
+| `name`        | string           | User's display name. `unknown` if not yet registered.                                                                            |
+| `channel`     | string           | The channel this message arrived from (e.g., `telegram`, `whatsapp`, `chat`).                                                    |
+| `verified`    | boolean          | Whether user provided a valid external auth token.                                                                               |
+| `status`      | enum             | `verified` = token-verified user, `registered` = name only, `unregistered` = unknown peer, `new_session` = returning known user. |
 
 ### Status Transitions
 
@@ -42,36 +40,14 @@ registered   → !verify   → verified   (upgraded)
 
 ## How to Consume Identity in Your Plugin
 
-### Pattern 1: Parse from prependContext (Simple)
+### Retired: parsing this block (mono #542)
 
-In your `before_agent_start` hook (at a lower priority, e.g., 40), read the identity block from another plugin's `prependContext`:
-
-```typescript
-api.on(
-  "before_agent_start",
-  async (event, ctx) => {
-    // The identity block will be in the accumulated prependContext
-    // from higher-priority hooks. Access it via the prompt or
-    // by querying the DB directly.
-
-    // Direct DB query is more reliable:
-    const sessionKey = ctx?.sessionKey ?? "";
-    const channel = deriveChannel(sessionKey);
-    const peerId = derivePeerId(sessionKey);
-    const identity = await findUserByChannelPeer(sql, channel, peerId);
-
-    if (identity?.verified) {
-      // Use identity.id or identity.external_id for scoped queries
-      const memories = await graphiti.search({
-        group_id: identity.external_id ?? identity.id,
-        query: event.prompt,
-      });
-      return { prependContext: formatMemories(memories) };
-    }
-  },
-  { priority: 40 },
-);
-```
+Plugins cannot read another plugin's `prependContext`: the `before_agent_start` event carries only
+`{ prompt, messages }`. The old "parse from prependContext" pattern was never implemented by any
+consumer (2026-10-18 census: 9 places checked, 0 readers), so it is retired. The block is model
+context only. It deliberately carries **no `channel_peer_id`**: on SMS/WhatsApp that is the
+subscriber's phone number, and the block reaches the LLM provider and the session transcript.
+Use the database (below) or the shared scope key.
 
 ### Pattern 2: Direct DB Query (Recommended)
 
