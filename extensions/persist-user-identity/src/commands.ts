@@ -12,7 +12,7 @@
 
 import type { OpenClawPluginApi } from "openclaw/plugin-sdk";
 import type postgres from "postgres";
-import { logToken, redactPeer, safeErr } from "../../shared/log-redact.js";
+import { logToken, maskPeerForDisplay, redactPeer, safeErr } from "../../shared/log-redact.js";
 // SYN-281: the SINGLE vault-aware writer of `syntropy_tokens`. This consumer
 // must delegate to it, never hand-roll a second (vault-blind) INSERT.
 import { upsertSyntropyToken } from "../../syntropy/src/db.js";
@@ -23,7 +23,6 @@ import {
   findUserByExternalId,
   linkChannelToUser,
   linkExternalId,
-  listUserChannels,
   updateUserName,
 } from "./db.js";
 import {
@@ -33,6 +32,9 @@ import {
   verifyToken,
   verifyViaPasscode,
 } from "./jwt.js";
+
+/** Cap on pending !identify matches (unauthenticated input, so it must be bounded). */
+const MAX_PENDING_IDENTIFY = 1000;
 
 /** Closure state register() owns, threaded into the command handlers. */
 export type IdentityCommandDeps = {
@@ -168,8 +170,9 @@ export function registerIdentityCommands(api: OpenClawPluginApi, deps: IdentityC
         }
       }
 
-      const channels = await listUserChannels(sql, user.id);
-      const channelList = channels.map((c) => `${c.channel}:${c.channel_peer_id}`).join(", ");
+      // mono #543: show ONLY the channel that issued !verify, masked. Never list the
+      // user's other linked channels (their SMS number, device ids) into this chat.
+      const thisChannel = `${channel} (${maskPeerForDisplay(peerId)})`;
       const name =
         `${user.first_name ?? verified.firstName ?? ""} ${user.last_name ?? verified.lastName ?? ""}`.trim();
 
@@ -181,7 +184,7 @@ export function registerIdentityCommands(api: OpenClawPluginApi, deps: IdentityC
         text:
           `Identity verified! Welcome${name ? `, ${name}` : ""}.\n` +
           `Your user ID: ${user.id}\n` +
-          `Linked channels: ${channelList}` +
+          `Linked channel: ${thisChannel}` +
           // SYN-281: surface a token-persist failure rather than a clean success.
           (tokenPersistFailed
             ? "\n\u26a0\ufe0f Note: your Syntropy access token could not be saved — please re-pair to enable tool actions."
@@ -244,30 +247,33 @@ export function registerIdentityCommands(api: OpenClawPluginApi, deps: IdentityC
         };
       }
 
-      // Store the first match for the upcoming !verify passcode call
-      const match = results[0] as UserLookupResult;
-      pendingIdentify.set(peerKey, {
-        email: match.email,
-        userId: match.userId,
-        expiresAt: Date.now() + 15 * 60_000,
-      });
-
+      // Pin the match for the upcoming !verify ONLY when it is unambiguous. With
+      // several matches, pinning results[0] would send the wrong identifier for
+      // every other candidate and fail their verify (mono #543 review); !verify
+      // without an identifier is the same path as a bare !verify.
       if (results.length === 1) {
-        return {
-          text:
-            `I found your account, ${match.firstName}! ` +
-            "Please open the Syntropy Journals app → Settings → Pair Device, " +
-            "and enter the 6-digit code here.\n\n" +
-            "Type: !verify <6-digit-code>",
-        };
+        const match = results[0] as UserLookupResult;
+        // Bounded: !identify is unauthenticated, so an unbounded map is a memory DoS.
+        if (pendingIdentify.size >= MAX_PENDING_IDENTIFY) {
+          const oldest = pendingIdentify.keys().next().value;
+          if (oldest !== undefined) pendingIdentify.delete(oldest);
+        }
+        pendingIdentify.set(peerKey, {
+          email: match.email,
+          userId: match.userId,
+          expiresAt: Date.now() + 15 * 60_000,
+        });
+      } else {
+        pendingIdentify.delete(peerKey);
       }
 
-      const list = results.map((r, i) => `${i + 1}. ${r.firstName} ${r.lastName}`).join("\n");
+      // mono #543: never echo names or the number of matches. !identify needs no
+      // authentication, so names here let anyone enumerate accounts (CWE-203).
       return {
         text:
-          `I found a few possible matches:\n${list}\n\n` +
-          "Please open the Syntropy Journals app → Settings → Pair Device, " +
-          "and enter the 6-digit code here to confirm your identity.\n\n" +
+          "A match was found — continue with !verify. " +
+          "Open the Syntropy Journals app → Settings → Pair Device, " +
+          "and enter the 6-digit code here.\n\n" +
           "Type: !verify <6-digit-code>",
       };
     },
@@ -346,7 +352,7 @@ export function registerIdentityCommands(api: OpenClawPluginApi, deps: IdentityC
 
   api.registerCommand({
     name: "whoami",
-    description: "Show your current identity and linked channels",
+    description: "Show your current identity and this channel",
     acceptsArgs: false,
     requireAuth: false,
     handler: async (ctx) => {
@@ -365,13 +371,13 @@ export function registerIdentityCommands(api: OpenClawPluginApi, deps: IdentityC
           text:
             `You are not registered.\n` +
             `Current channel: ${channel}\n` +
-            `Channel ID: ${peerId}\n\n` +
+            `Channel ID: ${maskPeerForDisplay(peerId)}\n\n` +
             "Use !register <first_name> <last_name> or !verify <token> to set up your identity.",
         };
       }
 
-      const channels = await listUserChannels(sql, identity.id);
-      const channelList = channels.map((c) => `  - ${c.channel}: ${c.channel_peer_id}`).join("\n");
+      // mono #543: only the channel this command came from, masked.
+      const thisChannel = `  - ${channel}: ${maskPeerForDisplay(peerId)}`;
       const name = `${identity.first_name ?? ""} ${identity.last_name ?? ""}`.trim();
 
       return {
@@ -379,8 +385,7 @@ export function registerIdentityCommands(api: OpenClawPluginApi, deps: IdentityC
           `User ID: ${identity.id}\n` +
           (name ? `Name: ${name}\n` : "") +
           `Verified: ${identity.verified ? "yes" : "no"}\n` +
-          (identity.external_id ? `External ID: ${identity.external_id}\n` : "") +
-          `Linked channels:\n${channelList}`,
+          `This channel:\n${thisChannel}`,
       };
     },
   });

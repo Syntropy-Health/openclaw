@@ -77,3 +77,14 @@ export function safeErr(
   }
   return text;
 }
+
+/**
+ * A peer id for display back to its OWN user in a command reply (mono #543):
+ * only the last 4 characters, e.g. "…0123". Never use it for another user's
+ * channels: those are not shown at all.
+ */
+export function maskPeerForDisplay(peerId: string | null | undefined): string {
+  const v = (peerId ?? "").trim();
+  // Short ids would be mostly revealed by a last-4 tail; show nothing for them.
+  return v.length >= 10 ? `…${v.slice(-4)}` : "…";
+}

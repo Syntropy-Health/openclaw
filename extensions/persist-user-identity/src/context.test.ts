@@ -29,12 +29,19 @@ describe("formatIdentityContext", () => {
         "external_id: ext-1",
         "name: Ada Lovelace",
         "channel: whatsapp",
-        "channel_peer_id: +15551234567",
         "verified: true",
         "status: verified",
         "[/USER_IDENTITY]",
       ].join("\n"),
     );
+  });
+
+  it("never carries the peer (mono #542 pin): no channel_peer_id, no phone", () => {
+    for (const status of ["verified", "registered", "new_session"] as const) {
+      const block = formatIdentityContext(identity(), status);
+      expect(block).not.toContain("channel_peer_id");
+      expect(block).not.toContain("5551234567");
+    }
   });
 
   it("renders null external_id as 'none' and missing names as 'unknown'", () => {

@@ -207,7 +207,7 @@ User: /verify eyJhbGciOiJIUzI1NiJ9...
 
 Agent: "Identity verified! Welcome, Jane Doe.
         Your user ID: 6a0c0211-a497-...
-        Linked channels: whatsapp:+1234567890"
+        Linked channel: whatsapp (…7890)"
 ```
 
 What happens internally:
@@ -363,7 +363,6 @@ user_id: 6a0c0211-a497-...
 external_id: auth0|jane          (or "none" for guest)
 name: Jane Doe
 channel: whatsapp
-channel_peer_id: +1234567890
 verified: true                   (true if external_id is set)
 status: new_session
 [/USER_IDENTITY]
