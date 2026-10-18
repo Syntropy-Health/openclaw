@@ -167,6 +167,20 @@ function test_syncsSessionMaintenanceOnly() {
   const mtimeBefore = fs.statSync(data).mtimeMs;
   execSync(`node ${SCRIPT}`, { env, stdio: "ignore" });
   assert(fs.statSync(data).mtimeMs === mtimeBefore, "second boot with maintenance: not rewritten");
+  // Only transcriptRetention is image-owned: an operator's /data pruneAfter survives.
+  const edited = JSON.parse(fs.readFileSync(data, "utf8"));
+  edited.session.maintenance.pruneAfter = "7d";
+  fs.writeFileSync(data, JSON.stringify(edited, null, 2));
+  execSync(`node ${SCRIPT}`, { env, stdio: "ignore" });
+  const kept = JSON.parse(fs.readFileSync(data, "utf8"));
+  assert(
+    kept.session?.maintenance?.pruneAfter === "7d",
+    "operator pruneAfter on /data survives a boot",
+  );
+  assert(
+    kept.session?.maintenance?.transcriptRetention?.maxAge === "30d",
+    "transcriptRetention still image-owned",
+  );
   fs.rmSync(tmp, { recursive: true, force: true });
 }
 

@@ -1185,7 +1185,7 @@ See [Multi-Agent Sandbox & Tools](/tools/multi-agent-sandbox-tools) for preceden
 - **`mainKey`**: legacy field. Runtime now always uses `"main"` for the main direct-chat bucket.
 - **`sendPolicy`**: match by `channel`, `chatType` (`direct|group|channel`, with legacy `dm` alias), `keyPrefix`, or `rawKeyPrefix`. First deny wins.
 - **`maintenance`**: `warn` warns the active session on eviction; `enforce` applies pruning and rotation. Pruning only renames a pruned entry's transcript to `*.deleted.<ts>` and never sees unindexed transcripts.
-- **`maintenance.transcriptRetention`** (optional): content retention for transcript files. Every `*.jsonl`, plus archived `*.jsonl.deleted.*` / `*.jsonl.reset.*`, under each agent's sessions dir whose mtime is older than `maxAge` is counted (`mode: "warn"`, the default) or deleted (`mode: "enforce"`). It runs at gateway start, then at most hourly. `sessions.json` is never touched. Absent: no sweep.
+- **`maintenance.transcriptRetention`** (optional): content retention for transcript files. Every `*.jsonl`, plus archived `*.jsonl.deleted.*` / `*.jsonl.reset.*`, under each agent's sessions dir (and a custom `session.store` dir) whose mtime is older than `maxAge` (minimum `1d`) is counted (`mode: "warn"`, the default) or deleted (`mode: "enforce"`). It runs ~30s after gateway start, then at most hourly. It skips files with a held session lock, never follows symlinks, and never touches `sessions.json`. Absent: no sweep. NOT full retention: `sessions.json` entries and derived memory copies are outside it. On Fly, `transcriptRetention` is image-owned (synced from `/app/openclaw.json` at boot), so changing it is an image change plus a redeploy.
 
 </Accordion>
 

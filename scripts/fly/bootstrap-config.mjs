@@ -18,7 +18,8 @@
  * The `channels` key is intentionally NOT overwritten because /app's
  * `channels.whatsapp.enabled` was rejected by the runtime config schema
  * (see merge-attempt incident 2026-05-13). Channels stay in /data; only
- * `plugins` is source-of-truth in /app.
+ * `plugins` is source-of-truth in /app, plus
+ * `session.maintenance.transcriptRetention` (mono #544).
  */
 
 import fs from "node:fs";
@@ -70,11 +71,17 @@ function main() {
   if (appConfig.plugins) {
     dataConfig.plugins = appConfig.plugins;
   }
-  // session.maintenance is image-owned too (mono #544): transcript retention is a
-  // go-live precondition and must not depend on hand-editing the volume. Only
-  // that subtree is synced; the rest of `session` (e.g. dmScope) stays on /data.
-  if (appConfig.session?.maintenance) {
-    dataConfig.session = { ...dataConfig.session, maintenance: appConfig.session.maintenance };
+  // session.maintenance.transcriptRetention is image-owned too (mono #544): it is a
+  // go-live precondition and must not depend on hand-editing the volume. ONLY that
+  // key is synced, so operator edits to the rest of session.maintenance (pruneAfter,
+  // maxEntries, rotateBytes, core mode) and of `session` survive. Changing it (e.g.
+  // flipping to "enforce") is an image change + redeploy, not a /data edit.
+  const retention = appConfig.session?.maintenance?.transcriptRetention;
+  if (retention) {
+    dataConfig.session = {
+      ...dataConfig.session,
+      maintenance: { ...dataConfig.session?.maintenance, transcriptRetention: retention },
+    };
   }
 
   // Write only when the content changes: an unchanged config keeps its bytes and

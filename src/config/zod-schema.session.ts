@@ -87,8 +87,10 @@ export const SessionSchema = z
           let ok = false;
           try {
             ok =
-              parseDurationMs(String(val.transcriptRetention.maxAge).trim(), { defaultUnit: "d" }) >
-              0;
+              parseDurationMs(String(val.transcriptRetention.maxAge).trim(), {
+                defaultUnit: "d",
+              }) >=
+              24 * 60 * 60_000;
           } catch {
             ok = false;
           }
@@ -96,7 +98,7 @@ export const SessionSchema = z
             ctx.addIssue({
               code: z.ZodIssueCode.custom,
               path: ["transcriptRetention", "maxAge"],
-              message: "invalid or non-positive duration (use ms, s, m, h, d)",
+              message: "invalid duration or below the 1d minimum (use ms, s, m, h, d)",
             });
           }
         }
