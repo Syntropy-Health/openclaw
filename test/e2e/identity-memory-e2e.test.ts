@@ -184,11 +184,11 @@ describe("hard gate flow — identity lifecycle", () => {
     const identity = await gateFindUser(sql, testChannel, testPeerId);
     expect(identity).toBeNull();
 
-    const gatePrompt = formatHardGateSystemPrompt(testChannel, testPeerId);
+    const gatePrompt = formatHardGateSystemPrompt(testChannel);
     expect(gatePrompt).toContain("[IDENTITY_GATE]");
     expect(gatePrompt).toContain("status: LOCKED");
     expect(gatePrompt).toContain(`channel: ${testChannel}`);
-    expect(gatePrompt).toContain(`channel_peer_id: ${testPeerId}`);
+    expect(gatePrompt).not.toContain(testPeerId);
     expect(gatePrompt).toContain("MUST NOT proceed");
   });
 

@@ -89,15 +89,28 @@ async function parseMcpResponse(resp: Response): Promise<Record<string, unknown>
  * for expired-session recovery. Error messages never include the auth token
  * or the session id.
  */
+/** `baseUrl` + MCP path, without a doubled slash. Default path `/mcp`. */
+export function mcpEndpoint(baseUrl: string, mcpPath?: string): string {
+  return `${baseUrl.replace(/\/+$/, "")}${mcpPath ?? "/mcp"}`;
+}
+
 export class McpSession {
   private readonly baseUrl: string;
+  /**
+   * MCP endpoint path on `baseUrl` (mono #539). Default `/mcp` (kg-mcp); SJ needs
+   * {@link SJ_MCP_PATH} (`/mcp/`): its bare `/mcp` 307s and the POST body is lost.
+   * The transports fall back to this when no explicit `mcpPath` is passed, so one
+   * session carries one endpoint for initialize, list and call.
+   */
+  readonly mcpPath: string;
   private readonly clientName: string;
   /** `undefined` = not established; `null` = stateless server (no session). */
   private cached: string | null | undefined;
   private inFlight: Promise<string | null> | null = null;
 
-  constructor(baseUrl: string, opts?: { clientName?: string }) {
+  constructor(baseUrl: string, opts?: { clientName?: string; mcpPath?: string }) {
     this.baseUrl = baseUrl;
+    this.mcpPath = opts?.mcpPath ?? "/mcp";
     this.clientName = opts?.clientName ?? "openclaw-syntropy-mcp";
   }
 
@@ -127,7 +140,7 @@ export class McpSession {
   }
 
   private async initialize(authToken: string): Promise<string | null> {
-    const resp = await fetch(`${this.baseUrl}/mcp`, {
+    const resp = await fetch(mcpEndpoint(this.baseUrl, this.mcpPath), {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
@@ -162,7 +175,7 @@ export class McpSession {
     if (sessionId === null) return null; // stateless server — no session needed
 
     // notifications/initialized — best-effort, fire-and-forget (no id).
-    void fetch(`${this.baseUrl}/mcp`, {
+    void fetch(mcpEndpoint(this.baseUrl, this.mcpPath), {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
@@ -270,7 +283,7 @@ export async function callMcpTool(
 ): Promise<McpToolResult> {
   const { label } = opts;
   const toolErrorLabel = opts.toolErrorLabel ?? label;
-  const url = `${baseUrl.replace(/\/+$/, "")}${opts.mcpPath ?? "/mcp"}`;
+  const url = mcpEndpoint(baseUrl, opts.mcpPath ?? opts.session?.mcpPath);
 
   try {
     const resp = await postMcpRequest(
@@ -341,13 +354,13 @@ export async function callMcpTool(
 export async function listMcpTools(
   baseUrl: string,
   authToken: string,
-  opts: { label: string; session?: McpSession },
+  opts: { label: string; session?: McpSession; mcpPath?: string },
 ): Promise<McpToolListResult> {
   const { label } = opts;
 
   try {
     const resp = await postMcpRequest(
-      `${baseUrl}/mcp`,
+      mcpEndpoint(baseUrl, opts.mcpPath ?? opts.session?.mcpPath),
       authToken,
       JSON.stringify({
         jsonrpc: "2.0",

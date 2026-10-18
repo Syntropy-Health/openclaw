@@ -1653,3 +1653,22 @@ describe("syntropy-mcp guard hardening", () => {
     expect(OPENCLAW_COMPONENT_MARKER).toBe(CORE_COMPONENT_MARKER);
   });
 });
+
+describe("syntropy-mcp config: per-server mcpPath (mono #539)", () => {
+  it("accepts and trims mcpPath; absent stays undefined (transport default /mcp)", () => {
+    const cfg = parseSyntropyMcpConfig({
+      servers: [kgServer, { ...sjM2mServer, mcpPath: " /mcp/ " }],
+    });
+    expect(cfg.servers[0]!.mcpPath).toBeUndefined();
+    expect(cfg.servers[1]!.mcpPath).toBe("/mcp/");
+  });
+
+  it("rejects a path that does not start with '/' and a non-string", () => {
+    expect(() =>
+      parseSyntropyMcpConfig({ servers: [{ ...sjM2mServer, mcpPath: "mcp/" }] }),
+    ).toThrow(/mcpPath must be a string starting with "\/"/);
+    expect(() => parseSyntropyMcpConfig({ servers: [{ ...sjM2mServer, mcpPath: 5 }] })).toThrow(
+      /mcpPath/,
+    );
+  });
+});

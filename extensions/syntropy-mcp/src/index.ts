@@ -92,6 +92,11 @@ export type SyntropyMcpServerSpec = {
    */
   commitTools?: string[];
   navTools?: string[];
+  /**
+   * MCP endpoint path on `baseUrl` (mono #539). Default `/mcp` (kg-mcp). SJ needs
+   * `/mcp/`: its bare `/mcp` 307s to `/mcp/` and the POST body does not survive.
+   */
+  mcpPath?: string;
   /** Error-message label; defaults to `id`. */
   label?: string;
 };
@@ -122,6 +127,7 @@ function parseServer(raw: unknown, index: number): SyntropyMcpServerSpec {
     commitTools,
     navTools,
     label,
+    mcpPath,
   } = entry;
   if (typeof id !== "string" || !id.trim()) {
     throw new Error(`servers[${index}].id must be a non-empty string`);
@@ -138,7 +144,11 @@ function parseServer(raw: unknown, index: number): SyntropyMcpServerSpec {
   if (auth === "m2m-exchange" && (typeof resource !== "string" || !resource.trim())) {
     throw new Error(`servers[${index}] ("${id}") auth=m2m-exchange requires resource`);
   }
+  if (mcpPath !== undefined && (typeof mcpPath !== "string" || !mcpPath.trim().startsWith("/"))) {
+    throw new Error(`servers[${index}] ("${id}") mcpPath must be a string starting with "/"`);
+  }
   const spec: SyntropyMcpServerSpec = { id: id.trim(), baseUrl: baseUrl.trim(), auth };
+  if (typeof mcpPath === "string") spec.mcpPath = mcpPath.trim();
   if (typeof apiKeyEnv === "string") spec.apiKeyEnv = apiKeyEnv.trim();
   if (typeof resource === "string") spec.resource = resource.trim();
   if (typeof exchangePath === "string") spec.exchangePath = exchangePath.trim();
@@ -594,7 +604,7 @@ export function createSyntropyMcpPlugin(overrides: SyntropyMcpOverrides = {}) {
 
       for (const spec of config.servers) {
         const label = spec.label ?? spec.id;
-        const session = new McpSession(spec.baseUrl);
+        const session = new McpSession(spec.baseUrl, { mcpPath: spec.mcpPath });
         if (spec.auth === "static-key") {
           const apiKeyEnv = spec.apiKeyEnv as string; // validated by the parser
           const registerTimeValue = env[apiKeyEnv];

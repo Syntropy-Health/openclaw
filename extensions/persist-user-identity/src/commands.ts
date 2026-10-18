@@ -12,7 +12,7 @@
 
 import type { OpenClawPluginApi } from "openclaw/plugin-sdk";
 import type postgres from "postgres";
-import { logToken, redactPeer } from "../../shared/log-redact.js";
+import { logToken, redactPeer, safeErr } from "../../shared/log-redact.js";
 // SYN-281: the SINGLE vault-aware writer of `syntropy_tokens`. This consumer
 // must delegate to it, never hand-roll a second (vault-blind) INSERT.
 import { upsertSyntropyToken } from "../../syntropy/src/db.js";
@@ -163,7 +163,7 @@ export function registerIdentityCommands(api: OpenClawPluginApi, deps: IdentityC
           // link already succeeded and discarding it would be worse.
           tokenPersistFailed = true;
           api.logger.error(
-            `persist-user-identity: FAILED to store Syntropy token for user ${logToken(user.id)}: ${tokenErr}`,
+            `persist-user-identity: FAILED to store Syntropy token for user ${logToken(user.id)}: ${safeErr(tokenErr, [peerId])}`,
           );
         }
       }

@@ -5,6 +5,7 @@ import { authorizeClerkJwt, resolveClerkAuth } from "../../../src/gateway/auth.j
 import { evictClerkSessionCache } from "../../../src/gateway/clerk-session-validation.js";
 // Session-key parsing is shared with auth-memory-gate + syntropy so the
 // convention can't drift across the three identity hooks (oc-hygiene #7).
+import { safeErr } from "../../shared/log-redact.js";
 import { deriveChannel, deriveIdentityPeer } from "../../shared/session-key.js";
 // SYN-281: lazily-resolved vault client for the pairing token write. Deep
 // import into the syntropy extension mirrors db.ts's own upsertSyntropyToken
@@ -124,7 +125,9 @@ const persistUserIdentityPlugin = {
                 channelPeerId: deviceId,
               });
             } catch (err) {
-              api.logger.error(`persist-user-identity: [G1] auto-bind failed: ${err}`);
+              api.logger.error(
+                `persist-user-identity: [G1] auto-bind failed: ${safeErr(err, [deviceId])}`,
+              );
             }
           }
 
@@ -139,7 +142,9 @@ const persistUserIdentityPlugin = {
 
           return { prependContext: formatUnknownUserContext(channel, peerId) };
         } catch (err) {
-          api.logger.error(`persist-user-identity: before_agent_start error: ${err}`);
+          api.logger.error(
+            `persist-user-identity: before_agent_start error: ${safeErr(err, [deriveIdentityPeer(ctx)])}`,
+          );
           return {};
         }
       },
@@ -194,7 +199,7 @@ const persistUserIdentityPlugin = {
           await sql.end({ timeout: 5 });
           api.logger.info("persist-user-identity: database connections closed");
         } catch (err) {
-          api.logger.error(`persist-user-identity: error closing connections: ${err}`);
+          api.logger.error(`persist-user-identity: error closing connections: ${safeErr(err)}`);
         }
       },
       { priority: 90 },

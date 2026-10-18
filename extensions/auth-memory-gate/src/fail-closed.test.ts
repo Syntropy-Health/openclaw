@@ -148,7 +148,7 @@ describe("R5 — hardGate fails CLOSED on DB error", () => {
     const { turn } = await setup({ hardGate: true });
     const res = await turn();
     expect(res.prependContext).toContain("[IDENTITY_GATE]");
-    expect(res.prependContext).toContain(`channel_peer_id: ${PEER}`);
+    expect(res.prependContext).not.toContain(PEER);
   });
 
   test("the gated peer also gets the safety-net append on the outbound reply", async () => {

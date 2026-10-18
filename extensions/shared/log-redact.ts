@@ -35,3 +35,31 @@ export function logToken(
 export function redactPeer(channel: string, peerId: string, key?: string): string {
   return `${channel}:${logToken(peerId, key)}`;
 }
+
+/** E.164-shaped substrings: a `+` then 7–15 digits. Never logged raw. */
+const E164_RE = /\+\d{7,15}/g;
+
+/**
+ * An error rendered for a log line without the identifiers it might echo.
+ *
+ * Keeps `name: message` (the debugging value) but replaces every caller-known
+ * sensitive value (the peer id, a device id) with its {@link logToken}, and any
+ * E.164-shaped substring with `[e164]`. Use this instead of `${err}` on any path
+ * that handles a peer: a driver or validation error can echo the offending value,
+ * and a whole `${err}` would ship it to log storage.
+ */
+export function safeErr(
+  err: unknown,
+  sensitive: ReadonlyArray<string | null | undefined> = [],
+): string {
+  let text = err instanceof Error ? `${err.name}: ${err.message}` : String(err);
+  // Longest first, so a value that contains another is replaced whole.
+  const values = sensitive
+    .map((v) => v?.trim())
+    .filter((v): v is string => typeof v === "string" && v.length >= 3)
+    .sort((a, b) => b.length - a.length);
+  for (const v of values) {
+    text = text.split(v).join(logToken(v));
+  }
+  return text.replace(E164_RE, "[e164]");
+}

@@ -1,6 +1,6 @@
 import { openPluginPool, type OpenClawPluginApi } from "openclaw/plugin-sdk";
 import postgres from "postgres";
-import { logToken, redactPeer } from "../../shared/log-redact.js";
+import { logToken, redactPeer, safeErr } from "../../shared/log-redact.js";
 import {
   deriveChannel,
   deriveIdentityPeer,
@@ -67,7 +67,7 @@ const authMemoryGatePlugin = {
       lastDbError = err ?? new Error("unknown database error");
       nextProbeAt = Date.now() + delayMs;
       api.logger.error(
-        `auth-memory-gate: ${stage} failed (attempt ${dbFailures}, retry in ${delayMs / 1000}s): ${err}`,
+        `auth-memory-gate: ${stage} failed (attempt ${dbFailures}, retry in ${delayMs / 1000}s): ${safeErr(err)}`,
       );
     }
 
@@ -146,7 +146,7 @@ const authMemoryGatePlugin = {
               api.logger.info(
                 `auth-memory-gate: hard gate active for ${redactPeer(channel, peerId)}`,
               );
-              return { prependContext: formatHardGateSystemPrompt(channel, peerId) };
+              return { prependContext: formatHardGateSystemPrompt(channel) };
             }
             return {};
           }
@@ -162,7 +162,7 @@ const authMemoryGatePlugin = {
             api.logger.info(
               `auth-memory-gate: hard gate (unverified) for ${redactPeer(channel, peerId)}`,
             );
-            return { prependContext: formatHardGateSystemPrompt(channel, peerId) };
+            return { prependContext: formatHardGateSystemPrompt(channel) };
           }
 
           const prependContext = formatScopeBlock(scope, scopeConfig);
@@ -174,14 +174,14 @@ const authMemoryGatePlugin = {
 
           return { prependContext };
         } catch (err) {
-          api.logger.error(`auth-memory-gate: before_agent_start error: ${err}`);
+          api.logger.error(`auth-memory-gate: before_agent_start error: ${safeErr(err, [peerId])}`);
           // R5: with hardGate on, an unknown identity (DB down, role connection
           // limit, lookup failure) is treated as UNVERIFIED — gate the turn.
           // Returning {} here was a fail-OPEN: every peer ungated while the DB
           // was unreachable. Without hardGate the gate is advisory, so {} stays.
           if (hardGate) {
             gatedPeers.add(gateKey);
-            return { prependContext: formatHardGateSystemPrompt(channel, peerId) };
+            return { prependContext: formatHardGateSystemPrompt(channel) };
           }
           return {};
         }
@@ -209,7 +209,9 @@ const authMemoryGatePlugin = {
             }
             return {};
           } catch (err) {
-            api.logger.error(`auth-memory-gate: message_sending error: ${err}`);
+            api.logger.error(
+              `auth-memory-gate: message_sending error: ${safeErr(err, [event.to])}`,
+            );
             return {};
           }
         },
@@ -228,7 +230,7 @@ const authMemoryGatePlugin = {
           await sql.end({ timeout: 5 });
           api.logger.info("auth-memory-gate: database connections closed");
         } catch (err) {
-          api.logger.error(`auth-memory-gate: error closing connections: ${err}`);
+          api.logger.error(`auth-memory-gate: error closing connections: ${safeErr(err)}`);
         }
       },
       { priority: 90 },
