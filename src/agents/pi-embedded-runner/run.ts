@@ -1,5 +1,6 @@
 import fs from "node:fs/promises";
 import type { ThinkLevel } from "../../auto-reply/thinking.js";
+import { emitAgentEvent } from "../../infra/agent-events.js";
 import { getGlobalHookRunner } from "../../plugins/hook-runner-global.js";
 import type { PluginHookBeforeAgentStartResult } from "../../plugins/types.js";
 import { enqueueCommandInLane } from "../../process/command-queue.js";
@@ -247,11 +248,22 @@ export async function runEmbeddedPiAgent(
         log.info(
           `[hooks] run short-circuited by before_agent_start (no model call) run=${params.runId}`,
         );
+        // Emit the same lifecycle + assistant events a model run would: streaming
+        // /v1/responses, /v1/chat/completions and WS chat.send build the reply
+        // from these events, not from `payloads` (mono #538 review).
+        const emitBoth = (stream: string, data: Record<string, unknown>) => {
+          emitAgentEvent({ runId: params.runId, stream, data });
+          void params.onAgentEvent?.({ stream, data });
+        };
+        emitBoth("lifecycle", { phase: "start", startedAt: started });
+        emitBoth("assistant", { text: shortCircuitReply, delta: shortCircuitReply });
+        emitBoth("lifecycle", { phase: "end", startedAt: started, endedAt: Date.now() });
         return {
           payloads: [{ text: shortCircuitReply }],
           meta: {
             durationMs: Date.now() - started,
             agentMeta: { sessionId: params.sessionId, provider, model: modelId },
+            shortCircuited: true,
           },
         };
       }

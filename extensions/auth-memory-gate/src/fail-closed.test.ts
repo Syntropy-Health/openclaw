@@ -439,3 +439,56 @@ describe("formatHardGateUserMessage — static per channel class (mono #538)", (
     expect(formatHardGateUserMessage("sms")).toBe(formatHardGateUserMessage("telegram"));
   });
 });
+
+describe("gate bypasses closed (mono #538 review)", () => {
+  type GateResult = { prependContext?: string; shortCircuitReply?: string };
+  async function turnWith(api: MockApi, ctx: Record<string, unknown>): Promise<GateResult> {
+    const h = api._hooks.find((x) => x.name === "before_agent_start")!.handler;
+    return (await h({}, ctx)) as GateResult;
+  }
+
+  test("X-OpenClaw-Device-Id: main on an HTTP surface is GATED (no opt-out)", async () => {
+    const { api } = await setup({ hardGate: true });
+    const res = await turnWith(api, {
+      sessionKey: "agent:main:main",
+      messageProvider: "webchat",
+      deviceId: "main",
+    });
+    expect(res.shortCircuitReply).toBe(formatHardGateUserMessage("webchat"));
+  });
+
+  test("raw HTTP session key agent:main:main is GATED and short-circuited on webchat", async () => {
+    const { api } = await setup({ hardGate: true });
+    const res = await turnWith(api, { sessionKey: "agent:main:main", messageProvider: "webchat" });
+    expect(res.shortCircuitReply).toBeDefined();
+  });
+
+  test("heartbeat on the shared main session (non-HTTP) is still left alone", async () => {
+    const { api } = await setup({ hardGate: true });
+    expect(await turnWith(api, { sessionKey: "agent:main:main" })).toEqual({});
+  });
+
+  test("a cron run on a gated job peer keeps the prompt-only gate: NO short-circuit", async () => {
+    const { api } = await setup({ hardGate: true });
+    const res = await turnWith(api, {
+      sessionKey: "agent:main:cron:job-1",
+      messageProvider: "telegram",
+    });
+    expect(res.prependContext).toContain("[IDENTITY_GATE]");
+    expect(res.shortCircuitReply).toBeUndefined();
+  });
+
+  test("an internal temp: run is never short-circuited", async () => {
+    const { api } = await setup({ hardGate: true });
+    const res = await turnWith(api, { sessionKey: "temp:slug-generator" });
+    expect(res.shortCircuitReply).toBeUndefined();
+  });
+
+  test("CTA is not appended twice when a responsePrefix precedes the gate reply", async () => {
+    const { turn, api } = await setup({ hardGate: true });
+    await turn();
+    const hook = api._hooks.find((h) => h.name === "message_sending")!.handler;
+    const prefixed = `[bot] ${formatHardGateUserMessage(CHANNEL)}`;
+    expect(await hook({ to: PEER, content: prefixed }, { channelId: CHANNEL })).toEqual({});
+  });
+});

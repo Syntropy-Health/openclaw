@@ -5,6 +5,7 @@ import type { OpenClawConfig } from "../config/config.js";
 import { shouldLogVerbose } from "../globals.js";
 import { isTruthyEnvValue } from "../infra/env.js";
 import { createSubsystemLogger } from "../logging/subsystem.js";
+import { getGlobalHookRunner } from "../plugins/hook-runner-global.js";
 import { getProcessSupervisor } from "../process/supervisor/index.js";
 import { resolveSessionAgentIds } from "./agent-scope.js";
 import { makeBootstrapWarn, resolveBootstrapContextForRun } from "./bootstrap-files.js";
@@ -68,6 +69,45 @@ export async function runCliAgent(params: {
     );
   }
   const workspaceDir = resolvedWorkspace;
+
+  // mono #538 review: CLI runs fired NO plugin hooks, so a `/model <cli-provider>`
+  // directive let a hard-gated sender reach a model. Honour shortCircuitReply here
+  // too, before any CLI process is spawned. (prependContext is still not applied
+  // on this runner; only the stop-the-model decision is enforced.)
+  const hookRunner = getGlobalHookRunner();
+  if (hookRunner?.hasHooks("before_agent_start")) {
+    try {
+      const hookResult = await hookRunner.runBeforeAgentStart(
+        { prompt: params.prompt },
+        {
+          agentId: params.agentId,
+          sessionKey: params.sessionKey,
+          sessionId: params.sessionId,
+          workspaceDir,
+        },
+      );
+      const reply = hookResult?.shortCircuitReply;
+      if (typeof reply === "string" && reply.trim()) {
+        log.info(
+          `[hooks] cli run short-circuited by before_agent_start (no model call) run=${params.runId}`,
+        );
+        return {
+          payloads: [{ text: reply }],
+          meta: {
+            durationMs: Date.now() - started,
+            agentMeta: {
+              sessionId: params.sessionId,
+              provider: params.provider,
+              model: params.model ?? "",
+            },
+            shortCircuited: true,
+          },
+        };
+      }
+    } catch (hookErr) {
+      log.warn(`before_agent_start hook (cli) failed: ${String(hookErr)}`);
+    }
+  }
 
   const backendResolved = resolveCliBackendConfig(params.provider, params.config);
   if (!backendResolved) {

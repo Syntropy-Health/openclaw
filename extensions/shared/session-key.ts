@@ -56,6 +56,30 @@ export function derivePeerId(sessionKey: string): string {
 }
 
 /**
+ * Client-supplied device ids that must NOT be honoured as a peer (mono #538 review):
+ * `main` / `unknown` are the sentinels the gate treats as "no peer", so accepting
+ * them from the `X-OpenClaw-Device-Id` header would let a client opt out of the
+ * hard gate. A `:` would let it impersonate session-key structure. Such a value
+ * is ignored and the session-key-derived peer is used instead.
+ */
+export function isReservedPeerToken(value: string): boolean {
+  const v = value.trim().toLowerCase();
+  return v === "main" || v === "unknown" || /[:\s]/.test(v);
+}
+
+/**
+ * True for a CONVERSATION turn (a person on a channel): `agent:<id>:<channel>:…`
+ * with a channel that is not a scheduled run. Cron (`agent:<id>:cron:<job>`),
+ * webhook (`hook:…`) and internal (`temp:…`) sessions are not conversations: a
+ * gate must not reply to them as if a user were there (mono #538 review).
+ */
+export function isConversationalSession(sessionKey: string): boolean {
+  if (!sessionKey.startsWith("agent:")) return false;
+  const channel = deriveChannel(sessionKey);
+  return channel !== "cron" && channel !== "unknown" && channel !== "main";
+}
+
+/**
  * The canonical identity peer for a hook ctx (G-lane [G1], A&D §7).
  *
  * Prefers `ctx.deviceId` (the `X-OpenClaw-Device-Id` header the host threads on
@@ -77,7 +101,7 @@ export function deriveIdentityPeer(ctx?: {
   // auth-memory-gate's try, where a throw would leave the turn ungated.
   const rawDeviceId: unknown = ctx?.deviceId;
   const deviceId = typeof rawDeviceId === "string" ? rawDeviceId.trim() : "";
-  if (deviceId) {
+  if (deviceId && !isReservedPeerToken(deviceId)) {
     return deviceId;
   }
   return derivePeerId(ctx?.sessionKey ?? "");

@@ -1,5 +1,11 @@
 import { describe, expect, it } from "vitest";
-import { deriveChannel, deriveIdentityPeer, derivePeerId } from "./session-key.js";
+import {
+  deriveChannel,
+  deriveIdentityPeer,
+  derivePeerId,
+  isConversationalSession,
+  isReservedPeerToken,
+} from "./session-key.js";
 
 // Canonical contract for the session-key parser shared by persist-user-identity,
 // auth-memory-gate, and syntropy (oc-hygiene #7). The per-extension suites
@@ -64,5 +70,37 @@ describe("deriveIdentityPeer — a malformed deviceId cannot throw", () => {
     expect(deriveIdentityPeer({ sessionKey: "agent:abc:x:direct:u", deviceId: "  dev-1 " })).toBe(
       "dev-1",
     );
+  });
+});
+
+describe("reserved device ids are ignored (mono #538 review — gate opt-out)", () => {
+  it.each(["main", "unknown", "MAIN", " main ", "a:b", "has space"])(
+    "ignores device id %j",
+    (d) => {
+      expect(isReservedPeerToken(d)).toBe(true);
+      expect(deriveIdentityPeer({ deviceId: d, sessionKey: "agent:main:webchat:direct:p1" })).toBe(
+        "p1",
+      );
+    },
+  );
+
+  it("a normal install UUID is still the peer", () => {
+    const d = "6f1c2a9e-1b2c-4d5e-8f90-123456789abc";
+    expect(isReservedPeerToken(d)).toBe(false);
+    expect(deriveIdentityPeer({ deviceId: d, sessionKey: "agent:main:webchat:direct:p1" })).toBe(d);
+  });
+});
+
+describe("isConversationalSession (mono #538 review)", () => {
+  it.each([
+    ["agent:main:sms:direct:+15550000000", true],
+    ["agent:main:openresponses-user:user_123", true],
+    ["agent:main:cron:job-1", false],
+    ["agent:main:main", false],
+    ["hook:gmail:abc", false],
+    ["temp:slug-generator", false],
+    ["", false],
+  ])("%j -> %s", (key, expected) => {
+    expect(isConversationalSession(key as string)).toBe(expected);
   });
 });

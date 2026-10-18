@@ -886,6 +886,19 @@ export async function runEmbeddedAttempt(
                   return undefined;
                 })
             : undefined);
+        // mono #538: run.ts honours shortCircuitReply from the EARLY hook. Reaching here
+        // with one means the early hook did not run (the runner threw), and this
+        // fallback call asked to stop the model. Fail CLOSED: never prompt the model
+        // for a run a gate refused.
+        if (
+          !params.earlyHookResult &&
+          typeof hookResult?.shortCircuitReply === "string" &&
+          hookResult.shortCircuitReply.trim()
+        ) {
+          throw new Error(
+            "before_agent_start requested a short-circuit on the fallback hook path; refusing to prompt the model",
+          );
+        }
         {
           if (hookResult?.prependContext) {
             effectivePrompt = `${hookResult.prependContext}\n\n${params.prompt}`;

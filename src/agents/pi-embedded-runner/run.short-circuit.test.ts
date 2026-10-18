@@ -54,9 +54,27 @@ describe("before_agent_start shortCircuitReply (mono #538)", () => {
         prependContext: "[IDENTITY_GATE]…",
         shortCircuitReply: "GATE MESSAGE",
       });
-      const result = await run(surface);
+      const events: Array<{ stream: string; data: Record<string, unknown> }> = [];
+      const result = await runEmbeddedPiAgent({
+        sessionId: "test-session",
+        sessionKey: `agent:main:${surface}:direct:peer-1`,
+        sessionFile: "/tmp/session.json",
+        workspaceDir: "/tmp/workspace",
+        prompt: "hello",
+        timeoutMs: 30000,
+        runId: "run-sc",
+        messageProvider: surface,
+        onAgentEvent: (e) => events.push(e),
+      });
       expect(hook).toHaveBeenCalledTimes(1);
       expect(result.payloads).toEqual([{ text: "GATE MESSAGE" }]);
+      expect(result.meta.shortCircuited).toBe(true);
+      // streaming /v1/responses, chat completions and WS chat.send read these:
+      expect(events.map((e) => `${e.stream}:${String(e.data.phase ?? e.data.text)}`)).toEqual([
+        "lifecycle:start",
+        "assistant:GATE MESSAGE",
+        "lifecycle:end",
+      ]);
       expect(mockedAttempt).toHaveBeenCalledTimes(0); // the model call
       expect(mockedResolveModel).toHaveBeenCalledTimes(0); // not even resolved
     });

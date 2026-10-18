@@ -47,3 +47,23 @@ describe("before_agent_start shortCircuitReply merge (mono #538)", () => {
     expect(r?.shortCircuitReply).toBe("HIGH");
   });
 });
+
+describe("shortCircuitReply merge: blank values never cancel a gate (mono #538 review)", () => {
+  for (const blank of ["", "   "]) {
+    it(`a higher-priority ${JSON.stringify(blank)} does not cancel a lower-priority gate`, async () => {
+      const registry = createEmptyPluginRegistry();
+      add(registry, "careless", { shortCircuitReply: blank }, 90);
+      add(registry, "gate", { shortCircuitReply: "GATE" }, 40);
+      const r = await createHookRunner(registry).runBeforeAgentStart({ prompt: "p" }, ctx);
+      expect(r?.shortCircuitReply).toBe("GATE");
+    });
+  }
+
+  it("all blank: the merged value is absent", async () => {
+    const registry = createEmptyPluginRegistry();
+    add(registry, "a", { shortCircuitReply: "" }, 90);
+    add(registry, "b", { shortCircuitReply: " " }, 40);
+    const r = await createHookRunner(registry).runBeforeAgentStart({ prompt: "p" }, ctx);
+    expect(r?.shortCircuitReply).toBeUndefined();
+  });
+});

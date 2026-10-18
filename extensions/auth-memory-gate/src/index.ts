@@ -1,6 +1,7 @@
 import { openPluginPool, type OpenClawPluginApi } from "openclaw/plugin-sdk";
 import postgres from "postgres";
 import { logToken, redactPeer, safeErr } from "../../shared/log-redact.js";
+import { isConversationalSession } from "../../shared/session-key.js";
 import {
   deriveChannel,
   deriveIdentityPeer,
@@ -11,6 +12,7 @@ import {
   formatHardGateSystemPrompt,
   formatHardGateReplyAppend,
   formatHardGateUserMessage,
+  HTTP_GATE_CHANNELS,
   type ScopeConfig,
 } from "./scope.js";
 
@@ -110,11 +112,15 @@ const authMemoryGatePlugin = {
     // mono #538: a hard-gated turn ends WITHOUT the model. shortCircuitReply makes
     // the runner return the static gate message (no model call). prependContext
     // is kept for any surface that does not honour the short-circuit.
-    function gatedResult(channel: string) {
-      return {
-        prependContext: formatHardGateSystemPrompt(channel),
-        shortCircuitReply: formatHardGateUserMessage(channel),
-      };
+    // The short-circuit applies to CONVERSATION turns only: a cron, webhook or
+    // internal run on a gated session keeps the prompt-only gate, so it is not
+    // answered with a sign-in message delivered to its target (mono #538 review).
+    function gatedResult(channel: string, sessionKey: string) {
+      const prependContext = formatHardGateSystemPrompt(channel);
+      // An HTTP request is always a client conversation, whatever session key it sent.
+      return HTTP_GATE_CHANNELS.has(channel) || isConversationalSession(sessionKey)
+        ? { prependContext, shortCircuitReply: formatHardGateUserMessage(channel) }
+        : { prependContext };
     }
 
     // -------------------------------------------------------------------
@@ -136,6 +142,13 @@ const authMemoryGatePlugin = {
         const peerId = deriveIdentityPeer(ctx);
 
         if (!peerId || peerId === "main" || peerId === "unknown") {
+          // No usable peer. On an HTTP surface under hardGate that is a client
+          // that cannot be identified: gate it (fail closed) rather than let it
+          // through ungated (mono #538 review). Elsewhere (heartbeat on the shared
+          // `main` session) there is no user to gate.
+          if (hardGate && HTTP_GATE_CHANNELS.has(channel)) {
+            return gatedResult(channel, sessionKey);
+          }
           return {};
         }
 
@@ -164,7 +177,7 @@ const authMemoryGatePlugin = {
               api.logger.info(
                 `auth-memory-gate: hard gate active for ${redactPeer(channel, peerId)}`,
               );
-              return gatedResult(channel);
+              return gatedResult(channel, sessionKey);
             }
             return {};
           }
@@ -180,7 +193,7 @@ const authMemoryGatePlugin = {
             api.logger.info(
               `auth-memory-gate: hard gate (unverified) for ${redactPeer(channel, peerId)}`,
             );
-            return gatedResult(channel);
+            return gatedResult(channel, sessionKey);
           }
 
           const prependContext = formatScopeBlock(scope, scopeConfig);
@@ -199,7 +212,7 @@ const authMemoryGatePlugin = {
           // was unreachable. Without hardGate the gate is advisory, so {} stays.
           if (hardGate) {
             gatedPeers.add(gateKey);
-            return gatedResult(channel);
+            return gatedResult(channel, sessionKey);
           }
           return {};
         }
@@ -224,8 +237,9 @@ const authMemoryGatePlugin = {
 
             if (gatedPeers.has(peerGateKey)) {
               const content = event.content ?? "";
-              // The short-circuited gate reply already carries the CTA: never append it twice.
-              if (content === formatHardGateUserMessage(channel)) {
+              // Never append the CTA twice: the short-circuited gate reply already
+              // carries it, possibly after a responsePrefix or channel normalisation.
+              if (content.includes(formatHardGateReplyAppend().trim())) {
                 return {};
               }
               return { content: content + formatHardGateReplyAppend() };
