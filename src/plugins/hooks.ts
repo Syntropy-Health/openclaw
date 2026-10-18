@@ -207,6 +207,8 @@ export function createHookRunner(registry: PluginRegistry, options: HookRunnerOp
         // Keep the first defined override so higher-priority hooks win.
         modelOverride: acc?.modelOverride ?? next.modelOverride,
         providerOverride: acc?.providerOverride ?? next.providerOverride,
+        // First defined wins, like the overrides: a higher-priority gate decides.
+        shortCircuitReply: acc?.shortCircuitReply ?? next.shortCircuitReply,
       }),
     );
   }

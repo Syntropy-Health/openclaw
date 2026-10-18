@@ -10,6 +10,7 @@ import {
   formatScopeBlock,
   formatHardGateSystemPrompt,
   formatHardGateReplyAppend,
+  formatHardGateUserMessage,
   type ScopeConfig,
 } from "./scope.js";
 
@@ -106,6 +107,16 @@ const authMemoryGatePlugin = {
     // Keyed by "channel:peerId" — rebuilt on each before_agent_start call.
     const gatedPeers = new Set<string>();
 
+    // mono #538: a hard-gated turn ends WITHOUT the model. shortCircuitReply makes
+    // the runner return the static gate message (no model call). prependContext
+    // is kept for any surface that does not honour the short-circuit.
+    function gatedResult(channel: string) {
+      return {
+        prependContext: formatHardGateSystemPrompt(channel),
+        shortCircuitReply: formatHardGateUserMessage(channel),
+      };
+    }
+
     // -------------------------------------------------------------------
     // Hook: before_agent_start — resolve identity and inject scope
     // Priority 40 — runs after identity (60) and persistence (50),
@@ -153,7 +164,7 @@ const authMemoryGatePlugin = {
               api.logger.info(
                 `auth-memory-gate: hard gate active for ${redactPeer(channel, peerId)}`,
               );
-              return { prependContext: formatHardGateSystemPrompt(channel) };
+              return gatedResult(channel);
             }
             return {};
           }
@@ -169,7 +180,7 @@ const authMemoryGatePlugin = {
             api.logger.info(
               `auth-memory-gate: hard gate (unverified) for ${redactPeer(channel, peerId)}`,
             );
-            return { prependContext: formatHardGateSystemPrompt(channel) };
+            return gatedResult(channel);
           }
 
           const prependContext = formatScopeBlock(scope, scopeConfig);
@@ -188,7 +199,7 @@ const authMemoryGatePlugin = {
           // was unreachable. Without hardGate the gate is advisory, so {} stays.
           if (hardGate) {
             gatedPeers.add(gateKey);
-            return { prependContext: formatHardGateSystemPrompt(channel) };
+            return gatedResult(channel);
           }
           return {};
         }
@@ -212,7 +223,12 @@ const authMemoryGatePlugin = {
             const peerGateKey = `${channel}:${to}`;
 
             if (gatedPeers.has(peerGateKey)) {
-              return { content: (event.content ?? "") + formatHardGateReplyAppend() };
+              const content = event.content ?? "";
+              // The short-circuited gate reply already carries the CTA: never append it twice.
+              if (content === formatHardGateUserMessage(channel)) {
+                return {};
+              }
+              return { content: content + formatHardGateReplyAppend() };
             }
             return {};
           } catch (err) {

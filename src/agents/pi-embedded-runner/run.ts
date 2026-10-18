@@ -240,6 +240,22 @@ export async function runEmbeddedPiAgent(
         }
       }
 
+      // mono #538: a hook may end the run without the model (hard gate). Return
+      // before resolveModel, so no model is resolved, authenticated or called.
+      const shortCircuitReply = earlyHookResult?.shortCircuitReply;
+      if (typeof shortCircuitReply === "string" && shortCircuitReply.trim()) {
+        log.info(
+          `[hooks] run short-circuited by before_agent_start (no model call) run=${params.runId}`,
+        );
+        return {
+          payloads: [{ text: shortCircuitReply }],
+          meta: {
+            durationMs: Date.now() - started,
+            agentMeta: { sessionId: params.sessionId, provider, model: modelId },
+          },
+        };
+      }
+
       const { model, error, authStorage, modelRegistry } = resolveModel(
         provider,
         modelId,

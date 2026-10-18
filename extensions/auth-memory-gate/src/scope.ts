@@ -240,3 +240,29 @@ export function formatHardGateReplyAppend(): string {
     "<last_name>` sets up a chat-only profile. Both `/` and `!` work."
   );
 }
+
+/**
+ * HTTP surfaces (`x-openclaw-channel` allowlist, src/gateway/http-utils.ts). They
+ * go straight to the agent with NO plugin-command dispatch, so `!identify` /
+ * `!verify` cannot run there; a gated HTTP user verifies by signing in (Clerk),
+ * which binds the device ([G1]). Their gate message says so.
+ */
+const HTTP_GATE_CHANNELS = new Set(["webchat", "shrinemobile"]);
+
+/**
+ * The user-facing reply for a hard-gated turn, sent INSTEAD of a model answer via
+ * `shortCircuitReply` (mono #538). Static per channel class, built server-side:
+ * it never echoes the peer, a device id, or anything the user sent.
+ */
+export function formatHardGateUserMessage(channel: string): string {
+  if (HTTP_GATE_CHANNELS.has(channel)) {
+    return (
+      "Welcome to Syntropy Journals. To continue, please sign in with your " +
+      "Syntropy Journals account."
+    );
+  }
+  return (
+    "Welcome to Syntropy Journals. Before I can help, I need to verify your identity." +
+    formatHardGateReplyAppend()
+  );
+}
