@@ -387,7 +387,6 @@ gated: false
 [IDENTITY_GATE]
 status: LOCKED
 channel: whatsapp
-channel_peer_id: +1234567890
 [/IDENTITY_GATE]
 
 IMPORTANT: This user has NOT been identified. You MUST NOT proceed with any

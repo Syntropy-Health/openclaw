@@ -29,6 +29,8 @@ const db = vi.hoisted(() => ({
   down: false,
   /** Pools opened through the driver factory (must stay 1 across retries). */
   opens: 0,
+  /** Message of the lookup failure (lets a test make the driver echo the peer). */
+  queryErrorMessage: "Connection terminated unexpectedly",
 }));
 
 vi.mock("postgres", () => {
@@ -43,8 +45,7 @@ vi.mock("postgres", () => {
       return Promise.resolve([{ "?column?": 1 }]);
     }
     db.lookups += 1;
-    if (db.down || db.queryDown)
-      return Promise.reject(new Error("Connection terminated unexpectedly"));
+    if (db.down || db.queryDown) return Promise.reject(new Error(db.queryErrorMessage));
     return Promise.resolve(db.identity ? [db.identity] : []);
   }) as unknown as {
     (s: TemplateStringsArray, ...v: unknown[]): Promise<unknown[]>;
@@ -131,6 +132,7 @@ beforeEach(() => {
   db.lookups = 0;
   db.down = false;
   db.opens = 0;
+  db.queryErrorMessage = "Connection terminated unexpectedly";
   vi.useFakeTimers();
   vi.setSystemTime(new Date("2026-09-29T00:00:00Z"));
 });
@@ -148,7 +150,7 @@ describe("R5 — hardGate fails CLOSED on DB error", () => {
     const { turn } = await setup({ hardGate: true });
     const res = await turn();
     expect(res.prependContext).toContain("[IDENTITY_GATE]");
-    expect(res.prependContext).toContain(`channel_peer_id: ${PEER}`);
+    expect(res.prependContext).not.toContain(PEER);
   });
 
   test("the gated peer also gets the safety-net append on the outbound reply", async () => {
@@ -335,5 +337,30 @@ describe("logs carry a KEYED token of the peer id, never the raw value (E.164 on
     // the account id on the same line is tokenised too (REGISTERED.id = "u1")
     expect(logs).toContain(`key=${logToken("u1")} `);
     expect(logs).not.toContain("key=u1");
+  });
+});
+
+describe("a lookup error that echoes the peer never logs it (mono #540 review)", () => {
+  test("lookup failure: peer scrubbed in BOTH log lines, and in the cached error rethrown to the NEXT (different) peer", async () => {
+    db.identity = REGISTERED;
+    const { api, turn } = await setup({ hardGate: true });
+    await turn(); // healthy init
+    db.queryDown = true;
+    db.queryErrorMessage = `invalid input value for channel_peer_id: "${PEER}"`;
+    expect((await turn()).prependContext).toContain("[IDENTITY_GATE]");
+    // A DIFFERENT peer inside the backoff window gets the CACHED error rethrown;
+    // its catch scrubs only its own peer, so the cache itself must be clean.
+    const other = api._hooks.find((h) => h.name === "before_agent_start")!.handler;
+    const OTHER = "other-peer-456";
+    const res = (await other(
+      {},
+      { sessionKey: `agent:abc:${CHANNEL}:direct:${OTHER}`, messageProvider: CHANNEL },
+    )) as { prependContext?: string };
+    expect(res.prependContext).toContain("[IDENTITY_GATE]");
+    const l = api.logger as unknown as Record<string, { mock: { calls: unknown[][] } }>;
+    const errors = l.error.mock.calls.map((c) => c.map(String).join(" ")).join("\n");
+    expect(errors).toContain("lookup failed"); // the line exists
+    expect(errors).toContain("invalid input value for channel_peer_id"); // message kept
+    expect(errors).not.toContain(PEER);
   });
 });

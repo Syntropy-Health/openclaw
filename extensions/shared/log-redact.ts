@@ -35,3 +35,45 @@ export function logToken(
 export function redactPeer(channel: string, peerId: string, key?: string): string {
   return `${channel}:${logToken(peerId, key)}`;
 }
+
+/**
+ * Phone-number shapes scrubbed from every safeErr line (mono #540 review):
+ * a WhatsApp jid, a `+`-prefixed number with or without separators, and a bare
+ * run of 10–15 digits (US national / unprefixed E.164). Cost: a 13-digit epoch-ms
+ * timestamp in an error message is masked too, which is acceptable for a log line.
+ */
+const PHONE_PATTERNS: ReadonlyArray<[RegExp, string]> = [
+  [/\d{7,15}@s\.whatsapp\.net/g, "[e164]@s.whatsapp.net"],
+  [/\+\d[\d\s().-]{5,20}\d/g, "[e164]"],
+  [/(?<![\w.])\d{10,15}(?![\w.])/g, "[e164]"],
+];
+
+/**
+ * An error rendered for a log line without the identifiers it might echo.
+ *
+ * Keeps `name: message` (the debugging value) but replaces every caller-known
+ * sensitive value (the peer id, a device id) with its {@link logToken}, and any
+ * E.164-shaped substring with `[e164]`. Use this instead of `${err}` on any path
+ * that handles a peer: a driver or validation error can echo the offending value,
+ * and a whole `${err}` would ship it to log storage.
+ */
+export function safeErr(
+  err: unknown,
+  sensitive: ReadonlyArray<string | null | undefined> = [],
+): string {
+  let text = err instanceof Error ? `${err.name}: ${err.message}` : String(err);
+  // Longest first, so a value that contains another is replaced whole.
+  const trimmed = sensitive
+    .map((v) => v?.trim())
+    .filter((v): v is string => typeof v === "string" && v.length >= 3);
+  // Also scrub the digits-only form of a phone-like value (`+1555…` vs `1555…`).
+  const digitsOnly = trimmed.map((v) => v.replace(/\D/g, "")).filter((d) => d.length >= 7);
+  const values = [...new Set([...trimmed, ...digitsOnly])].sort((a, b) => b.length - a.length);
+  for (const v of values) {
+    text = text.split(v).join(logToken(v));
+  }
+  for (const [re, replacement] of PHONE_PATTERNS) {
+    text = text.replace(re, replacement);
+  }
+  return text;
+}

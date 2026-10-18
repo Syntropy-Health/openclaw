@@ -182,12 +182,15 @@ export function formatGatedMessage(config: ScopeConfig): string {
  * System prompt injected via prependContext when hard gate is active
  * and user is unregistered. Forces the agent to only discuss verification.
  */
-export function formatHardGateSystemPrompt(channel: string, peerId: string): string {
+// The raw peer id is deliberately NOT in this block (mono #541): on SMS/WhatsApp it
+// is the subscriber's phone number, and this text goes to the LLM provider and
+// the session transcript. The model never needs it — !identify / !verify resolve
+// the peer server-side.
+export function formatHardGateSystemPrompt(channel: string): string {
   return [
     "[IDENTITY_GATE]",
     "status: LOCKED",
     `channel: ${channel}`,
-    `channel_peer_id: ${peerId}`,
     "[/IDENTITY_GATE]",
     "",
     "IMPORTANT: This user has NOT been identified. You MUST NOT proceed with any request",

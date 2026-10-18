@@ -38,6 +38,11 @@
               "type": "string",
               "description": "m2m-exchange only: token-exchange endpoint path (e.g. /tokens/exchange)."
             },
+            "mcpPath": {
+              "type": "string",
+              "pattern": "^/[A-Za-z0-9._~/-]*$",
+              "description": "MCP endpoint path on baseUrl. Default /mcp (kg-mcp). Syntropy Journals needs /mcp/ (its bare /mcp 307s and the POST body is lost)."
+            },
             "commitTools": {
               "type": "array",
               "items": { "type": "string" },

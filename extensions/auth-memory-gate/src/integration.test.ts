@@ -91,7 +91,7 @@ describeIf("identity-scoped memory stack — integration", () => {
     expect(rows.length).toBe(0);
 
     // When user is not found, auth-memory-gate would inject IDENTITY_GATE
-    const gatePrompt = formatHardGateSystemPrompt(testChannel, "nonexistent-peer");
+    const gatePrompt = formatHardGateSystemPrompt(testChannel);
     expect(gatePrompt).toContain("[IDENTITY_GATE]");
     expect(gatePrompt).toContain("status: LOCKED");
     expect(gatePrompt).toContain(`channel: ${testChannel}`);

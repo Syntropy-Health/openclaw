@@ -166,17 +166,18 @@ describe("formatGatedMessage", () => {
 });
 
 describe("formatHardGateSystemPrompt", () => {
-  test("includes IDENTITY_GATE block with channel and peerId", () => {
-    const result = formatHardGateSystemPrompt("telegram", "tg-user-123");
+  test("includes IDENTITY_GATE block with channel, and never the raw peer id (mono #541)", () => {
+    const result = formatHardGateSystemPrompt("telegram");
     expect(result).toContain("[IDENTITY_GATE]");
     expect(result).toContain("status: LOCKED");
     expect(result).toContain("channel: telegram");
-    expect(result).toContain("channel_peer_id: tg-user-123");
+    expect(result).not.toContain("channel_peer_id");
+    expect(result).not.toContain("tg-user-123");
     expect(result).toContain("[/IDENTITY_GATE]");
   });
 
   test("instructs agent to guide name-passcode flow", () => {
-    const result = formatHardGateSystemPrompt("whatsapp", "+1234567890");
+    const result = formatHardGateSystemPrompt("whatsapp");
     expect(result).toContain("MUST NOT proceed");
     expect(result).toContain("!identify <first_name> <last_name>");
     expect(result).toContain("!verify <6-digit-code>");
@@ -184,12 +185,12 @@ describe("formatHardGateSystemPrompt", () => {
   });
 
   test("forbids answering unrelated questions", () => {
-    const result = formatHardGateSystemPrompt("slack", "U12345");
+    const result = formatHardGateSystemPrompt("slack");
     expect(result).toContain("Do NOT answer any other questions");
   });
 
   test("uses the canonical 'Syntropy Journals' brand consistently (no 'Syntropy Health' leak)", () => {
-    const result = formatHardGateSystemPrompt("telegram", "tg-user-123");
+    const result = formatHardGateSystemPrompt("telegram");
     expect(result).toContain("welcome them to Syntropy Journals");
     expect(result).not.toContain("Syntropy Health");
   });

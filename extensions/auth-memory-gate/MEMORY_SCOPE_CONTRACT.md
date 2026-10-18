@@ -152,12 +152,13 @@ When the `[MEMORY_SCOPE]` block contains `gated: true`:
 ### Hard Gate (`hardGate: true`)
 
 When hard gate is enabled, unregistered or unverified users are completely locked out of normal conversation. The plugin injects an `[IDENTITY_GATE]` block via `prependContext`:
+The block carries the channel only; the peer id is deliberately omitted (mono #541), because
+on SMS/WhatsApp it is the subscriber's phone number and this text reaches the LLM provider.
 
 ```
 [IDENTITY_GATE]
 status: LOCKED
 channel: <channel>
-channel_peer_id: <peer_id>
 [/IDENTITY_GATE]
 
 IMPORTANT: This user has NOT been identified. You MUST NOT proceed with any request

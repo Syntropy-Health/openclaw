@@ -123,9 +123,12 @@ gated: false
 [IDENTITY_GATE]
 status: LOCKED
 channel: <channel>
-channel_peer_id: <peer_id>
 [/IDENTITY_GATE]
 ```
+
+The block carries the channel only. The peer id is deliberately omitted (mono #541):
+on SMS/WhatsApp it is the subscriber's phone number, and this text reaches the LLM
+provider and the transcript. `!identify` / `!verify` resolve the peer server-side.
 
 ## Downstream Integration
 

@@ -349,3 +349,56 @@ describe("McpSession", () => {
     expect(vi.mocked(globalThis.fetch)).toHaveBeenCalledTimes(2);
   });
 });
+
+describe("McpSession mcpPath (mono #539 — SJ needs /mcp/, a bare /mcp 307s)", () => {
+  beforeEach(() => {
+    vi.stubGlobal("fetch", vi.fn());
+  });
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    vi.restoreAllMocks();
+  });
+
+  it("a session with mcpPath '/mcp/' sends initialize, notification, list AND call to /mcp/", async () => {
+    vi.mocked(globalThis.fetch).mockImplementation(fakeMcpServer({ sessionIds: ["sess-1"] }));
+    const session = new McpSession(BASE_URL, { mcpPath: "/mcp/" });
+    await listMcpTools(BASE_URL, TOKEN, { label: LABEL, session });
+    await callMcpTool(BASE_URL, TOKEN, "kg_query", {}, { label: LABEL, session });
+    const urls = recordedCalls().map((c) => c.url);
+    expect(urls.length).toBe(4); // initialize, notifications/initialized, list, call
+    expect(urls.every((u) => u === `${BASE_URL}/mcp/`)).toBe(true);
+  });
+
+  it("default stays /mcp (kg-mcp unchanged)", async () => {
+    vi.mocked(globalThis.fetch).mockImplementation(fakeMcpServer({ sessionIds: ["sess-1"] }));
+    const session = new McpSession(BASE_URL);
+    expect(session.mcpPath).toBe("/mcp");
+    await listMcpTools(BASE_URL, TOKEN, { label: LABEL, session });
+    expect(recordedCalls().every((c) => c.url === `${BASE_URL}/mcp`)).toBe(true);
+  });
+
+  it("with a session, the session's path wins over an explicit mcpPath (initialize and request hit ONE endpoint)", async () => {
+    vi.mocked(globalThis.fetch).mockImplementation(fakeMcpServer({ sessionIds: [null] }));
+    const session = new McpSession(BASE_URL, { mcpPath: "/mcp/" });
+    await callMcpTool(BASE_URL, TOKEN, "kg_query", {}, { label: LABEL, session, mcpPath: "/x" });
+    expect(callsByMethod("tools/call")[0]!.url).toBe(`${BASE_URL}/mcp/`);
+    expect(callsByMethod("initialize")[0]!.url).toBe(`${BASE_URL}/mcp/`);
+  });
+
+  it("without a session, an explicit mcpPath is used", async () => {
+    vi.mocked(globalThis.fetch).mockImplementation(fakeMcpServer({ sessionIds: [null] }));
+    await callMcpTool(BASE_URL, TOKEN, "kg_query", {}, { label: LABEL, mcpPath: "/x" });
+    expect(callsByMethod("tools/call")[0]!.url).toBe(`${BASE_URL}/x`);
+  });
+
+  it("the constructor rejects a path that does not start with '/'", () => {
+    expect(() => new McpSession(BASE_URL, { mcpPath: "mcp/" })).toThrow(/must start with/);
+  });
+
+  it("a trailing slash on baseUrl does not double up", async () => {
+    vi.mocked(globalThis.fetch).mockImplementation(fakeMcpServer({ sessionIds: [null] }));
+    const session = new McpSession(`${BASE_URL}/`, { mcpPath: "/mcp/" });
+    await listMcpTools(`${BASE_URL}/`, TOKEN, { label: LABEL, session });
+    expect(callsByMethod("tools/list")[0]!.url).toBe(`${BASE_URL}/mcp/`);
+  });
+});

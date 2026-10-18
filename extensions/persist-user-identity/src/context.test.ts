@@ -60,11 +60,11 @@ describe("formatIdentityContext", () => {
 
 describe("formatUnknownUserContext", () => {
   it("flags an unregistered peer as gate-eligible with the identify/register CTA", () => {
-    const block = formatUnknownUserContext("telegram", "peer-9");
+    const block = formatUnknownUserContext("telegram");
     expect(block).toContain("status: unregistered");
     expect(block).toContain("gate_eligible: true");
     expect(block).toContain("channel: telegram");
-    expect(block).toContain("channel_peer_id: peer-9");
+    expect(block).not.toContain("channel_peer_id"); // mono #541: the unregistered block carries no peer
     expect(block).toContain("!identify <first_name> <last_name>");
     expect(block).toContain("!register <first_name> <last_name>");
     // never leaks a user_id for an unknown peer

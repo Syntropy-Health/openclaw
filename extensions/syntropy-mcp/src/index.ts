@@ -92,6 +92,11 @@ export type SyntropyMcpServerSpec = {
    */
   commitTools?: string[];
   navTools?: string[];
+  /**
+   * MCP endpoint path on `baseUrl` (mono #539). Default `/mcp` (kg-mcp). SJ needs
+   * `/mcp/`: its bare `/mcp` 307s to `/mcp/` and the POST body does not survive.
+   */
+  mcpPath?: string;
   /** Error-message label; defaults to `id`. */
   label?: string;
 };
@@ -103,6 +108,13 @@ export type SyntropyMcpConfig = {
 };
 
 const DEFAULT_REFRESH_SECONDS = 300;
+
+/** A same-origin endpoint path: leading "/", safe characters, no "..", no "//". */
+function isSafeMcpPath(value: unknown): value is string {
+  if (typeof value !== "string") return false;
+  const p = value.trim();
+  return /^\/[A-Za-z0-9._~\/-]*$/.test(p) && !p.includes("..") && !p.includes("//");
+}
 
 function parseServer(raw: unknown, index: number): SyntropyMcpServerSpec {
   if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
@@ -122,6 +134,7 @@ function parseServer(raw: unknown, index: number): SyntropyMcpServerSpec {
     commitTools,
     navTools,
     label,
+    mcpPath,
   } = entry;
   if (typeof id !== "string" || !id.trim()) {
     throw new Error(`servers[${index}].id must be a non-empty string`);
@@ -138,7 +151,13 @@ function parseServer(raw: unknown, index: number): SyntropyMcpServerSpec {
   if (auth === "m2m-exchange" && (typeof resource !== "string" || !resource.trim())) {
     throw new Error(`servers[${index}] ("${id}") auth=m2m-exchange requires resource`);
   }
+  if (mcpPath !== undefined && !isSafeMcpPath(mcpPath)) {
+    throw new Error(
+      `servers[${index}] ("${id}") mcpPath must be a string starting with "/" (letters, digits, -._~/ only; no "..", "//", query or fragment)`,
+    );
+  }
   const spec: SyntropyMcpServerSpec = { id: id.trim(), baseUrl: baseUrl.trim(), auth };
+  if (typeof mcpPath === "string") spec.mcpPath = mcpPath.trim();
   if (typeof apiKeyEnv === "string") spec.apiKeyEnv = apiKeyEnv.trim();
   if (typeof resource === "string") spec.resource = resource.trim();
   if (typeof exchangePath === "string") spec.exchangePath = exchangePath.trim();
@@ -178,6 +197,20 @@ export function parseSyntropyMcpConfig(
     throw new Error("servers must be an array");
   }
   const servers = (serversRaw ?? []).map((entry, index) => parseServer(entry, index));
+  // Sessions are keyed by baseUrl (discovery only knows baseUrl), so two servers
+  // sharing a baseUrl must share an endpoint, or one would list tools on the
+  // other's path through the other's session (mono #539 review).
+  const pathByBaseUrl = new Map<string, string>();
+  for (const s of servers) {
+    const path = s.mcpPath ?? "/mcp";
+    const seen = pathByBaseUrl.get(s.baseUrl);
+    if (seen !== undefined && seen !== path) {
+      throw new Error(
+        `servers sharing baseUrl "${s.baseUrl}" must use the same mcpPath (got "${seen}" and "${path}")`,
+      );
+    }
+    pathByBaseUrl.set(s.baseUrl, path);
+  }
   const seen = new Set<string>();
   for (const server of servers) {
     if (seen.has(server.id)) throw new Error(`duplicate server id "${server.id}"`);
@@ -594,7 +627,7 @@ export function createSyntropyMcpPlugin(overrides: SyntropyMcpOverrides = {}) {
 
       for (const spec of config.servers) {
         const label = spec.label ?? spec.id;
-        const session = new McpSession(spec.baseUrl);
+        const session = new McpSession(spec.baseUrl, { mcpPath: spec.mcpPath });
         if (spec.auth === "static-key") {
           const apiKeyEnv = spec.apiKeyEnv as string; // validated by the parser
           const registerTimeValue = env[apiKeyEnv];

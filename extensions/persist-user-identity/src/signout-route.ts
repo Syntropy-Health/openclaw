@@ -21,6 +21,7 @@
 
 import type { IncomingMessage, ServerResponse } from "node:http";
 import type { ResolvedClerkAuth } from "../../../src/gateway/auth.js";
+import { safeErr } from "../../shared/log-redact.js";
 
 /** The channel this endpoint unbinds — pinned by the A&D (mobile only). */
 export const SIGNOUT_CHANNEL = "shrinemobile";
@@ -152,7 +153,7 @@ export function createMobileSignoutHandler(deps: SignoutRouteDeps) {
         channelPeerId: deviceId,
       });
     } catch (err) {
-      deps.logger?.error?.(`mobile-signout: unlink failed: ${String(err)}`);
+      deps.logger?.error?.(`mobile-signout: unlink failed: ${safeErr(err, [deviceId])}`);
       sendJson(res, 500, { error: "unbind failed" });
       return;
     }
