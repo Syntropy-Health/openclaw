@@ -122,6 +122,16 @@ export type SessionMaintenanceConfig = {
   maxEntries?: number;
   /** Rotate sessions.json when it exceeds this size (e.g. "10mb"). Default: 10mb. */
   rotateBytes?: number | string;
+  /**
+   * Delete session TRANSCRIPT files (live and archived) older than `maxAge`, by
+   * file mtime, across every agent (mono #544). Absent: no sweep. `mode` "warn"
+   * (default) only counts; "enforce" deletes. Entry pruning above only renames
+   * transcripts and never sees unindexed ones; this is the content retention.
+   */
+  transcriptRetention?: {
+    maxAge: string | number;
+    mode?: "warn" | "enforce";
+  };
 };
 
 export type LoggingConfig = {

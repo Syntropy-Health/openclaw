@@ -1,4 +1,5 @@
 import type { HealthSummary } from "../commands/health.js";
+import { createTranscriptRetentionRunner } from "../config/sessions/transcript-retention.js";
 import { abortChatRunById, type ChatAbortControllerEntry } from "./chat-abort.js";
 import type { ChatRunEntry } from "./server-chat.js";
 import {
@@ -71,8 +72,23 @@ export function startGatewayMaintenanceTimers(params: {
     .refreshGatewayHealthSnapshot({ probe: true })
     .catch((err) => params.logHealth.error(`initial refresh failed: ${formatError(err)}`));
 
+  // mono #544: session-transcript retention, at most hourly on this 60s tick, first
+  // ~30s after startup. Opt-in via session.maintenance.transcriptRetention; a sweep
+  // failure must never take the maintenance tick down.
+  const transcriptRetention = createTranscriptRetentionRunner();
+  const runTranscriptRetention = () => {
+    try {
+      transcriptRetention.maybeRun();
+    } catch (err) {
+      params.logHealth.error(`transcript retention failed: ${formatError(err)}`);
+    }
+  };
+  // First pass shortly after start, off the startup path (the sweep is sync I/O).
+  setTimeout(runTranscriptRetention, 30_000).unref?.();
+
   // dedupe cache cleanup
   const dedupeCleanup = setInterval(() => {
+    runTranscriptRetention();
     const AGENT_RUN_SEQ_MAX = 10_000;
     const now = Date.now();
     for (const [k, v] of params.dedupe) {

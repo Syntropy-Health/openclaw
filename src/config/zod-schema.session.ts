@@ -73,9 +73,35 @@ export const SessionSchema = z
         pruneDays: z.number().int().positive().optional(),
         maxEntries: z.number().int().positive().optional(),
         rotateBytes: z.union([z.string(), z.number()]).optional(),
+        transcriptRetention: z
+          .object({
+            maxAge: z.union([z.string(), z.number()]),
+            mode: z.enum(["enforce", "warn"]).optional(),
+          })
+          .strict()
+          .optional(),
       })
       .strict()
       .superRefine((val, ctx) => {
+        if (val.transcriptRetention !== undefined) {
+          let ok = false;
+          try {
+            ok =
+              parseDurationMs(String(val.transcriptRetention.maxAge).trim(), {
+                defaultUnit: "d",
+              }) >=
+              24 * 60 * 60_000;
+          } catch {
+            ok = false;
+          }
+          if (!ok) {
+            ctx.addIssue({
+              code: z.ZodIssueCode.custom,
+              path: ["transcriptRetention", "maxAge"],
+              message: "invalid duration or below the 1d minimum (use ms, s, m, h, d)",
+            });
+          }
+        }
         if (val.pruneAfter !== undefined) {
           try {
             parseDurationMs(String(val.pruneAfter).trim(), { defaultUnit: "d" });

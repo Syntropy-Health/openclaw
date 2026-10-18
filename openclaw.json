@@ -7,7 +7,10 @@
     }
   },
   "session": {
-    "dmScope": "per-channel-peer"
+    "dmScope": "per-channel-peer",
+    "maintenance": {
+      "transcriptRetention": { "maxAge": "30d", "mode": "warn" }
+    }
   },
   "gateway": {
     "http": {
