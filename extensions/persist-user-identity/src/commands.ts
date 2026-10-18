@@ -163,7 +163,7 @@ export function registerIdentityCommands(api: OpenClawPluginApi, deps: IdentityC
           // link already succeeded and discarding it would be worse.
           tokenPersistFailed = true;
           api.logger.error(
-            `persist-user-identity: FAILED to store Syntropy token for user ${logToken(user.id)}: ${safeErr(tokenErr, [peerId])}`,
+            `persist-user-identity: FAILED to store Syntropy token for user ${logToken(user.id)}: ${safeErr(tokenErr, [peerId, verified.authToken])}`,
           );
         }
       }

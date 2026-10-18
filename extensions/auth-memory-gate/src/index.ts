@@ -60,14 +60,21 @@ const authMemoryGatePlugin = {
     let nextProbeAt = 0;
     let probeInFlight: Promise<void> | null = null;
 
-    function markDbFailed(err: unknown, stage: "init" | "lookup") {
+    function markDbFailed(
+      err: unknown,
+      stage: "init" | "lookup",
+      sensitive: ReadonlyArray<string | null | undefined> = [],
+    ) {
       dbReady = false;
       dbFailures += 1;
       const delayMs = Math.min(1_000 * 2 ** (dbFailures - 1), 60_000);
-      lastDbError = err ?? new Error("unknown database error");
+      // Cache a SCRUBBED error: lastDbError is rethrown on later turns for OTHER
+      // peers, so a raw error echoing peer A would reach peer B's log line.
+      const scrubbed = safeErr(err ?? new Error("unknown database error"), sensitive);
+      lastDbError = new Error(scrubbed);
       nextProbeAt = Date.now() + delayMs;
       api.logger.error(
-        `auth-memory-gate: ${stage} failed (attempt ${dbFailures}, retry in ${delayMs / 1000}s): ${safeErr(err)}`,
+        `auth-memory-gate: ${stage} failed (attempt ${dbFailures}, retry in ${delayMs / 1000}s): ${scrubbed}`,
       );
     }
 
@@ -87,7 +94,7 @@ const authMemoryGatePlugin = {
           api.logger.info("auth-memory-gate: DB connection verified");
         } catch (err) {
           markDbFailed(err, "init");
-          throw err;
+          throw lastDbError;
         } finally {
           probeInFlight = null;
         }
@@ -134,8 +141,8 @@ const authMemoryGatePlugin = {
           } catch (err) {
             // A DB lost after a good init: enter the same backoff so the next
             // turns fail fast (gated) instead of each waiting on a dead pool.
-            markDbFailed(err, "lookup");
-            throw err;
+            markDbFailed(err, "lookup", [peerId]);
+            throw lastDbError;
           }
           const identity = reconcileVerifiedIdentity(row, ctx?.externalId);
 

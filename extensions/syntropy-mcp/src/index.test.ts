@@ -1672,3 +1672,23 @@ describe("syntropy-mcp config: per-server mcpPath (mono #539)", () => {
     );
   });
 });
+
+describe("syntropy-mcp config: mcpPath safety + shared baseUrl (mono #539 review)", () => {
+  it.each(["//evil.host/x", "/../admin", "/mcp?x=1", "/mcp#f", "/a\\b", "/a b"])(
+    "rejects %s",
+    (p) => {
+      expect(() => parseSyntropyMcpConfig({ servers: [{ ...sjM2mServer, mcpPath: p }] })).toThrow(
+        /mcpPath must be/,
+      );
+    },
+  );
+
+  it("rejects two servers on one baseUrl with different mcpPaths; allows the same path", () => {
+    const a = { ...kgServer, id: "a", baseUrl: "https://h.local", mcpPath: "/mcp/" };
+    const b = { ...kgServer, id: "b", baseUrl: "https://h.local" };
+    expect(() => parseSyntropyMcpConfig({ servers: [a, b] })).toThrow(/must use the same mcpPath/);
+    expect(() =>
+      parseSyntropyMcpConfig({ servers: [a, { ...b, mcpPath: "/mcp/" }] }),
+    ).not.toThrow();
+  });
+});

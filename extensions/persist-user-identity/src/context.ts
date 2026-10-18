@@ -48,14 +48,15 @@ export function formatIdentityContext(
  * Format the identity block for an unregistered peer — flags the agent to begin
  * the identify/register flow.
  */
-export function formatUnknownUserContext(channel: string, peerId: string): string {
+// No channel_peer_id here (mono #541): this block rides the same gated turn as
+// [IDENTITY_GATE] and goes to the LLM provider; on SMS/WhatsApp the peer is a phone.
+export function formatUnknownUserContext(channel: string): string {
   return [
     "[USER_IDENTITY]",
     "user_id: none",
     "external_id: none",
     "name: unknown",
     `channel: ${channel}`,
-    `channel_peer_id: ${peerId}`,
     "verified: false",
     "status: unregistered",
     "gate_eligible: true",

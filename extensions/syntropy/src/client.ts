@@ -71,6 +71,20 @@ async function parseMcpResponse(resp: Response): Promise<Record<string, unknown>
 // Session (MCP streamable-http STATEFUL servers)
 // ---------------------------------------------------------------------------
 
+/** `baseUrl` + MCP path, without a doubled slash. Default path `/mcp`. */
+export function mcpEndpoint(baseUrl: string, mcpPath?: string): string {
+  return `${baseUrl.replace(/\/+$/, "")}${mcpPath ?? "/mcp"}`;
+}
+
+/**
+ * The path a request uses: a session's own path always wins, so initialize and the
+ * request it authorises hit the SAME endpoint (a session id from /mcp is not
+ * valid on /x). Without a session, the explicit `mcpPath` or the default.
+ */
+function resolveMcpPath(opts: { session?: McpSession; mcpPath?: string }): string | undefined {
+  return opts.session ? opts.session.mcpPath : opts.mcpPath;
+}
+
 /**
  * Lazily-established MCP streamable-http session for STATEFUL servers (e.g.
  * FastMCP kg-mcp, which rejects bare JSON-RPC calls with 400 "Missing session
@@ -89,11 +103,6 @@ async function parseMcpResponse(resp: Response): Promise<Record<string, unknown>
  * for expired-session recovery. Error messages never include the auth token
  * or the session id.
  */
-/** `baseUrl` + MCP path, without a doubled slash. Default path `/mcp`. */
-export function mcpEndpoint(baseUrl: string, mcpPath?: string): string {
-  return `${baseUrl.replace(/\/+$/, "")}${mcpPath ?? "/mcp"}`;
-}
-
 export class McpSession {
   private readonly baseUrl: string;
   /**
@@ -110,7 +119,11 @@ export class McpSession {
 
   constructor(baseUrl: string, opts?: { clientName?: string; mcpPath?: string }) {
     this.baseUrl = baseUrl;
-    this.mcpPath = opts?.mcpPath ?? "/mcp";
+    const mcpPath = opts?.mcpPath ?? "/mcp";
+    if (!mcpPath.startsWith("/")) {
+      throw new TypeError(`McpSession mcpPath must start with "/" (got "${mcpPath}")`);
+    }
+    this.mcpPath = mcpPath;
     this.clientName = opts?.clientName ?? "openclaw-syntropy-mcp";
   }
 
@@ -283,7 +296,7 @@ export async function callMcpTool(
 ): Promise<McpToolResult> {
   const { label } = opts;
   const toolErrorLabel = opts.toolErrorLabel ?? label;
-  const url = mcpEndpoint(baseUrl, opts.mcpPath ?? opts.session?.mcpPath);
+  const url = mcpEndpoint(baseUrl, resolveMcpPath(opts));
 
   try {
     const resp = await postMcpRequest(
@@ -360,7 +373,7 @@ export async function listMcpTools(
 
   try {
     const resp = await postMcpRequest(
-      mcpEndpoint(baseUrl, opts.mcpPath ?? opts.session?.mcpPath),
+      mcpEndpoint(baseUrl, resolveMcpPath(opts)),
       authToken,
       JSON.stringify({
         jsonrpc: "2.0",

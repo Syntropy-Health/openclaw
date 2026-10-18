@@ -40,7 +40,7 @@
             },
             "mcpPath": {
               "type": "string",
-              "pattern": "^/",
+              "pattern": "^/[A-Za-z0-9._~/-]*$",
               "description": "MCP endpoint path on baseUrl. Default /mcp (kg-mcp). Syntropy Journals needs /mcp/ (its bare /mcp 307s and the POST body is lost)."
             },
             "commitTools": {

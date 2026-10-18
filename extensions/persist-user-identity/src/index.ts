@@ -140,7 +140,7 @@ const persistUserIdentityPlugin = {
             return { prependContext: formatIdentityContext(identity, "new_session") };
           }
 
-          return { prependContext: formatUnknownUserContext(channel, peerId) };
+          return { prependContext: formatUnknownUserContext(channel) };
         } catch (err) {
           api.logger.error(
             `persist-user-identity: before_agent_start error: ${safeErr(err, [deriveIdentityPeer(ctx)])}`,

@@ -61,6 +61,23 @@ describe("safeErr (mono #540)", () => {
     expect(safeErr({ toString: () => "obj +15551234567" })).toBe("obj [e164]");
   });
 
+  test("scrubs unprefixed, formatted and WhatsApp-jid phone shapes, and the digits-only form of a caller value", () => {
+    const msg =
+      "a 15555550123 b 5555550123 c +1 (555) 555-0123 d +44 20 7946 0958 e 15555550123@s.whatsapp.net";
+    const out = safeErr(new Error(msg));
+    for (const raw of ["15555550123", "5555550123", "555-0123", "7946 0958"])
+      expect(out).not.toContain(raw);
+    expect(out).toContain("[e164]@s.whatsapp.net");
+    const viaCaller = safeErr(new Error("peer 19785550123 missing"), [PHONE]);
+    expect(viaCaller).not.toContain("9785550123");
+  });
+
+  test("does not mangle ordinary short numbers and ids", () => {
+    expect(safeErr(new Error("attempt 3 of 5, code 23505, pool 20"))).toBe(
+      "Error: attempt 3 of 5, code 23505, pool 20",
+    );
+  });
+
   test("keeps the error name (e.g. PostgresError)", () => {
     const e = new Error("connection terminated");
     e.name = "PostgresError";
