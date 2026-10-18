@@ -85,5 +85,6 @@ export function safeErr(
  */
 export function maskPeerForDisplay(peerId: string | null | undefined): string {
   const v = (peerId ?? "").trim();
-  return v.length > 4 ? `…${v.slice(-4)}` : "…";
+  // Short ids would be mostly revealed by a last-4 tail; show nothing for them.
+  return v.length >= 10 ? `…${v.slice(-4)}` : "…";
 }

@@ -207,7 +207,7 @@ User: /verify eyJhbGciOiJIUzI1NiJ9...
 
 Agent: "Identity verified! Welcome, Jane Doe.
         Your user ID: 6a0c0211-a497-...
-        Linked channels: whatsapp:+1234567890"
+        Linked channel: whatsapp (…7890)"
 ```
 
 What happens internally:

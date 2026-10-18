@@ -138,7 +138,7 @@ ORDER BY m.created_at DESC;
 | -------------------------- | ------------------------------------------------- | ------------- |
 | `!verify <token>`          | Validate JWT/token, link channel to verified user | No            |
 | `!register <first> <last>` | Create channel-only identity (no token)           | No            |
-| `/whoami`                  | Show current identity and linked channels         | No            |
+| `/whoami`                  | Show current identity and this channel (masked)   | No            |
 
 ## Configuration
 

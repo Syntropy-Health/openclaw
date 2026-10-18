@@ -195,19 +195,6 @@ export async function linkExternalId(
 }
 
 /**
- * List all channel identities linked to a user.
- */
-export async function listUserChannels(
-  sql: postgres.Sql,
-  userId: string,
-): Promise<UserChannelRow[]> {
-  const rows = await sql`
-    SELECT * FROM lp_user_channels WHERE user_id = ${userId} ORDER BY linked_at
-  `;
-  return rows as unknown as UserChannelRow[];
-}
-
-/**
  * G-lane [G1] auto-bind (A&D §7 [G1]): on a VERIFIED first-party turn, ensure the
  * `lp_users` row for the caller's Clerk identity and UPSERT the device link.
  *

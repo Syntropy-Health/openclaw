@@ -3,8 +3,9 @@
  * hook injects. Extracted from index.ts (oc-hygiene #6) so the register() wiring
  * stays thin and these pure formatters are unit-testable without a DB.
  *
- * DOWNSTREAM CONTRACT: Other plugins (memory-gate, graphiti, etc.) parse the
- * [USER_IDENTITY] block from the system prompt to extract the canonical user_id.
+ * These blocks are MODEL CONTEXT ONLY: plugins cannot read another plugin's
+ * prependContext (the hook event is {prompt, messages}), and the 2026-10-18 census
+ * found no parser (mono #542). Downstream plugins use the DB or the shared scope key.
  */
 
 import type { ResolvedIdentity } from "./db.js";
@@ -18,7 +19,6 @@ import type { ResolvedIdentity } from "./db.js";
  *   external_id: <string|none>
  *   name: <first last>
  *   channel: <channel>
- *   channel_peer_id: <id>
  *   verified: <true|false>
  *   status: <verified|registered|new_session>
  *   [/USER_IDENTITY]

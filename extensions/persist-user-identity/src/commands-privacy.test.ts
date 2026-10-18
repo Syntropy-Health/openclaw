@@ -28,11 +28,6 @@ vi.mock("./jwt.js", () => ({
     { userId: "c", email: "c@x", firstName: "Jan", lastName: "Dough" },
   ]),
 }));
-const ALL_LINKS = [
-  { channel: "sms", channel_peer_id: SMS },
-  { channel: "shrinemobile", channel_peer_id: MOBILE_DEVICE },
-  { channel: "whatsapp", channel_peer_id: WA },
-];
 vi.mock("./db.js", () => ({
   createUser: vi.fn(async () => ({ id: "u1", first_name: "Jane", last_name: "Doe" })),
   findUserByChannelPeer: vi.fn(async (_sql: unknown, channel: string, peer: string) =>
@@ -51,13 +46,12 @@ vi.mock("./db.js", () => ({
   findUserByExternalId: vi.fn(async () => ({ id: "u1", first_name: "Jane", last_name: "Doe" })),
   linkChannelToUser: vi.fn(async () => {}),
   linkExternalId: vi.fn(async () => {}),
-  listUserChannels: vi.fn(async () => ALL_LINKS),
   updateUserName: vi.fn(async () => {}),
 }));
 
 type Handler = (ctx: Record<string, unknown>) => Promise<{ text: string }>;
 
-async function handlers(): Promise<Map<string, Handler>> {
+async function handlers(pending: Map<string, unknown> = new Map()): Promise<Map<string, Handler>> {
   const { registerIdentityCommands } = await import("./commands.js");
   const map = new Map<string, Handler>();
   const api = {
@@ -73,7 +67,7 @@ async function handlers(): Promise<Map<string, Handler>> {
     } as never,
     ensureReady: async () => {},
     getVault: () => null,
-    pendingIdentify: new Map(),
+    pendingIdentify: pending as never,
   });
   return map;
 }
@@ -103,8 +97,7 @@ describe("mono #543: replies never list other channels' peers", () => {
 
   it("the channel-list command shows only the issuing channel, masked", async () => {
     const h = await handlers();
-    const listCmd = [...h.keys()].find((k) => !["verify", "identify", "register"].includes(k))!;
-    const out = await h.get(listCmd)!({ channel: "whatsapp", senderId: WA });
+    const out = await h.get("whoami")!({ channel: "whatsapp", senderId: WA });
     expect(peersIn(out.text)).toEqual([]);
     expect(out.text).not.toContain("sms");
     expect(out.text).not.toContain("shrinemobile");
@@ -120,5 +113,39 @@ describe("mono #543: !identify never echoes names (CWE-203)", () => {
       expect(out.text).not.toContain(n);
     expect(out.text).not.toMatch(/\b[23]\b|few|matches/i);
     expect(out.text).toContain("A match was found — continue with !verify");
+  });
+});
+
+describe("mono #543 review: the identify → verify contract", () => {
+  it("ONE match: pins its identifier, !verify uses it, and the pin is cleared on success", async () => {
+    const jwt = await import("./jwt.js");
+    vi.mocked(jwt.lookupUserByName).mockResolvedValueOnce([
+      { userId: "a", email: "only@x", firstName: "Jane", lastName: "Doe" } as never,
+    ]);
+    const pending = new Map<string, { email: string }>();
+    const h = await handlers(pending);
+    const id = await h.get("identify")!({ args: "Jane Doe", channel: "sms", senderId: SMS });
+    expect(id.text).not.toContain("Jane");
+    expect(pending.get(`sms:${SMS}`)?.email).toBe("only@x");
+    await h.get("verify")!({ args: "123456", channel: "sms", senderId: SMS });
+    expect(vi.mocked(jwt.verifyViaPasscode).mock.calls.at(-1)?.[1]).toBe("only@x");
+    expect(pending.has(`sms:${SMS}`)).toBe(false);
+  });
+
+  it("SEVERAL matches: pins nothing (a wrong identifier would fail the real user's verify)", async () => {
+    const pending = new Map<string, unknown>();
+    const h = await handlers(pending);
+    await h.get("identify")!({ args: "Jane Doe", channel: "sms", senderId: SMS });
+    expect(pending.size).toBe(0);
+  });
+});
+
+describe("maskPeerForDisplay", () => {
+  it("shows the last 4 only for ids of 10+ characters", async () => {
+    const { maskPeerForDisplay } = await import("../../shared/log-redact.js");
+    expect(maskPeerForDisplay("+15551234567")).toBe("…4567");
+    expect(maskPeerForDisplay("abcde")).toBe("…");
+    expect(maskPeerForDisplay("unknown")).toBe("…");
+    expect(maskPeerForDisplay(undefined)).toBe("…");
   });
 });

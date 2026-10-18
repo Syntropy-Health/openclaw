@@ -33,6 +33,9 @@ import {
   verifyViaPasscode,
 } from "./jwt.js";
 
+/** Cap on pending !identify matches (unauthenticated input, so it must be bounded). */
+const MAX_PENDING_IDENTIFY = 1000;
+
 /** Closure state register() owns, threaded into the command handlers. */
 export type IdentityCommandDeps = {
   sql: postgres.Sql;
@@ -244,13 +247,25 @@ export function registerIdentityCommands(api: OpenClawPluginApi, deps: IdentityC
         };
       }
 
-      // Store the first match for the upcoming !verify passcode call
-      const match = results[0] as UserLookupResult;
-      pendingIdentify.set(peerKey, {
-        email: match.email,
-        userId: match.userId,
-        expiresAt: Date.now() + 15 * 60_000,
-      });
+      // Pin the match for the upcoming !verify ONLY when it is unambiguous. With
+      // several matches, pinning results[0] would send the wrong identifier for
+      // every other candidate and fail their verify (mono #543 review); !verify
+      // without an identifier is the same path as a bare !verify.
+      if (results.length === 1) {
+        const match = results[0] as UserLookupResult;
+        // Bounded: !identify is unauthenticated, so an unbounded map is a memory DoS.
+        if (pendingIdentify.size >= MAX_PENDING_IDENTIFY) {
+          const oldest = pendingIdentify.keys().next().value;
+          if (oldest !== undefined) pendingIdentify.delete(oldest);
+        }
+        pendingIdentify.set(peerKey, {
+          email: match.email,
+          userId: match.userId,
+          expiresAt: Date.now() + 15 * 60_000,
+        });
+      } else {
+        pendingIdentify.delete(peerKey);
+      }
 
       // mono #543: never echo names or the number of matches. !identify needs no
       // authentication, so names here let anyone enumerate accounts (CWE-203).
@@ -337,7 +352,7 @@ export function registerIdentityCommands(api: OpenClawPluginApi, deps: IdentityC
 
   api.registerCommand({
     name: "whoami",
-    description: "Show your current identity and linked channels",
+    description: "Show your current identity and this channel",
     acceptsArgs: false,
     requireAuth: false,
     handler: async (ctx) => {
@@ -370,7 +385,6 @@ export function registerIdentityCommands(api: OpenClawPluginApi, deps: IdentityC
           `User ID: ${identity.id}\n` +
           (name ? `Name: ${name}\n` : "") +
           `Verified: ${identity.verified ? "yes" : "no"}\n` +
-          (identity.external_id ? `External ID: ${identity.external_id}\n` : "") +
           `This channel:\n${thisChannel}`,
       };
     },
