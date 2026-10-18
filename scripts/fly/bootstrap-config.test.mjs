@@ -138,6 +138,38 @@ function test_corruptDataConfigFallsBackToSeed() {
   );
 }
 
+function test_syncsSessionMaintenanceOnly() {
+  process.stdout.write("test_syncsSessionMaintenanceOnly\n");
+  // mono #544: session.maintenance (transcript retention) is image-owned; the rest
+  // of `session` (dmScope) stays on /data.
+  const tmp = setupTmp();
+  const app = path.join(tmp, "app.json");
+  const data = path.join(tmp, "data.json");
+  const maintenance = { transcriptRetention: { maxAge: "30d", mode: "warn" } };
+  fs.writeFileSync(
+    app,
+    JSON.stringify({ plugins: { allow: [] }, session: { dmScope: "main", maintenance } }),
+  );
+  fs.writeFileSync(
+    data,
+    JSON.stringify({ plugins: { allow: [] }, session: { dmScope: "per-channel-peer" } }),
+  );
+  const env = { ...process.env, OPENCLAW_APP_CONFIG_PATH: app, OPENCLAW_CONFIG_PATH: data };
+  execSync(`node ${SCRIPT}`, { env, stdio: "ignore" });
+  const after = JSON.parse(fs.readFileSync(data, "utf8"));
+  assert(
+    after.session?.maintenance?.transcriptRetention?.maxAge === "30d",
+    "maintenance synced from image",
+  );
+  assert(after.session?.dmScope === "per-channel-peer", "dmScope stays the /data value");
+  const past = new Date(Date.now() - 60_000);
+  fs.utimesSync(data, past, past);
+  const mtimeBefore = fs.statSync(data).mtimeMs;
+  execSync(`node ${SCRIPT}`, { env, stdio: "ignore" });
+  assert(fs.statSync(data).mtimeMs === mtimeBefore, "second boot with maintenance: not rewritten");
+  fs.rmSync(tmp, { recursive: true, force: true });
+}
+
 function test_scriptIsExecutable() {
   process.stdout.write("test_scriptIsExecutable\n");
   // Verify the script parses + runs the import structure correctly by
@@ -159,6 +191,7 @@ test_secondBootLeavesDataConfigUntouched();
 test_seedsOnFirstBoot();
 test_mergeLogicPreservesRuntimeKeys();
 test_corruptDataConfigFallsBackToSeed();
+test_syncsSessionMaintenanceOnly();
 test_scriptIsExecutable();
 
 process.stdout.write(`\nresult: ${pass} passed, ${fail} failed\n`);

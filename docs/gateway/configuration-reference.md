@@ -1160,6 +1160,7 @@ See [Multi-Agent Sandbox & Tools](/tools/multi-agent-sandbox-tools) for preceden
       pruneAfter: "30d",
       maxEntries: 500,
       rotateBytes: "10mb",
+      transcriptRetention: { maxAge: "30d", mode: "warn" }, // optional; deletes transcript FILES
     },
     mainKey: "main", // legacy (runtime always uses "main")
     agentToAgent: { maxPingPongTurns: 5 },
@@ -1183,7 +1184,8 @@ See [Multi-Agent Sandbox & Tools](/tools/multi-agent-sandbox-tools) for preceden
 - **`resetByType`**: per-type overrides (`direct`, `group`, `thread`). Legacy `dm` accepted as alias for `direct`.
 - **`mainKey`**: legacy field. Runtime now always uses `"main"` for the main direct-chat bucket.
 - **`sendPolicy`**: match by `channel`, `chatType` (`direct|group|channel`, with legacy `dm` alias), `keyPrefix`, or `rawKeyPrefix`. First deny wins.
-- **`maintenance`**: `warn` warns the active session on eviction; `enforce` applies pruning and rotation.
+- **`maintenance`**: `warn` warns the active session on eviction; `enforce` applies pruning and rotation. Pruning only renames a pruned entry's transcript to `*.deleted.<ts>` and never sees unindexed transcripts.
+- **`maintenance.transcriptRetention`** (optional): content retention for transcript files. Every `*.jsonl`, plus archived `*.jsonl.deleted.*` / `*.jsonl.reset.*`, under each agent's sessions dir whose mtime is older than `maxAge` is counted (`mode: "warn"`, the default) or deleted (`mode: "enforce"`). It runs at gateway start, then at most hourly. `sessions.json` is never touched. Absent: no sweep.
 
 </Accordion>
 
