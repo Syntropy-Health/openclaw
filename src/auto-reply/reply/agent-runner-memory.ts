@@ -102,7 +102,7 @@ export async function runMemoryFlushIfNeeded(params: {
     .filter(Boolean)
     .join("\n\n");
   try {
-    await runWithModelFallback({
+    const flushRun = await runWithModelFallback({
       cfg: params.followupRun.run.config,
       provider: params.followupRun.run.provider,
       model: params.followupRun.run.model,
@@ -155,6 +155,13 @@ export async function runMemoryFlushIfNeeded(params: {
         });
       },
     });
+    // mono #538: a before_agent_start hook (hard gate) ended the flush without the
+    // model, so no memory was written. Do not record the flush as done, or the
+    // next eligible cycle would skip it.
+    if (flushRun.result.meta?.shortCircuited) {
+      logVerbose(`memory flush short-circuited by a hook; not stamping memoryFlushAt`);
+      return activeSessionEntry;
+    }
     let memoryFlushCompactionCount =
       activeSessionEntry?.compactionCount ??
       (params.sessionKey ? activeSessionStore?.[params.sessionKey]?.compactionCount : 0) ??

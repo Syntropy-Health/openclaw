@@ -377,6 +377,20 @@ export type PluginHookBeforeAgentStartResult = {
   modelOverride?: string;
   /** Override the provider for this agent run. E.g. "ollama" */
   providerOverride?: string;
+  /**
+   * End the run WITHOUT calling the model and reply with this text (mono #538).
+   *
+   * For a hard gate: a turn the plugin must not let the model answer (e.g. an
+   * unverified user under `hardGate`). The runner returns this text as the
+   * reply payload before any model is resolved or called, on every surface
+   * that runs the embedded agent (channels and HTTP `/v1/responses`).
+   *
+   * Optional and absent by default: a hook that does not set it changes
+   * nothing. When several hooks set it, the higher-priority hook wins (the same
+   * rule as `modelOverride`). The text must be server-built: it is sent
+   * verbatim, so it must never echo user input or identifiers.
+   */
+  shortCircuitReply?: string;
 };
 
 // llm_input hook

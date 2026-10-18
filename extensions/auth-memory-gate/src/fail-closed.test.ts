@@ -13,7 +13,7 @@
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 import type { OpenClawPluginApi } from "../../../src/plugins/types.js";
 import { logToken, redactPeer } from "../../shared/log-redact.js";
-import { formatHardGateReplyAppend } from "./scope.js";
+import { formatHardGateReplyAppend, formatHardGateUserMessage } from "./scope.js";
 
 const db = vi.hoisted(() => ({
   /** Number of upcoming `SELECT 1` init probes that fail. */
@@ -362,5 +362,133 @@ describe("a lookup error that echoes the peer never logs it (mono #540 review)",
     expect(errors).toContain("lookup failed"); // the line exists
     expect(errors).toContain("invalid input value for channel_peer_id"); // message kept
     expect(errors).not.toContain(PEER);
+  });
+});
+
+describe("hard gate short-circuits the run — no model call (mono #538)", () => {
+  type GateResult = { prependContext?: string; shortCircuitReply?: string };
+
+  test("unregistered peer: shortCircuitReply is the static gate message, with no peer in it", async () => {
+    const { turn } = await setup({ hardGate: true });
+    const res = (await turn()) as GateResult;
+    expect(res.shortCircuitReply).toBe(formatHardGateUserMessage(CHANNEL));
+    expect(res.shortCircuitReply).not.toContain(PEER);
+  });
+
+  test("registered but unverified (requireVerified): short-circuits", async () => {
+    db.identity = REGISTERED;
+    const { turn } = await setup({ hardGate: true, requireVerified: true });
+    expect(((await turn()) as GateResult).shortCircuitReply).toBe(
+      formatHardGateUserMessage(CHANNEL),
+    );
+  });
+
+  test("DB down + hardGate (fail-closed): short-circuits, not {}", async () => {
+    db.identity = REGISTERED;
+    db.down = true;
+    const { turn } = await setup({ hardGate: true });
+    expect(((await turn()) as GateResult).shortCircuitReply).toBe(
+      formatHardGateUserMessage(CHANNEL),
+    );
+  });
+
+  test("resolved scope (registered, requireVerified off): NO short-circuit — the model runs", async () => {
+    db.identity = REGISTERED;
+    const { turn } = await setup({ hardGate: true });
+    const res = (await turn()) as GateResult;
+    expect(res.prependContext).toContain("[MEMORY_SCOPE]");
+    expect(res.shortCircuitReply).toBeUndefined();
+  });
+
+  test("hardGate off: never short-circuits", async () => {
+    const { turn } = await setup({ hardGate: false });
+    expect(((await turn()) as GateResult).shortCircuitReply).toBeUndefined();
+  });
+
+  test("message_sending does not append the CTA a second time to the gate reply", async () => {
+    const { turn, send: _send, api } = await setup({ hardGate: true });
+    await turn(); // gates the peer
+    const hook = api._hooks.find((h) => h.name === "message_sending")!.handler;
+    const gateMsg = formatHardGateUserMessage(CHANNEL);
+    expect(await hook({ to: PEER, content: gateMsg }, { channelId: CHANNEL })).toEqual({});
+    const other = (await hook({ to: PEER, content: "hi" }, { channelId: CHANNEL })) as {
+      content?: string;
+    };
+    expect(other.content).toBe("hi" + formatHardGateReplyAppend());
+  });
+});
+
+describe("formatHardGateUserMessage — static per channel class (mono #538)", () => {
+  test("HTTP surfaces (no plugin commands there) say sign in, not !verify", () => {
+    for (const ch of ["webchat", "shrinemobile"]) {
+      const m = formatHardGateUserMessage(ch);
+      expect(m).toContain("sign in with your Syntropy Journals account");
+      expect(m).not.toContain("!identify");
+    }
+  });
+
+  test("messaging channels carry the identify → verify CTA", () => {
+    for (const ch of ["sms", "whatsapp", "telegram"]) {
+      const m = formatHardGateUserMessage(ch);
+      expect(m).toContain("!identify");
+      expect(m).toContain("/verify");
+    }
+  });
+
+  test("depends on the channel class only: identical for every messaging channel", () => {
+    expect(formatHardGateUserMessage("sms")).toBe(formatHardGateUserMessage("telegram"));
+  });
+});
+
+describe("gate bypasses closed (mono #538 review)", () => {
+  type GateResult = { prependContext?: string; shortCircuitReply?: string };
+  async function turnWith(api: MockApi, ctx: Record<string, unknown>): Promise<GateResult> {
+    const h = api._hooks.find((x) => x.name === "before_agent_start")!.handler;
+    return (await h({}, ctx)) as GateResult;
+  }
+
+  test("X-OpenClaw-Device-Id: main on an HTTP surface is GATED (no opt-out)", async () => {
+    const { api } = await setup({ hardGate: true });
+    const res = await turnWith(api, {
+      sessionKey: "agent:main:main",
+      messageProvider: "webchat",
+      deviceId: "main",
+    });
+    expect(res.shortCircuitReply).toBe(formatHardGateUserMessage("webchat"));
+  });
+
+  test("raw HTTP session key agent:main:main is GATED and short-circuited on webchat", async () => {
+    const { api } = await setup({ hardGate: true });
+    const res = await turnWith(api, { sessionKey: "agent:main:main", messageProvider: "webchat" });
+    expect(res.shortCircuitReply).toBeDefined();
+  });
+
+  test("heartbeat on the shared main session (non-HTTP) is still left alone", async () => {
+    const { api } = await setup({ hardGate: true });
+    expect(await turnWith(api, { sessionKey: "agent:main:main" })).toEqual({});
+  });
+
+  test("a cron run on a gated job peer keeps the prompt-only gate: NO short-circuit", async () => {
+    const { api } = await setup({ hardGate: true });
+    const res = await turnWith(api, {
+      sessionKey: "agent:main:cron:job-1",
+      messageProvider: "telegram",
+    });
+    expect(res.prependContext).toContain("[IDENTITY_GATE]");
+    expect(res.shortCircuitReply).toBeUndefined();
+  });
+
+  test("an internal temp: run is never short-circuited", async () => {
+    const { api } = await setup({ hardGate: true });
+    const res = await turnWith(api, { sessionKey: "temp:slug-generator" });
+    expect(res.shortCircuitReply).toBeUndefined();
+  });
+
+  test("CTA is not appended twice when a responsePrefix precedes the gate reply", async () => {
+    const { turn, api } = await setup({ hardGate: true });
+    await turn();
+    const hook = api._hooks.find((h) => h.name === "message_sending")!.handler;
+    const prefixed = `[bot] ${formatHardGateUserMessage(CHANNEL)}`;
+    expect(await hook({ to: PEER, content: prefixed }, { channelId: CHANNEL })).toEqual({});
   });
 });

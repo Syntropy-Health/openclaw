@@ -190,6 +190,10 @@ export function createHookRunner(registry: PluginRegistry, options: HookRunnerOp
    * Allows plugins to inject context into the system prompt.
    * Runs sequentially, merging systemPrompt and prependContext from all handlers.
    */
+  function isNonBlank(value: unknown): value is string {
+    return typeof value === "string" && value.trim().length > 0;
+  }
+
   async function runBeforeAgentStart(
     event: PluginHookBeforeAgentStartEvent,
     ctx: PluginHookAgentContext,
@@ -207,6 +211,13 @@ export function createHookRunner(registry: PluginRegistry, options: HookRunnerOp
         // Keep the first defined override so higher-priority hooks win.
         modelOverride: acc?.modelOverride ?? next.modelOverride,
         providerOverride: acc?.providerOverride ?? next.providerOverride,
+        // First NON-BLANK wins (the runner's own test): a higher-priority hook
+        // returning "" or "  " must not cancel a lower-priority gate (fail-open).
+        shortCircuitReply: isNonBlank(acc?.shortCircuitReply)
+          ? acc?.shortCircuitReply
+          : isNonBlank(next.shortCircuitReply)
+            ? next.shortCircuitReply
+            : undefined,
       }),
     );
   }

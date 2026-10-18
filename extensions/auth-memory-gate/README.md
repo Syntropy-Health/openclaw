@@ -130,6 +130,14 @@ The block carries the channel only. The peer id is deliberately omitted (mono #5
 on SMS/WhatsApp it is the subscriber's phone number, and this text reaches the LLM
 provider and the transcript. `!identify` / `!verify` resolve the peer server-side.
 
+**No model call on a gated turn** (mono #538). With `hardGate: true` the hook also returns
+`shortCircuitReply`, so the runner replies with a fixed, server-built gate message and never
+calls the model. The message depends only on the channel class: HTTP surfaces (`webchat`,
+`shrinemobile`), which have no plugin-command dispatch, say "sign in"; messaging channels get
+the `!identify` → `/verify` steps. The `[IDENTITY_GATE]` prompt is still set for any runner that
+does not honour the short-circuit. (CLI-provider runs do not fire plugin hooks at all: a
+pre-existing gap, not covered by the gate.)
+
 ## Downstream Integration
 
 See [MEMORY_SCOPE_CONTRACT.md](./MEMORY_SCOPE_CONTRACT.md) for the full

@@ -39,6 +39,12 @@ export type EmbeddedPiRunMeta = {
     kind: "context_overflow" | "compaction_failure" | "role_ordering" | "image_size";
     message: string;
   };
+  /**
+   * True when a before_agent_start hook ended the run with `shortCircuitReply`
+   * (mono #538): no model ran. Callers that would record model-side effects
+   * (e.g. a memory flush timestamp) must not.
+   */
+  shortCircuited?: boolean;
   /** Stop reason for the agent run (e.g., "completed", "tool_calls"). */
   stopReason?: string;
   /** Pending tool calls when stopReason is "tool_calls". */
