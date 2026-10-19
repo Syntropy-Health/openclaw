@@ -9,7 +9,7 @@
   "session": {
     "dmScope": "per-channel-peer",
     "maintenance": {
-      "transcriptRetention": { "maxAge": "30d", "mode": "warn" }
+      "transcriptRetention": { "maxAge": "30d", "mode": "enforce" }
     }
   },
   "gateway": {
