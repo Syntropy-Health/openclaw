@@ -1,0 +1,37 @@
+{
+  "$comment": "CEO co-sign record for every shipped identity text. cosign = the CEO dispatch ref that approved THIS sha256. The test refuses a mismatch or a null cosign.",
+  "files": {
+    "workspace/AGENTS.md": {
+      "sha256": "181c34ffb1637b9df850b9e0707f688407183a278834708a37ee95057aae8b1e",
+      "cosign": null
+    },
+    "workspace/HEARTBEAT.md": {
+      "sha256": "fd3c16aac833f0e40db6fc5f8b7e874a511b77023d5f4794ffe68f863c188f80",
+      "cosign": null
+    },
+    "workspace/IDENTITY.md": {
+      "sha256": "2cd0661afa345614a4d1b705cb3b7142e6df13f7b3cdc730acdf646ee665b2a0",
+      "cosign": null
+    },
+    "workspace/SOUL.md": {
+      "sha256": "94fe77a7c20e9be801c0a33fbbfbf5953b1cf311cbd63f5c407a547b234fa8bd",
+      "cosign": null
+    },
+    "workspace/TOOLS.md": {
+      "sha256": "fdc2909246519212836a4497bb7a27d2a2d4ade1541768f50f4c50d6c26e3ab0",
+      "cosign": null
+    },
+    "workspace/USER.md": {
+      "sha256": "fc80df04629befdae2f404ff7c4bac7c8201f1eca3d6ec3b80da3b77c8cce66a",
+      "cosign": null
+    },
+    "layers/shrinemobile.md": {
+      "sha256": "11dbf71acb2301efe8cec9b85bc9ea55ee43d4e54ba95c554aee1954765c83ad",
+      "cosign": null
+    },
+    "layers/webchat.md": {
+      "sha256": "29ec128e4bb8ddc22a70a88b189807d8d0c9aa6dd421e15910ecb3ac87121abd",
+      "cosign": null
+    }
+  }
+}

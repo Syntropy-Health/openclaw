@@ -97,3 +97,24 @@ export function applySystemPromptOverrideToSession(
   mutableSession._baseSystemPrompt = prompt;
   mutableSession._rebuildSystemPrompt = () => prompt;
 }
+
+/**
+ * Merge a `before_agent_start` hook's `systemPrompt` into the run's extra system prompt.
+ *
+ * The hook result type has declared `systemPrompt` for a long time, and `runBeforeAgentStart`
+ * merges it, but nothing consumed it. This makes that contract true: the hook's text is
+ * appended after the caller's extra prompt, so it lands in the system prompt and not in the
+ * user turn (where `prependContext` goes). A blank or absent hook value returns `extra`
+ * unchanged, so the prompt is byte-identical when no hook sets it.
+ */
+export function mergeHookSystemPrompt(
+  extra?: string,
+  hookSystemPrompt?: string,
+): string | undefined {
+  const hook = typeof hookSystemPrompt === "string" ? hookSystemPrompt.trim() : "";
+  if (!hook) {
+    return extra;
+  }
+  const base = typeof extra === "string" ? extra.trim() : "";
+  return base ? `${base}\n\n${hook}` : hook;
+}

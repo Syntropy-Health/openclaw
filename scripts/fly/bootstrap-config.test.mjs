@@ -201,11 +201,59 @@ function test_scriptIsExecutable() {
   }
 }
 
+function test_syncsAgentIdentityKeysOnly() {
+  process.stdout.write("test_syncsAgentIdentityKeysOnly\n");
+  // openclaw-shrineai-identity R2: agents.defaults.{workspace,skipBootstrap} are image-owned;
+  // the operator's model (and the rest of agents.*) stays the /data value.
+  const tmp = setupTmp();
+  const app = path.join(tmp, "app.json");
+  const data = path.join(tmp, "data.json");
+  const identity = { workspace: "/app/shrine/workspace", skipBootstrap: true };
+  fs.writeFileSync(
+    app,
+    JSON.stringify({
+      plugins: { allow: [] },
+      agents: { defaults: { model: { primary: "image/m" }, ...identity } },
+    }),
+  );
+  fs.writeFileSync(
+    data,
+    JSON.stringify({
+      plugins: { allow: [] },
+      agents: { defaults: { model: { primary: "operator/m" }, skipBootstrap: false } },
+    }),
+  );
+  const env = { ...process.env, OPENCLAW_APP_CONFIG_PATH: app, OPENCLAW_CONFIG_PATH: data };
+  execSync(`node ${SCRIPT}`, { env, stdio: "ignore" });
+  const after = JSON.parse(fs.readFileSync(data, "utf8"));
+  assert(
+    after.agents?.defaults?.workspace === "/app/shrine/workspace",
+    "workspace synced from image",
+  );
+  assert(
+    after.agents?.defaults?.skipBootstrap === true,
+    "RED arm: a /data skipBootstrap:false is reset to the image value",
+  );
+  assert(
+    after.agents?.defaults?.model?.primary === "operator/m",
+    "operator model stays the /data value",
+  );
+  const past = new Date(Date.now() - 60_000);
+  fs.utimesSync(data, past, past);
+  const mtimeBefore = fs.statSync(data).mtimeMs;
+  execSync(`node ${SCRIPT}`, { env, stdio: "ignore" });
+  assert(
+    fs.statSync(data).mtimeMs === mtimeBefore,
+    "second boot with identity keys: not rewritten",
+  );
+}
+
 test_secondBootLeavesDataConfigUntouched();
 test_seedsOnFirstBoot();
 test_mergeLogicPreservesRuntimeKeys();
 test_corruptDataConfigFallsBackToSeed();
 test_syncsSessionMaintenanceOnly();
+test_syncsAgentIdentityKeysOnly();
 test_scriptIsExecutable();
 
 process.stdout.write(`\nresult: ${pass} passed, ${fail} failed\n`);

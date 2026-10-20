@@ -3,7 +3,9 @@
     "defaults": {
       "model": {
         "primary": "anthropic/claude-haiku-4-5"
-      }
+      },
+      "workspace": "/app/shrine/workspace",
+      "skipBootstrap": true
     }
   },
   "session": {
@@ -44,7 +46,8 @@
       "catch-phrases",
       "syntropy",
       "twilio",
-      "slack"
+      "slack",
+      "shrine-identity"
     ],
     "entries": {
       "whatsapp": {
@@ -120,6 +123,12 @@
         "config": {
           "smsEnabled": true,
           "keywordReplies": "twilio"
+        }
+      },
+      "shrine-identity": {
+        "enabled": true,
+        "config": {
+          "shrineDir": "/app/shrine"
         }
       }
     },
