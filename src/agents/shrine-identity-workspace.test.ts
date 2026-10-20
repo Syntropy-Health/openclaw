@@ -19,8 +19,10 @@ function tmpDir(prefix: string): string {
 
 describe("Sh'rine identity workspace (R1)", () => {
   it("the shipped config uses the image identity workspace with bootstrap off", () => {
-    expect(SHIPPED.agents?.defaults?.workspace).toBe("/app/shrine/workspace");
+    expect(SHIPPED.agents?.defaults?.workspace).toBe("/opt/shrine/workspace");
     expect(SHIPPED.agents?.defaults?.skipBootstrap).toBe(true);
+    // The workspace is read-only, so the pre-compaction memory flush (writes memory/*.md) is off.
+    expect(SHIPPED.agents?.defaults?.compaction?.memoryFlush?.enabled).toBe(false);
   });
 
   it("with skipBootstrap, the workspace is not seeded: no BOOTSTRAP.md appears", async () => {

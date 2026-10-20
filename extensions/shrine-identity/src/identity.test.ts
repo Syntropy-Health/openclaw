@@ -2,7 +2,13 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { describe, expect, it } from "vitest";
-import { identityVersion, layerResultFor, listIdentityFiles, loadLayers } from "./identity.js";
+import {
+  identityConfigProblems,
+  identityVersion,
+  layerResultFor,
+  listIdentityFiles,
+  loadLayers,
+} from "./identity.js";
 
 const REPO_SHRINE = path.resolve(import.meta.dirname, "../../../shrine");
 
@@ -72,5 +78,37 @@ describe("shipped texts match the CEO co-sign record (R5)", () => {
 
   it("the core identity ships no BOOTSTRAP.md (the first-run persona must never run)", () => {
     expect(fs.existsSync(path.join(REPO_SHRINE, "workspace", "BOOTSTRAP.md"))).toBe(false);
+  });
+});
+
+describe("boot config check (QG: identity silently not applied)", () => {
+  const shrine = "/opt/shrine";
+  it("clean: defaults.workspace is the identity workspace and no other agents", () => {
+    expect(
+      identityConfigProblems({ defaults: { workspace: "/opt/shrine/workspace" } }, shrine),
+    ).toEqual([]);
+  });
+  it("flags a default agent agents.list workspace that overrides the identity", () => {
+    const p = identityConfigProblems(
+      {
+        defaults: { workspace: "/opt/shrine/workspace" },
+        list: [{ id: "main", workspace: "/data/ws" }],
+      },
+      shrine,
+    );
+    expect(p.join(" ")).toMatch(/overrides the Sh'rine identity workspace/);
+  });
+  it("flags a missing defaults.workspace and extra agents without the persona", () => {
+    expect(identityConfigProblems(undefined, shrine).join(" ")).toMatch(
+      /agents.defaults.workspace is not/,
+    );
+    const p = identityConfigProblems(
+      {
+        defaults: { workspace: "/opt/shrine/workspace" },
+        list: [{ id: "main", default: true }, { id: "ops" }],
+      },
+      shrine,
+    );
+    expect(p).toEqual(["1 non-default agent(s) configured: they run without the Sh'rine persona"]);
   });
 });

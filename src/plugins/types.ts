@@ -371,6 +371,12 @@ export type PluginHookBeforeAgentStartEvent = {
 };
 
 export type PluginHookBeforeAgentStartResult = {
+  /**
+   * Text appended to the run's system prompt (after the caller's extra system prompt).
+   * Hooks are concatenated in priority order, highest first. It is SYSTEM-level text:
+   * it must be server-authored and must never carry user-supplied data. For user or
+   * profile context use `prependContext`, which goes in the user turn.
+   */
   systemPrompt?: string;
   prependContext?: string;
   /** Override the model for this agent run. E.g. "llama3.3:8b" */

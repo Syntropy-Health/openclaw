@@ -1,7 +1,13 @@
 import fs from "node:fs";
 import path from "node:path";
 import type { OpenClawPluginApi } from "openclaw/plugin-sdk";
-import { identityVersion, layerResultFor, listIdentityFiles, loadLayers } from "./identity.js";
+import {
+  identityConfigProblems,
+  identityVersion,
+  layerResultFor,
+  listIdentityFiles,
+  loadLayers,
+} from "./identity.js";
 
 /**
  * Sh'rine identity.
@@ -27,6 +33,12 @@ const shrineIdentityPlugin = {
     }
     if (!fs.existsSync(path.join(shrineDir, "workspace"))) {
       api.logger.error("shrine-identity: workspace missing under shrineDir");
+    }
+    for (const problem of identityConfigProblems(
+      (api.config as { agents?: Parameters<typeof identityConfigProblems>[0] })?.agents,
+      shrineDir,
+    )) {
+      api.logger.error(`shrine-identity: ${problem}`);
     }
     const version = identityVersion(listIdentityFiles(shrineDir));
     const layers = loadLayers(shrineDir);

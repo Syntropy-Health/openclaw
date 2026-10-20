@@ -208,7 +208,11 @@ function test_syncsAgentIdentityKeysOnly() {
   const tmp = setupTmp();
   const app = path.join(tmp, "app.json");
   const data = path.join(tmp, "data.json");
-  const identity = { workspace: "/app/shrine/workspace", skipBootstrap: true };
+  const identity = {
+    workspace: "/opt/shrine/workspace",
+    skipBootstrap: true,
+    compaction: { memoryFlush: { enabled: false } },
+  };
   fs.writeFileSync(
     app,
     JSON.stringify({
@@ -220,14 +224,20 @@ function test_syncsAgentIdentityKeysOnly() {
     data,
     JSON.stringify({
       plugins: { allow: [] },
-      agents: { defaults: { model: { primary: "operator/m" }, skipBootstrap: false } },
+      agents: {
+        defaults: {
+          model: { primary: "operator/m" },
+          skipBootstrap: false,
+          compaction: { memoryFlush: { softThresholdTokens: 900 } },
+        },
+      },
     }),
   );
   const env = { ...process.env, OPENCLAW_APP_CONFIG_PATH: app, OPENCLAW_CONFIG_PATH: data };
   execSync(`node ${SCRIPT}`, { env, stdio: "ignore" });
   const after = JSON.parse(fs.readFileSync(data, "utf8"));
   assert(
-    after.agents?.defaults?.workspace === "/app/shrine/workspace",
+    after.agents?.defaults?.workspace === "/opt/shrine/workspace",
     "workspace synced from image",
   );
   assert(
@@ -237,6 +247,14 @@ function test_syncsAgentIdentityKeysOnly() {
   assert(
     after.agents?.defaults?.model?.primary === "operator/m",
     "operator model stays the /data value",
+  );
+  assert(
+    after.agents?.defaults?.compaction?.memoryFlush?.enabled === false,
+    "memory flush disabled from image (the workspace is read-only)",
+  );
+  assert(
+    after.agents?.defaults?.compaction?.memoryFlush?.softThresholdTokens === 900,
+    "operator flush threshold survives",
   );
   const past = new Date(Date.now() - 60_000);
   fs.utimesSync(data, past, past);

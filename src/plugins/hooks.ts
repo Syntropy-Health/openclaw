@@ -203,7 +203,14 @@ export function createHookRunner(registry: PluginRegistry, options: HookRunnerOp
       event,
       ctx,
       (acc, next) => ({
-        systemPrompt: next.systemPrompt ?? acc?.systemPrompt,
+        // Concatenated in priority order (highest first), like prependContext, so one
+        // plugin's system text can never silently replace another's. Blank values are dropped.
+        systemPrompt:
+          isNonBlank(acc?.systemPrompt) && isNonBlank(next.systemPrompt)
+            ? `${acc.systemPrompt}\n\n${next.systemPrompt}`
+            : isNonBlank(next.systemPrompt)
+              ? next.systemPrompt
+              : acc?.systemPrompt,
         prependContext:
           acc?.prependContext && next.prependContext
             ? `${acc.prependContext}\n\n${next.prependContext}`

@@ -97,11 +97,18 @@ function main() {
       identityKeys[key] = appDefaults[key];
     }
   }
-  if (Object.keys(identityKeys).length > 0) {
-    dataConfig.agents = {
-      ...dataConfig.agents,
-      defaults: { ...dataConfig.agents?.defaults, ...identityKeys },
-    };
+  // The image workspace is read-only, so the pre-compaction memory flush (which writes
+  // memory/*.md into the workspace) is image-owned too: ONLY its `enabled` flag is synced.
+  const flushEnabled = appDefaults.compaction?.memoryFlush?.enabled;
+  if (Object.keys(identityKeys).length > 0 || flushEnabled !== undefined) {
+    const defaults = { ...dataConfig.agents?.defaults, ...identityKeys };
+    if (flushEnabled !== undefined) {
+      defaults.compaction = {
+        ...defaults.compaction,
+        memoryFlush: { ...defaults.compaction?.memoryFlush, enabled: flushEnabled },
+      };
+    }
+    dataConfig.agents = { ...dataConfig.agents, defaults };
   }
 
   // Write only when the content changes: an unchanged config keeps its bytes and

@@ -67,3 +67,39 @@ export function layerResultFor(
   const text = key ? layers.get(key) : undefined;
   return text ? { systemPrompt: text } : undefined;
 }
+
+type AgentsConfig = {
+  defaults?: { workspace?: string };
+  list?: Array<{ id?: string; default?: boolean; workspace?: string }>;
+};
+
+/**
+ * Problems that would stop the identity from applying, checked at boot so they are loud:
+ * the default agent's workspace (an `agents.list` override wins over `agents.defaults`) must be
+ * `<shrineDir>/workspace`, and any other configured agent gets no Sh'rine persona.
+ * Mirrors resolveAgentWorkspaceDir's precedence (src/agents/agent-scope.ts).
+ */
+export function identityConfigProblems(
+  agents: AgentsConfig | undefined,
+  shrineDir: string,
+): string[] {
+  const expected = path.join(shrineDir, "workspace");
+  const list = agents?.list ?? [];
+  const defaultEntry = list.find((a) => a?.default) ?? list[0];
+  const effective = defaultEntry?.workspace?.trim() || agents?.defaults?.workspace?.trim() || "";
+  const problems: string[] = [];
+  if (path.resolve(effective || "/nonexistent") !== path.resolve(expected)) {
+    problems.push(
+      defaultEntry?.workspace?.trim()
+        ? "default agent's agents.list workspace overrides the Sh'rine identity workspace"
+        : "agents.defaults.workspace is not the Sh'rine identity workspace",
+    );
+  }
+  const others = list.filter((a) => a && a !== defaultEntry).length;
+  if (others > 0) {
+    problems.push(
+      `${others} non-default agent(s) configured: they run without the Sh'rine persona`,
+    );
+  }
+  return problems;
+}

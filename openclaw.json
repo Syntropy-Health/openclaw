@@ -4,7 +4,8 @@
       "model": {
         "primary": "anthropic/claude-haiku-4-5"
       },
-      "workspace": "/app/shrine/workspace",
+      "workspace": "/opt/shrine/workspace",
+      "compaction": { "memoryFlush": { "enabled": false } },
       "skipBootstrap": true
     }
   },
@@ -128,7 +129,7 @@
       "shrine-identity": {
         "enabled": true,
         "config": {
-          "shrineDir": "/app/shrine"
+          "shrineDir": "/opt/shrine"
         }
       }
     },

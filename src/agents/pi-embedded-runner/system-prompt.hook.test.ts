@@ -46,7 +46,7 @@ describe("attempt.ts wiring (source pin)", () => {
 
   it("re-applies a late hook systemPrompt only on the fallback path", () => {
     expect(src).toMatch(
-      /if \(!params\.earlyHookResult\) \{[\s\S]{0,400}mergeHookSystemPrompt\([\s\S]{0,120}hookResult\?\.systemPrompt[\s\S]{0,300}applySystemPromptOverrideToSession\(activeSession, buildPromptWith\(lateSystemPrompt\)\)/,
+      /if \(!params\.earlyHookResult\) \{[\s\S]{0,400}mergeHookSystemPrompt\([\s\S]{0,120}hookResult\?\.systemPrompt[\s\S]{0,300}systemPromptText = buildPromptWith\(lateSystemPrompt\);\s*applySystemPromptOverrideToSession\(activeSession, systemPromptText\)/,
     );
   });
 });

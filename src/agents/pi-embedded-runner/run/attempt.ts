@@ -486,7 +486,9 @@ export async function runEmbeddedAttempt(
       tools,
     });
     const systemPromptOverride = createSystemPromptOverride(appendPrompt);
-    const systemPromptText = systemPromptOverride();
+    // `let`: the fallback hook path below may rebuild it with a late hook systemPrompt, and
+    // the length log and the llm_input hook must see the prompt the model actually gets.
+    let systemPromptText = systemPromptOverride();
 
     const sessionLock = await acquireSessionWriteLock({
       sessionFile: params.sessionFile,
@@ -906,15 +908,18 @@ export async function runEmbeddedAttempt(
             "before_agent_start requested a short-circuit on the fallback hook path; refusing to prompt the model",
           );
         }
-        // Fallback path only (the early hook threw, so the hook ran here, after the
-        // system prompt was applied): rebuild with the hook's systemPrompt and re-apply.
+        // Fallback path only: there is no early hook result (no hook was registered when
+        // run.ts ran, or every handler returned nothing or threw; the runner catches handler
+        // errors), so the hook ran here, AFTER the system prompt was applied. Rebuild with the
+        // hook's systemPrompt and re-apply, keeping systemPromptText in step.
         if (!params.earlyHookResult) {
           const lateSystemPrompt = mergeHookSystemPrompt(
             params.extraSystemPrompt,
             hookResult?.systemPrompt,
           );
           if (lateSystemPrompt !== params.extraSystemPrompt) {
-            applySystemPromptOverrideToSession(activeSession, buildPromptWith(lateSystemPrompt));
+            systemPromptText = buildPromptWith(lateSystemPrompt);
+            applySystemPromptOverrideToSession(activeSession, systemPromptText);
           }
         }
         {

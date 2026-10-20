@@ -540,6 +540,12 @@ importers:
         specifier: workspace:*
         version: link:../..
 
+  extensions/shrine-identity:
+    devDependencies:
+      openclaw:
+        specifier: workspace:*
+        version: link:../..
+
   extensions/signal:
     devDependencies:
       openclaw:
