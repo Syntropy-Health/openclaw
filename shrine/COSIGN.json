@@ -1,37 +1,45 @@
 {
-  "$comment": "CEO co-sign record for every shipped identity text. cosign = the CEO dispatch ref that approved THIS sha256. The test refuses a mismatch or a null cosign.",
+  "$comment": "CEO co-sign record for every shipped identity text. cosign = the CEO dispatch ref that approved THIS sha256; basis = what the CEO reviewed. The test refuses a mismatch or a missing cosign.",
   "files": {
     "workspace/AGENTS.md": {
       "sha256": "181c34ffb1637b9df850b9e0707f688407183a278834708a37ee95057aae8b1e",
-      "cosign": null
+      "cosign": "CEO #15758",
+      "basis": "co-signed on the author's description (no claims); not re-read by the CEO"
     },
     "workspace/HEARTBEAT.md": {
       "sha256": "fd3c16aac833f0e40db6fc5f8b7e874a511b77023d5f4794ffe68f863c188f80",
-      "cosign": null
+      "cosign": "CEO #15758",
+      "basis": "co-signed on the author's description (no claims); not re-read by the CEO"
     },
     "workspace/IDENTITY.md": {
       "sha256": "2cd0661afa345614a4d1b705cb3b7142e6df13f7b3cdc730acdf646ee665b2a0",
-      "cosign": null
+      "cosign": "CEO #15758",
+      "basis": "co-signed on the author's description (no claims); not re-read by the CEO"
     },
     "workspace/SOUL.md": {
-      "sha256": "94fe77a7c20e9be801c0a33fbbfbf5953b1cf311cbd63f5c407a547b234fa8bd",
-      "cosign": null
+      "sha256": "85a4f390dd514ae811d0b2850fb164785ffc0aaae75d5908dea880c970e01aa6",
+      "cosign": "CEO #15758",
+      "basis": "read from branch @16626932; CEO edits applied verbatim"
     },
     "workspace/TOOLS.md": {
       "sha256": "fdc2909246519212836a4497bb7a27d2a2d4ade1541768f50f4c50d6c26e3ab0",
-      "cosign": null
+      "cosign": "CEO #15758",
+      "basis": "co-signed on the author's description (no claims); not re-read by the CEO"
     },
     "workspace/USER.md": {
       "sha256": "fc80df04629befdae2f404ff7c4bac7c8201f1eca3d6ec3b80da3b77c8cce66a",
-      "cosign": null
+      "cosign": "CEO #15758",
+      "basis": "co-signed on the author's description (no claims); not re-read by the CEO"
     },
     "layers/shrinemobile.md": {
       "sha256": "f3c36f2c32159ad1bb867895d5abdcd2dce1b8202b174e34ff1b3be1a34a1452",
-      "cosign": null
+      "cosign": "CEO #15758",
+      "basis": "co-signed on the author's description (no claims); not re-read by the CEO"
     },
     "layers/webchat.md": {
       "sha256": "032939504e5aa27ece12775101e2d901b6ae47cc280c14e9a5c2c29b6207ef3e",
-      "cosign": null
+      "cosign": "CEO #15758",
+      "basis": "co-signed on the author's description (no claims); not re-read by the CEO"
     }
   }
 }
