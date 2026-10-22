@@ -185,4 +185,13 @@ describe("before_agent_start hook merger", () => {
     expect(result?.modelOverride).toBe("llama3.3:8b");
     expect(result?.providerOverride).toBe("ollama");
   });
+
+  it("systemPrompt from several hooks is concatenated in priority order (never replaced)", async () => {
+    addBeforeAgentStartHook(registry, "high", () => ({ systemPrompt: "HIGH" }), 200);
+    addBeforeAgentStartHook(registry, "blank", () => ({ systemPrompt: "   " }), 150);
+    addBeforeAgentStartHook(registry, "low", () => ({ systemPrompt: "LOW" }), 10);
+    const runner = createHookRunner(registry);
+    const result = await runner.runBeforeAgentStart({ prompt: "hi" }, stubCtx);
+    expect(result?.systemPrompt).toBe("HIGH\n\nLOW");
+  });
 });

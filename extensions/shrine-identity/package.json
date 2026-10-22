@@ -1,0 +1,15 @@
+{
+  "name": "@openclaw/shrine-identity",
+  "version": "2026.10.20",
+  "private": true,
+  "description": "Sh'rine identity: logs the shipped identity version and adds a per-platform system-prompt layer",
+  "type": "module",
+  "devDependencies": {
+    "openclaw": "workspace:*"
+  },
+  "openclaw": {
+    "extensions": [
+      "./src/index.ts"
+    ]
+  }
+}

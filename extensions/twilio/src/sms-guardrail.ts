@@ -7,11 +7,10 @@
  * inside OpenClaw.") plus the workspace AGENTS.md/SOUL.md. None of those say anything
  * about medical advice. So the SMS surface adds its own instruction here.
  *
- * WHY prependContext, NOT systemPrompt: `before_agent_start` results are merged by the
- * hook runner, but only `prependContext` is consumed by the run (attempt.ts); a hook's
- * `systemPrompt` field is merged and then never read. Returning it would look like a
- * guardrail and do nothing. prependContext lands at the head of the user turn on EVERY
- * SMS turn, which is what this needs.
+ * WHY prependContext: when this was written, a hook's `systemPrompt` was merged and never
+ * read. Since openclaw-shrineai-identity the run does consume it, but this guard stays
+ * `prependContext` on purpose (D-A2): it is a live, tested control, and it lands at the head
+ * of the user turn on EVERY SMS turn. The same rule is also in the Sh'rine core identity.
  *
  * Wording: [OPENCLAW-JUDGEMENT] — this is an instruction to the model, not customer
  * copy; the customer-facing registered strings live in compliance.ts.

@@ -75,6 +75,9 @@ apps/ios/*.mobileprovision
 docs/.local/
 IDENTITY.md
 USER.md
+# The Sh'rine identity texts are shipped and co-signed: always tracked.
+!shrine/workspace/IDENTITY.md
+!shrine/workspace/USER.md
 .tgz
 .idea
 

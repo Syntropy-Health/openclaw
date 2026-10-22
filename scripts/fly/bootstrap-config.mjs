@@ -19,7 +19,8 @@
  * `channels.whatsapp.enabled` was rejected by the runtime config schema
  * (see merge-attempt incident 2026-05-13). Channels stay in /data; only
  * `plugins` is source-of-truth in /app, plus
- * `session.maintenance.transcriptRetention` (mono #544).
+ * `session.maintenance.transcriptRetention` (mono #544) and
+ * `agents.defaults.{workspace,skipBootstrap}` (openclaw-shrineai-identity).
  */
 
 import fs from "node:fs";
@@ -82,6 +83,32 @@ function main() {
       ...dataConfig.session,
       maintenance: { ...dataConfig.session?.maintenance, transcriptRetention: retention },
     };
+  }
+
+  // The agent identity is image-owned too (openclaw-shrineai-identity R2): the default
+  // agent's workspace points at the image's read-only identity dir, and first-run
+  // bootstrap is off, so no redeploy or fresh volume can bring the generic persona back.
+  // ONLY these two agents.defaults keys are synced; the model and the rest of agents.*
+  // stay operator-owned on /data.
+  const appDefaults = appConfig.agents?.defaults ?? {};
+  const identityKeys = {};
+  for (const key of ["workspace", "skipBootstrap"]) {
+    if (appDefaults[key] !== undefined) {
+      identityKeys[key] = appDefaults[key];
+    }
+  }
+  // The image workspace is read-only, so the pre-compaction memory flush (which writes
+  // memory/*.md into the workspace) is image-owned too: ONLY its `enabled` flag is synced.
+  const flushEnabled = appDefaults.compaction?.memoryFlush?.enabled;
+  if (Object.keys(identityKeys).length > 0 || flushEnabled !== undefined) {
+    const defaults = { ...dataConfig.agents?.defaults, ...identityKeys };
+    if (flushEnabled !== undefined) {
+      defaults.compaction = {
+        ...defaults.compaction,
+        memoryFlush: { ...defaults.compaction?.memoryFlush, enabled: flushEnabled },
+      };
+    }
+    dataConfig.agents = { ...dataConfig.agents, defaults };
   }
 
   // Write only when the content changes: an unchanged config keeps its bytes and

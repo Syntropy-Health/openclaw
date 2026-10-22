@@ -1,0 +1,20 @@
+{
+  "id": "shrine-identity",
+  "uiHints": {
+    "shrineDir": {
+      "label": "Shrine identity dir",
+      "help": "Image-owned directory holding workspace/*.md (core identity) and layers/<channel>.md (platform layers)."
+    }
+  },
+  "configSchema": {
+    "type": "object",
+    "additionalProperties": false,
+    "properties": {
+      "shrineDir": {
+        "type": "string",
+        "description": "Absolute path to the image-owned identity directory"
+      }
+    },
+    "required": ["shrineDir"]
+  }
+}

@@ -151,7 +151,7 @@ const twilioSmsPlugin = {
     }
 
     // No-medical-advice guardrail on every SMS turn (see sms-guardrail.ts for why this
-    // is prependContext and not systemPrompt). High priority so it heads the context.
+    // stays prependContext). High priority so it heads the context.
     api.on("before_agent_start", async (_event, ctx) => smsGuardrailFor(ctx), {
       priority: 250,
     });

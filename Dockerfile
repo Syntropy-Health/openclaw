@@ -61,11 +61,24 @@ RUN node scripts/fly/prepare-plugin-runtime.mjs && test -n "$(ls -A /app/.cache/
 
 # Allow non-root user to write temp files during runtime/tests.
 RUN chown -R node:node /app
+# openclaw-shrineai-identity: the agent identity (agents.defaults.workspace) is image-owned and
+# READ-ONLY to the gateway user, so no end user can talk the agent into rewriting its persona.
+# It lives under /opt, NOT /app: /app is node-owned, and write access to a parent dir is enough
+# to rename a read-only child away and replace it.
+RUN mv /app/shrine /opt/shrine && chown -R root:root /opt/shrine && chmod -R a-w,a+rX /opt/shrine
 
 # Security hardening: Run as non-root user
 # The node:22-bookworm image includes a 'node' user (uid 1000)
 # This reduces the attack surface by preventing container escape via root privileges
 USER node
+
+# Fail the build if the identity is missing, ships a first-run BOOTSTRAP.md, or is writable by
+# the user the gateway runs as (this check runs AS that user).
+RUN test -s /opt/shrine/workspace/SOUL.md && test -s /opt/shrine/workspace/AGENTS.md \
+  && test -s /opt/shrine/workspace/USER.md && test -s /opt/shrine/workspace/IDENTITY.md \
+  && test ! -e /opt/shrine/workspace/BOOTSTRAP.md \
+  && test ! -w /opt && test ! -w /opt/shrine && test ! -w /opt/shrine/workspace \
+  && test ! -w /opt/shrine/workspace/SOUL.md && test ! -e /app/shrine
 
 # Start gateway server with default config.
 # Binds to loopback (127.0.0.1) by default for security.

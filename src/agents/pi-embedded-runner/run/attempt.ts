@@ -91,6 +91,7 @@ import {
   applySystemPromptOverrideToSession,
   buildEmbeddedSystemPrompt,
   createSystemPromptOverride,
+  mergeHookSystemPrompt,
 } from "../system-prompt.js";
 import { splitSdkTools } from "../tool-split.js";
 import { describeUnknownError, mapThinkingLevel } from "../utils.js";
@@ -428,33 +429,39 @@ export async function runEmbeddedAttempt(
     });
     const ttsHint = params.config ? buildTtsSystemPromptHint(params.config) : undefined;
 
-    const appendPrompt = buildEmbeddedSystemPrompt({
-      workspaceDir: effectiveWorkspace,
-      defaultThinkLevel: params.thinkLevel,
-      reasoningLevel: params.reasoningLevel ?? "off",
-      extraSystemPrompt: params.extraSystemPrompt,
-      ownerNumbers: params.ownerNumbers,
-      reasoningTagHint,
-      heartbeatPrompt: isDefaultAgent
-        ? resolveHeartbeatPrompt(params.config?.agents?.defaults?.heartbeat?.prompt)
-        : undefined,
-      skillsPrompt,
-      docsPath: docsPath ?? undefined,
-      ttsHint,
-      workspaceNotes,
-      reactionGuidance,
-      promptMode,
-      runtimeInfo,
-      messageToolHints,
-      sandboxInfo,
-      tools,
-      modelAliasLines: buildModelAliasLines(params.config),
-      userTimezone,
-      userTime,
-      userTimeFormat,
-      contextFiles,
-      memoryCitationsMode: params.config?.memory?.citations,
-    });
+    // The early before_agent_start hook (run.ts) has already run when any hook is
+    // registered, so its systemPrompt can join the prompt at build time.
+    const buildPromptWith = (extraSystemPrompt: string | undefined) =>
+      buildEmbeddedSystemPrompt({
+        workspaceDir: effectiveWorkspace,
+        defaultThinkLevel: params.thinkLevel,
+        reasoningLevel: params.reasoningLevel ?? "off",
+        extraSystemPrompt,
+        ownerNumbers: params.ownerNumbers,
+        reasoningTagHint,
+        heartbeatPrompt: isDefaultAgent
+          ? resolveHeartbeatPrompt(params.config?.agents?.defaults?.heartbeat?.prompt)
+          : undefined,
+        skillsPrompt,
+        docsPath: docsPath ?? undefined,
+        ttsHint,
+        workspaceNotes,
+        reactionGuidance,
+        promptMode,
+        runtimeInfo,
+        messageToolHints,
+        sandboxInfo,
+        tools,
+        modelAliasLines: buildModelAliasLines(params.config),
+        userTimezone,
+        userTime,
+        userTimeFormat,
+        contextFiles,
+        memoryCitationsMode: params.config?.memory?.citations,
+      });
+    const appendPrompt = buildPromptWith(
+      mergeHookSystemPrompt(params.extraSystemPrompt, params.earlyHookResult?.systemPrompt),
+    );
     const systemPromptReport = buildSystemPromptReport({
       source: "run",
       generatedAt: Date.now(),
@@ -479,7 +486,9 @@ export async function runEmbeddedAttempt(
       tools,
     });
     const systemPromptOverride = createSystemPromptOverride(appendPrompt);
-    const systemPromptText = systemPromptOverride();
+    // `let`: the fallback hook path below may rebuild it with a late hook systemPrompt, and
+    // the length log and the llm_input hook must see the prompt the model actually gets.
+    let systemPromptText = systemPromptOverride();
 
     const sessionLock = await acquireSessionWriteLock({
       sessionFile: params.sessionFile,
@@ -898,6 +907,20 @@ export async function runEmbeddedAttempt(
           throw new Error(
             "before_agent_start requested a short-circuit on the fallback hook path; refusing to prompt the model",
           );
+        }
+        // Fallback path only: there is no early hook result (no hook was registered when
+        // run.ts ran, or every handler returned nothing or threw; the runner catches handler
+        // errors), so the hook ran here, AFTER the system prompt was applied. Rebuild with the
+        // hook's systemPrompt and re-apply, keeping systemPromptText in step.
+        if (!params.earlyHookResult) {
+          const lateSystemPrompt = mergeHookSystemPrompt(
+            params.extraSystemPrompt,
+            hookResult?.systemPrompt,
+          );
+          if (lateSystemPrompt !== params.extraSystemPrompt) {
+            systemPromptText = buildPromptWith(lateSystemPrompt);
+            applySystemPromptOverrideToSession(activeSession, systemPromptText);
+          }
         }
         {
           if (hookResult?.prependContext) {
