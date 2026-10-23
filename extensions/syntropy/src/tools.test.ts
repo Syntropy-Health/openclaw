@@ -31,6 +31,9 @@ import { createAllTools, NOT_YET_IMPLEMENTED, TOOL_DEFS } from "./tools.js";
  */
 it("NOT_YET_IMPLEMENTED is exactly the consciously-deferred set", () => {
   expect([...NOT_YET_IMPLEMENTED].sort()).toEqual([
+    "syntropy_lhm_analyze_signals",
+    "syntropy_lhm_fetch_inputs_and_outcomes",
+    "syntropy_lhm_manage_metrics",
     "syntropy_my_protocols",
     "syntropy_peptide_intake_set_fields",
   ]);
