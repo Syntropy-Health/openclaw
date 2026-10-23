@@ -119,6 +119,13 @@ export const NOT_YET_IMPLEMENTED = [
   // claim-scope), not part of the schema-governance drift sync. Move to a
   // TOOL_LOCALS entry to implement it.
   "syntropy_peptide_intake_set_fields",
+  // LHM personal n-of-1 metrics (SJ c5c9dad28, CTO #15700 U4-SJ): rostered by the
+  // schema-drift regen but DEFERRED here, the same call as SYN-272 above. Exposing them
+  // to the agent is a separate product decision (params, handler, claim scope), and
+  // manage_metrics is a health:write path that also needs a security review.
+  "syntropy_lhm_fetch_inputs_and_outcomes",
+  "syntropy_lhm_analyze_signals",
+  "syntropy_lhm_manage_metrics",
 ] as const satisfies readonly RosterToolName[];
 
 type PendingName = (typeof NOT_YET_IMPLEMENTED)[number];

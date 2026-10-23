@@ -1,6 +1,6 @@
 // AUTO-GENERATED from apps/Syntropy-Journals/schemas/manifest/*.manifest.yaml — DO NOT EDIT.
-// Provenance: SJ manifest-tree sha256 66c1c725070cdae2f223d855792cd3890d7afd4cee9ef3906206ccd761dc5c7a (12 manifest-tree files hashed; 10 live tools emitted)
-// Integrity: self sha256 e1d927bdbf7bd61c094c21022eb1db8237067c2c8dd281d8504c993891108e26
+// Provenance: SJ manifest-tree sha256 3c15fc1e1487fdee69ae9c464c4aad43ab8ca58d1980c48e842c3f193c9599f7 (15 manifest-tree files hashed; 13 live tools emitted)
+// Integrity: self sha256 ed2465d74ae201c724ce81a71ab62e008f7b2f74401595d007f66662ef921fd8
 // Regenerate in the SyntropyHealth-Applications monorepo (the parent repo that
 // pins this one as apps/openclaw): `npm run codegen:openclaw-tool-roster` in its
 // shared/schemas/ directory. The generator does not exist in this repository.
@@ -98,6 +98,42 @@ export const TOOL_ROSTER = [
     doNotCall:
       "User wants a single dimension (use ``syntropy_diet_score`` / ``syntropy_diet_gap``) or wants raw check-ins (use ``syntropy_my_checkins``).",
     availableChannels: ["web", "mobile", "whatsapp", "telegram"],
+  },
+  {
+    name: "syntropy_lhm_analyze_signals",
+    mcpToolName: "analyze_signals",
+    description:
+      "Look for associations between the user's inputs and their journal outcomes. Each candidate has a confidence tier and caveats. These are personal, observational associations, not causes.",
+    scope: "consumer",
+    whenToCall:
+      "User asks whether anything they take or do lines up with how they feel, sleep or score, in their own data.",
+    doNotCall:
+      "User asks whether something works in general (that is not what this tool answers), or wants to pin a result, which is syntropy_lhm_manage_metrics.",
+    availableChannels: ["web", "mobile"],
+  },
+  {
+    name: "syntropy_lhm_fetch_inputs_and_outcomes",
+    mcpToolName: "fetch_inputs_and_outcomes",
+    description:
+      "List your purchases or regimens and your journal outcome series, time-aligned around each regimen's start date, as personal n-of-1 inputs.",
+    scope: "consumer",
+    whenToCall:
+      "User asks what data their personal metrics would be built from, or before analysing their own inputs and outcomes.",
+    doNotCall:
+      "User wants the analysis itself, so call syntropy_lhm_analyze_signals; or wants raw check-ins, so call syntropy_my_checkins.",
+    availableChannels: ["web", "mobile"],
+  },
+  {
+    name: "syntropy_lhm_manage_metrics",
+    mcpToolName: "manage_metrics",
+    description:
+      'Pin ("add") or remove ("subtract") one analyzed metric on the user\'s dashboard. Only mid- or strong-confidence candidates can be pinned. Needs the health:write permission.',
+    scope: "consumer",
+    whenToCall:
+      "User explicitly asks to pin or remove one of the metrics that syntropy_lhm_analyze_signals returned.",
+    doNotCall:
+      "The user has not seen the analysis yet, or has not asked to change their dashboard. Never pin without their explicit request.",
+    availableChannels: ["web", "mobile"],
   },
   {
     name: "syntropy_log_checkin",
