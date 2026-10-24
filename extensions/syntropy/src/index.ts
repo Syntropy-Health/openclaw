@@ -26,12 +26,13 @@ import postgres from "postgres";
 import { TtlCache } from "./cache.js";
 import { callSyntropyTool, type SyntropyToolResult } from "./client.js";
 import { parseSyntropyConfig } from "./config.js";
-import { ensureSyntropySchema } from "./db.js";
+import { ensureSyntropySchema, readStoredToken, type StoredTokenRow } from "./db.js";
 import { createAllKgTools } from "./kg-tools.js";
 import { resolveProfileContext } from "./profile-context.js";
 import { resolveServiceAuthConfig, ServiceAuthConfigError } from "./service-auth-config.js";
 import { ServiceAuthProvider } from "./service-auth.js";
 import { deriveChannel, derivePeerId } from "./session-key.js";
+import { tokenCipherFromEnv, TokenCipherError, type TokenCipher } from "./token-cipher.js";
 import { createAllTools } from "./tools.js";
 import { createBraintrustTracer, type TracedFn, type Tracer } from "./tracer.js";
 import { createSyntropyVault, vaultRpcsInstalled, type SyntropyVault } from "./vault.js";
@@ -55,14 +56,16 @@ interface ResolvedUser {
   authToken: string;
 }
 
-async function resolveUser(
+export async function resolveUser(
   sql: postgres.Sql,
   vault: SyntropyVault | null,
   channel: string,
   peerId: string,
+  cipher: TokenCipher | null = null,
+  onTokenError?: (code: string) => void,
 ): Promise<ResolvedUser | null> {
   const rows = await sql`
-    SELECT u.id, u.external_id, st.auth_token, st.vault_secret_name
+    SELECT u.id, u.external_id, st.auth_token, st.vault_secret_name, st.token_ciphertext
     FROM lp_users u
     JOIN lp_user_channels uc ON uc.user_id = u.id
     LEFT JOIN syntropy_tokens st ON st.user_id = u.id
@@ -73,13 +76,16 @@ async function resolveUser(
   const row = rows[0];
   if (!row?.external_id) return null;
 
-  // Prefer vault path (post-migration); fall back to legacy plaintext (pre-migration).
-  let authToken: string | null = null;
-  const vaultSecretName = row.vault_secret_name as string | null;
-  if (vaultSecretName && vault) {
-    authToken = await vault.get(vaultSecretName);
-  } else if (row.auth_token) {
-    authToken = row.auth_token as string;
+  // Ciphertext first, then Vault, then legacy plaintext (db.ts readStoredToken).
+  // A stored token that cannot be opened fails CLOSED and LOUD: the user is
+  // treated as unpaired for this turn, and the named code is reported. The token
+  // never appears in the report.
+  let authToken: string | null;
+  try {
+    authToken = await readStoredToken(row as StoredTokenRow, row.id as string, vault, cipher);
+  } catch (err) {
+    onTokenError?.(err instanceof TokenCipherError ? err.code : "unreadable");
+    return null;
   }
 
   if (!authToken) return null;
@@ -356,6 +362,11 @@ const syntropyPlugin = {
     // the legacy plaintext `auth_token` column path when they aren't
     // installed yet (pre-migration deploys, local dev).
     let vault: SyntropyVault | null = null;
+    // App-side token encryption (Cloud SQL move): set when OPENCLAW_TOKEN_KEK_NAME
+    // and OPENCLAW_TOKEN_DEK_WRAPPED are both present. A half-set config, or a KEK
+    // that will not unwrap the DEK, throws a named error, and storage init retries
+    // and fails closed (no tokens read or written) instead of degrading.
+    let cipher: TokenCipher | null = null;
 
     // Schema + vault detection, RETRIED with backoff. This ran once at register
     // and a failure was final: vault stayed null, so vault-stored tokens were
@@ -364,6 +375,10 @@ const syntropyPlugin = {
     const ensureStorage = createRetryingInit(
       async () => {
         await ensureSyntropySchema(sql);
+        cipher = await tokenCipherFromEnv();
+        if (cipher) {
+          api.logger.info(`syntropy: token store = app cipher (key id ${cipher.keyId})`);
+        }
         if (await vaultRpcsInstalled(sql)) {
           vault = createSyntropyVault(sql);
           api.logger.info("syntropy: vault=supabase (RPCs installed)");
@@ -431,7 +446,11 @@ const syntropyPlugin = {
 
           const cacheKey = `${channel}:${peerId}`;
           await ensureStorage();
-          const user = await resolveUser(sql, vault, channel, peerId);
+          const user = await resolveUser(sql, vault, channel, peerId, cipher, (code) =>
+            api.logger.error(
+              `syntropy: stored token unreadable (${code}); user treated as unpaired`,
+            ),
+          );
 
           return await decideProfileInjection({
             user,

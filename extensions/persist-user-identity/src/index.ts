@@ -7,6 +7,7 @@ import { evictClerkSessionCache } from "../../../src/gateway/clerk-session-valid
 // convention can't drift across the three identity hooks (oc-hygiene #7).
 import { safeErr } from "../../shared/log-redact.js";
 import { deriveChannel, deriveIdentityPeer } from "../../shared/session-key.js";
+import { tokenCipherFromEnv, type TokenCipher } from "../../syntropy/src/token-cipher.js";
 // SYN-281: lazily-resolved vault client for the pairing token write. Deep
 // import into the syntropy extension mirrors db.ts's own upsertSyntropyToken
 // dependency (extension→extension, both under extensions/).
@@ -65,6 +66,8 @@ const persistUserIdentityPlugin = {
     // (dev only). Read via the getVault getter passed to the commands, NEVER
     // captured as a value — capturing here would pin null forever.
     let vault: SyntropyVault | null = null;
+    // App-side token cipher: loaded in ensureReady(), read via the getCipher getter.
+    let cipher: TokenCipher | null = null;
 
     // Connect + schema + vault detection, RETRIED with backoff after a failure
     // (was cached for the life of the process — a transient boot failure turned
@@ -73,6 +76,12 @@ const persistUserIdentityPlugin = {
       async () => {
         await sql`SELECT 1`;
         await ensureUserSchema(sql);
+        cipher = await tokenCipherFromEnv();
+        if (cipher) {
+          api.logger.info(
+            `persist-user-identity: Syntropy token storage = app cipher (key id ${cipher.keyId})`,
+          );
+        }
         // SYN-281: resolve the vault client once, here. RPCs installed → vault
         // (token-at-rest encryption); absent → legacy plaintext path, dev only.
         if (await vaultRpcsInstalled(sql)) {
@@ -162,6 +171,7 @@ const persistUserIdentityPlugin = {
       // Getter, not value: vault is resolved lazily in ensureReady() AFTER this
       // registration. Passing `vault` here would capture null permanently.
       getVault: () => vault,
+      getCipher: () => cipher,
       pendingIdentify,
     });
 

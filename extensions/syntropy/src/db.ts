@@ -15,9 +15,18 @@
  *
  * One row per `lp_users.id`. Re-pairing replaces the existing row's
  * vault secret in-place; secrets are rotated in the Vault, not duplicated.
+ *
+ * Cloud SQL move (CTO #16611): when a `TokenCipher` is configured
+ * (token-cipher.ts), new writes store ONLY `token_ciphertext`: an AES-256-GCM
+ * envelope bound to the user id, under a KMS-wrapped DEK. Reads are dual for one
+ * release: ciphertext first, then the Vault reference, then legacy plaintext.
+ * With neither a cipher nor the Vault, a write REFUSES unless
+ * OPENCLAW_ALLOW_PLAINTEXT_TOKENS=1 (dev only), so a database without Vault
+ * (Cloud SQL) can never silently receive plaintext tokens.
  */
 
 import type postgres from "postgres";
+import type { TokenCipher } from "./token-cipher.js";
 import type { SyntropyVault } from "./vault.js";
 import { secretNameForUser } from "./vault.js";
 
@@ -43,6 +52,53 @@ export async function ensureSyntropySchema(sql: postgres.Sql): Promise<void> {
   // add the new column. CREATE TABLE IF NOT EXISTS above is a no-op there.
   await sql`ALTER TABLE syntropy_tokens ALTER COLUMN auth_token DROP NOT NULL`;
   await sql`ALTER TABLE syntropy_tokens ADD COLUMN IF NOT EXISTS vault_secret_name TEXT`;
+  await sql`ALTER TABLE syntropy_tokens ADD COLUMN IF NOT EXISTS token_ciphertext TEXT`;
+}
+
+/** Thrown when no protected store is available and plaintext is not explicitly allowed. */
+export class PlaintextTokenRefusedError extends Error {
+  constructor() {
+    super(
+      "syntropy token store: no cipher and no Vault configured; refusing to store a plaintext token " +
+        "(set OPENCLAW_TOKEN_KEK_NAME + OPENCLAW_TOKEN_DEK_WRAPPED, or OPENCLAW_ALLOW_PLAINTEXT_TOKENS=1 for local dev)",
+    );
+    this.name = "PlaintextTokenRefusedError";
+  }
+}
+
+function plaintextAllowed(env: NodeJS.ProcessEnv = process.env): boolean {
+  return (env.OPENCLAW_ALLOW_PLAINTEXT_TOKENS ?? "").trim() === "1";
+}
+
+/** A stored row's token fields, as selected from `syntropy_tokens`. */
+export type StoredTokenRow = {
+  token_ciphertext?: string | null;
+  vault_secret_name?: string | null;
+  auth_token?: string | null;
+};
+
+/**
+ * Resolve a stored row to its plaintext token. Order: ciphertext, then Vault,
+ * then legacy plaintext. A ciphertext that cannot be opened (tamper, wrong or
+ * rotated key, no cipher loaded) THROWS a named error: it never falls through to
+ * an older copy and never reads as "not paired".
+ */
+export async function readStoredToken(
+  row: StoredTokenRow,
+  userId: string,
+  vault: SyntropyVault | null,
+  cipher: TokenCipher | null,
+): Promise<string | null> {
+  if (row.token_ciphertext) {
+    if (!cipher) {
+      throw new Error("syntropy token store: row is encrypted but no token cipher is loaded");
+    }
+    return cipher.open(userId, row.token_ciphertext);
+  }
+  if (row.vault_secret_name && vault) {
+    return await vault.get(row.vault_secret_name);
+  }
+  return row.auth_token ?? null;
 }
 
 // ---------------------------------------------------------------------------
@@ -72,7 +128,22 @@ export async function upsertSyntropyToken(
   userId: string,
   authToken: string,
   origin = "pairing",
+  cipher: TokenCipher | null = null,
 ): Promise<void> {
+  if (cipher) {
+    const envelope = cipher.seal(userId, authToken);
+    await sql`
+      INSERT INTO syntropy_tokens (user_id, token_ciphertext, vault_secret_name, auth_token, origin)
+      VALUES (${userId}, ${envelope}, NULL, NULL, ${origin})
+      ON CONFLICT (user_id) DO UPDATE
+        SET token_ciphertext  = EXCLUDED.token_ciphertext,
+            vault_secret_name = NULL,
+            auth_token        = NULL,
+            origin            = EXCLUDED.origin,
+            updated_at        = now()
+    `;
+    return;
+  }
   if (vault) {
     const name = secretNameForUser(userId);
     await vault.set(name, authToken);
@@ -88,7 +159,10 @@ export async function upsertSyntropyToken(
     return;
   }
 
-  // Legacy path — dev only.
+  // Legacy path: dev only, and only with an explicit opt-in.
+  if (!plaintextAllowed()) {
+    throw new PlaintextTokenRefusedError();
+  }
   await sql`
     INSERT INTO syntropy_tokens (user_id, auth_token, origin)
     VALUES (${userId}, ${authToken}, ${origin})
@@ -116,21 +190,15 @@ export async function getSyntropyToken(
   sql: postgres.Sql,
   vault: SyntropyVault | null,
   userId: string,
+  cipher: TokenCipher | null = null,
 ): Promise<string | null> {
   const rows = await sql`
-    SELECT auth_token, vault_secret_name
+    SELECT auth_token, vault_secret_name, token_ciphertext
     FROM syntropy_tokens
     WHERE user_id = ${userId}
     LIMIT 1
   `;
   const row = rows[0];
   if (!row) return null;
-
-  const vaultSecretName = row.vault_secret_name as string | null;
-  if (vaultSecretName && vault) {
-    return await vault.get(vaultSecretName);
-  }
-
-  // Legacy plaintext fallback.
-  return (row.auth_token as string | null) ?? null;
+  return readStoredToken(row as StoredTokenRow, userId, vault, cipher);
 }
