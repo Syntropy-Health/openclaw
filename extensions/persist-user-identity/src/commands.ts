@@ -55,7 +55,7 @@ export type IdentityCommandDeps = {
    * App-side token cipher (Cloud SQL move), resolved lazily like the vault.
    * When it returns a cipher, the token is stored encrypted and never via the Vault or plaintext.
    */
-  getCipher?: () => TokenCipher | null;
+  getCipher?: () => Promise<TokenCipher | null>;
   /** Pending !identify results so !verify can use the email as user_identifier. */
   pendingIdentify: Map<string, { email: string; userId: string; expiresAt: number }>;
 };
@@ -166,7 +166,7 @@ export function registerIdentityCommands(api: OpenClawPluginApi, deps: IdentityC
             user.id,
             verified.authToken,
             "pairing",
-            deps.getCipher?.() ?? null,
+            deps.getCipher ? await deps.getCipher() : null,
           );
           api.logger.info(
             `persist-user-identity: stored Syntropy auth token for user ${logToken(user.id)}`,

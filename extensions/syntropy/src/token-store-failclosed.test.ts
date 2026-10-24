@@ -12,7 +12,7 @@ function sqlReturning(rows: unknown[]) {
 }
 
 describe("resolveUser with the app cipher", () => {
-  const cipher = new TokenCipher(randomBytes(32), "kid-r");
+  const cipher = new TokenCipher(randomBytes(32));
 
   it("GREEN: an encrypted row resolves to its token", async () => {
     const row = { id: "u1", external_id: "user_ext", token_ciphertext: cipher.seal("u1", TOKEN) };
@@ -39,13 +39,60 @@ describe("resolveUser with the app cipher", () => {
   });
 
   it("RED: a wrong or rotated key fails closed with a named code", async () => {
-    const other = new TokenCipher(randomBytes(32), "kid-other");
+    const other = new TokenCipher(randomBytes(32));
     const row = { id: "u1", external_id: "user_ext", token_ciphertext: other.seal("u1", TOKEN) };
     const onTokenError = vi.fn();
     expect(
       await resolveUser(sqlReturning([row]), null, "sms", "peer", cipher, onTokenError),
     ).toBeNull();
     expect(onTokenError).toHaveBeenCalledWith("key_mismatch");
+  });
+});
+
+describe("resolveUser review fixes", () => {
+  const cipher = new TokenCipher(randomBytes(32));
+
+  it("RED: a Vault RPC/network error PROPAGATES (a blip must not unpair a paired user)", async () => {
+    const vault = {
+      get: vi.fn(async () => {
+        throw new Error("ECONNRESET");
+      }),
+    } as never;
+    const row = { id: "u1", external_id: "user_ext", vault_secret_name: "syntropy_user_u1" };
+    const onTokenError = vi.fn();
+    await expect(
+      resolveUser(sqlReturning([row]), vault, "sms", "peer", null, onTokenError),
+    ).rejects.toThrow("ECONNRESET");
+    expect(onTokenError).not.toHaveBeenCalled();
+  });
+
+  it("RED: a Vault reference with no Vault reports vault_unavailable (loud), never silent", async () => {
+    const row = { id: "u1", external_id: "user_ext", vault_secret_name: "syntropy_user_u1" };
+    const onTokenError = vi.fn();
+    expect(
+      await resolveUser(sqlReturning([row]), null, "sms", "peer", cipher, onTokenError),
+    ).toBeNull();
+    expect(onTokenError).toHaveBeenCalledWith("vault_unavailable");
+  });
+
+  it("GREEN: a Vault row read with a cipher loaded is migrated to ciphertext (no plaintext written)", async () => {
+    const calls: Array<{ query: string; params: unknown[] }> = [];
+    const sql = vi.fn((strings: TemplateStringsArray, ...params: unknown[]) => {
+      calls.push({ query: strings.join("$?"), params });
+      return Promise.resolve(
+        calls.length === 1
+          ? [{ id: "u1", external_id: "user_ext", vault_secret_name: "syntropy_user_u1" }]
+          : [],
+      );
+    }) as never;
+    const vault = { get: vi.fn(async () => TOKEN) } as never;
+    const onMigrate = vi.fn();
+    const user = await resolveUser(sql, vault, "sms", "peer", cipher, undefined, onMigrate);
+    expect(user?.authToken).toBe(TOKEN);
+    expect(onMigrate).toHaveBeenCalledWith(true);
+    expect(calls[1]!.query).toMatch(/UPDATE syntropy_tokens/);
+    expect(JSON.stringify(calls[1]!.params)).not.toContain(TOKEN);
+    expect(cipher.open("u1", calls[1]!.params[0] as string)).toBe(TOKEN);
   });
 });
 
@@ -73,10 +120,15 @@ describe("log guard: the token and key never reach a log line", () => {
       const lines = fs.readFileSync(path.join(root, rel), "utf8").split("\n");
       const offenders: string[] = [];
       for (let i = 0; i < lines.length; i++) {
-        if (!/logger\.(info|warn|error|debug)\(/.test(lines[i])) continue;
+        if (
+          !/(logger\.(info|warn|error|debug|log)|console\.(log|info|warn|error|debug))\(/.test(
+            lines[i],
+          )
+        )
+          continue;
         // a log call can span a few lines: inspect it up to the closing `);`
         let stmt = "";
-        for (let j = i; j < Math.min(lines.length, i + 6); j++) {
+        for (let j = i; j < Math.min(lines.length, i + 15); j++) {
           stmt += lines[j];
           if (lines[j].includes(");")) break;
         }

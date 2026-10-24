@@ -26,7 +26,7 @@
  */
 
 import type postgres from "postgres";
-import type { TokenCipher } from "./token-cipher.js";
+import { legacyReadsAllowed, TokenCipherError, type TokenCipher } from "./token-cipher.js";
 import type { SyntropyVault } from "./vault.js";
 import { secretNameForUser } from "./vault.js";
 
@@ -83,22 +83,63 @@ export type StoredTokenRow = {
  * rotated key, no cipher loaded) THROWS a named error: it never falls through to
  * an older copy and never reads as "not paired".
  */
+export type TokenSource = "cipher" | "vault" | "legacy";
+
+export async function readStoredTokenWithSource(
+  row: StoredTokenRow,
+  userId: string,
+  vault: SyntropyVault | null,
+  cipher: TokenCipher | null,
+): Promise<{ token: string; source: TokenSource } | null> {
+  if (row.token_ciphertext) {
+    if (!cipher) throw new TokenCipherError("no_cipher");
+    return { token: cipher.open(userId, row.token_ciphertext), source: "cipher" };
+  }
+  const hasLegacy = Boolean(row.vault_secret_name || row.auth_token);
+  // Once every row is ciphertext, unencrypted rows are refused: a DB writer cannot
+  // downgrade a user by clearing the ciphertext and planting a token in an old column.
+  if (hasLegacy && cipher && !legacyReadsAllowed()) {
+    throw new TokenCipherError("legacy_read_disabled");
+  }
+  if (row.vault_secret_name && vault) {
+    const token = await vault.get(row.vault_secret_name);
+    return token ? { token, source: "vault" } : null;
+  }
+  if (row.vault_secret_name && !row.auth_token) {
+    // A Vault reference with no Vault and no legacy copy (e.g. after the Cloud SQL move) is a
+    // named failure, not a silent "not paired". A transition-era row that still carries a
+    // legacy copy keeps its old dev-mode behaviour and reads that copy.
+    throw new TokenCipherError("vault_unavailable");
+  }
+  return row.auth_token ? { token: row.auth_token, source: "legacy" } : null;
+}
+
 export async function readStoredToken(
   row: StoredTokenRow,
   userId: string,
   vault: SyntropyVault | null,
   cipher: TokenCipher | null,
 ): Promise<string | null> {
-  if (row.token_ciphertext) {
-    if (!cipher) {
-      throw new Error("syntropy token store: row is encrypted but no token cipher is loaded");
-    }
-    return cipher.open(userId, row.token_ciphertext);
-  }
-  if (row.vault_secret_name && vault) {
-    return await vault.get(row.vault_secret_name);
-  }
-  return row.auth_token ?? null;
+  return (await readStoredTokenWithSource(row, userId, vault, cipher))?.token ?? null;
+}
+
+/**
+ * Re-encrypt an unencrypted (Vault / legacy) token in place the first time it is read
+ * with a cipher loaded. This migrates rows lazily and shrinks the dual-read window.
+ * Best-effort: callers log a failure and keep the token they already read.
+ */
+export async function migrateTokenToCipher(
+  sql: postgres.Sql,
+  userId: string,
+  token: string,
+  cipher: TokenCipher,
+): Promise<void> {
+  const envelope = cipher.seal(userId, token);
+  await sql`
+    UPDATE syntropy_tokens
+    SET token_ciphertext = ${envelope}, vault_secret_name = NULL, auth_token = NULL, updated_at = now()
+    WHERE user_id = ${userId}
+  `;
 }
 
 // ---------------------------------------------------------------------------
@@ -153,6 +194,7 @@ export async function upsertSyntropyToken(
       ON CONFLICT (user_id) DO UPDATE
         SET vault_secret_name = EXCLUDED.vault_secret_name,
             auth_token        = NULL,
+            token_ciphertext  = NULL,
             origin            = EXCLUDED.origin,
             updated_at        = now()
     `;
@@ -167,9 +209,10 @@ export async function upsertSyntropyToken(
     INSERT INTO syntropy_tokens (user_id, auth_token, origin)
     VALUES (${userId}, ${authToken}, ${origin})
     ON CONFLICT (user_id) DO UPDATE
-      SET auth_token = EXCLUDED.auth_token,
-          origin     = EXCLUDED.origin,
-          updated_at = now()
+      SET auth_token       = EXCLUDED.auth_token,
+          token_ciphertext = NULL,
+          origin           = EXCLUDED.origin,
+          updated_at       = now()
   `;
 }
 

@@ -23,6 +23,7 @@ import { randomBytes } from "node:crypto";
 import {
   ensureSyntropySchema,
   getSyntropyToken,
+  migrateTokenToCipher,
   PlaintextTokenRefusedError,
   readStoredToken,
   upsertSyntropyToken,
@@ -211,7 +212,7 @@ describe("getSyntropyToken", () => {
 describe("app cipher store (Cloud SQL move, CTO #16611)", () => {
   const TOKEN = "sj_cipherpath_supersecretlongpart_42";
   const USER = "user-uuid-cipher";
-  const cipher = new TokenCipher(randomBytes(32), "kid-test");
+  const cipher = new TokenCipher(randomBytes(32));
 
   it("RED: a 'DB dump' (every SQL parameter written) contains no plaintext token", async () => {
     const { sql, calls } = makeMockSql();
@@ -274,11 +275,11 @@ describe("app cipher store (Cloud SQL move, CTO #16611)", () => {
   it("RED: an encrypted row with no cipher loaded throws, never reads as 'not paired'", async () => {
     await expect(
       readStoredToken({ token_ciphertext: cipher.seal(USER, TOKEN) }, USER, null, null),
-    ).rejects.toThrow(/no token cipher is loaded/);
+    ).rejects.toMatchObject({ code: "no_cipher" });
   });
 
   it("RED: a row sealed under a rotated-away DEK fails with key_mismatch (named)", async () => {
-    const old = new TokenCipher(randomBytes(32), "kid-old");
+    const old = new TokenCipher(randomBytes(32));
     await expect(
       readStoredToken({ token_ciphertext: old.seal(USER, TOKEN) }, USER, null, cipher),
     ).rejects.toBeInstanceOf(TokenCipherError);
@@ -290,5 +291,70 @@ describe("app cipher store (Cloud SQL move, CTO #16611)", () => {
     ]);
     expect(await getSyntropyToken(sql, null, USER, cipher)).toBe(TOKEN);
     expect(calls[0]!.query).toMatch(/token_ciphertext/);
+  });
+});
+
+describe("review fixes (QG round on the token cipher)", () => {
+  const TOKEN = "sj_reviewfix_supersecret_part_9";
+  const USER = "user-uuid-review";
+  const cipher = new TokenCipher(randomBytes(32));
+
+  it("RED (re-pair after a backout): the Vault write clears token_ciphertext", async () => {
+    const { sql, calls } = makeMockSql();
+    await upsertSyntropyToken(sql, makeMockVault(), USER, TOKEN, "pairing", null);
+    expect(calls[0]!.query).toMatch(/token_ciphertext\s+= NULL/);
+  });
+
+  it("RED (re-pair after a backout): the legacy write clears token_ciphertext", async () => {
+    const { sql, calls } = makeMockSql();
+    vi.stubEnv("OPENCLAW_ALLOW_PLAINTEXT_TOKENS", "1");
+    try {
+      await upsertSyntropyToken(sql, null, USER, TOKEN, "pairing", null);
+    } finally {
+      vi.unstubAllEnvs();
+    }
+    expect(calls[0]!.query).toMatch(/token_ciphertext\s+= NULL/);
+  });
+
+  it("RED: a Vault reference with no Vault is a NAMED failure, not a silent 'not paired'", async () => {
+    await expect(
+      readStoredToken({ vault_secret_name: "syntropy_user_x" }, USER, null, null),
+    ).rejects.toMatchObject({
+      code: "vault_unavailable",
+    });
+  });
+
+  it("RED (downgrade): with a cipher loaded and legacy reads OFF, an unencrypted row is refused", async () => {
+    vi.stubEnv("OPENCLAW_TOKEN_LEGACY_READ", "0");
+    try {
+      await expect(
+        readStoredToken({ auth_token: "planted" }, USER, null, cipher),
+      ).rejects.toMatchObject({
+        code: "legacy_read_disabled",
+      });
+      await expect(
+        readStoredToken(
+          { vault_secret_name: "syntropy_user_x" },
+          USER,
+          makeMockVault({ syntropy_user_x: "v" }),
+          cipher,
+        ),
+      ).rejects.toMatchObject({ code: "legacy_read_disabled" });
+      // an encrypted row still reads
+      expect(
+        await readStoredToken({ token_ciphertext: cipher.seal(USER, TOKEN) }, USER, null, cipher),
+      ).toBe(TOKEN);
+    } finally {
+      vi.unstubAllEnvs();
+    }
+  });
+
+  it("migrateTokenToCipher writes only ciphertext (no plaintext in any parameter) and NULLs the old columns", async () => {
+    const { sql, calls } = makeMockSql();
+    await migrateTokenToCipher(sql, USER, TOKEN, cipher);
+    expect(JSON.stringify(calls.map((c) => c.params))).not.toContain(TOKEN);
+    expect(calls[0]!.query).toMatch(/UPDATE syntropy_tokens/);
+    expect(calls[0]!.query).toMatch(/vault_secret_name = NULL, auth_token = NULL/);
+    expect(cipher.open(USER, calls[0]!.params[0] as string)).toBe(TOKEN);
   });
 });

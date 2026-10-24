@@ -26,7 +26,12 @@ import postgres from "postgres";
 import { TtlCache } from "./cache.js";
 import { callSyntropyTool, type SyntropyToolResult } from "./client.js";
 import { parseSyntropyConfig } from "./config.js";
-import { ensureSyntropySchema, readStoredToken, type StoredTokenRow } from "./db.js";
+import {
+  ensureSyntropySchema,
+  migrateTokenToCipher,
+  readStoredTokenWithSource,
+  type StoredTokenRow,
+} from "./db.js";
 import { createAllKgTools } from "./kg-tools.js";
 import { resolveProfileContext } from "./profile-context.js";
 import { resolveServiceAuthConfig, ServiceAuthConfigError } from "./service-auth-config.js";
@@ -63,6 +68,7 @@ export async function resolveUser(
   peerId: string,
   cipher: TokenCipher | null = null,
   onTokenError?: (code: string) => void,
+  onMigrate?: (ok: boolean) => void,
 ): Promise<ResolvedUser | null> {
   const rows = await sql`
     SELECT u.id, u.external_id, st.auth_token, st.vault_secret_name, st.token_ciphertext
@@ -80,15 +86,29 @@ export async function resolveUser(
   // A stored token that cannot be opened fails CLOSED and LOUD: the user is
   // treated as unpaired for this turn, and the named code is reported. The token
   // never appears in the report.
-  let authToken: string | null;
+  // Only a token-store failure (TokenCipherError: tamper, wrong key, no cipher, Vault reference
+  // without a Vault) is caught here. Any OTHER error (a Vault RPC or network blip) propagates as
+  // before, so a transient failure does not tell a paired user to re-pair.
+  let read: Awaited<ReturnType<typeof readStoredTokenWithSource>>;
   try {
-    authToken = await readStoredToken(row as StoredTokenRow, row.id as string, vault, cipher);
+    read = await readStoredTokenWithSource(row as StoredTokenRow, row.id as string, vault, cipher);
   } catch (err) {
-    onTokenError?.(err instanceof TokenCipherError ? err.code : "unreadable");
+    if (!(err instanceof TokenCipherError)) throw err;
+    onTokenError?.(err.code);
     return null;
   }
 
-  if (!authToken) return null;
+  if (!read) return null;
+  const authToken = read.token;
+  // Lazy migration: an unencrypted row read with a cipher loaded is re-encrypted in place.
+  if (cipher && read.source !== "cipher") {
+    try {
+      await migrateTokenToCipher(sql, row.id as string, authToken, cipher);
+      onMigrate?.(true);
+    } catch {
+      onMigrate?.(false);
+    }
+  }
 
   return {
     userId: row.id as string,
@@ -362,11 +382,30 @@ const syntropyPlugin = {
     // the legacy plaintext `auth_token` column path when they aren't
     // installed yet (pre-migration deploys, local dev).
     let vault: SyntropyVault | null = null;
-    // App-side token encryption (Cloud SQL move): set when OPENCLAW_TOKEN_KEK_NAME
-    // and OPENCLAW_TOKEN_DEK_WRAPPED are both present. A half-set config, or a KEK
-    // that will not unwrap the DEK, throws a named error, and storage init retries
-    // and fails closed (no tokens read or written) instead of degrading.
-    let cipher: TokenCipher | null = null;
+    // App-side token encryption (Cloud SQL move): on when OPENCLAW_TOKEN_KEK_NAME and
+    // OPENCLAW_TOKEN_DEK_WRAPPED are both present. Loaded per lookup (memoized), NOT inside
+    // ensureStorage: a cipher failure must disable only encrypted rows, not the Vault path
+    // or the whole plugin. While it fails, encrypted rows report no_cipher (unpaired + loud).
+    let cipherState = "";
+    const currentCipher = async (): Promise<TokenCipher | null> => {
+      try {
+        const c = await tokenCipherFromEnv();
+        if (c && cipherState !== `ok:${c.keyId}`) {
+          cipherState = `ok:${c.keyId}`;
+          api.logger.info(`syntropy: token store = app cipher (key id ${c.keyId})`);
+        }
+        return c;
+      } catch (err) {
+        const code = err instanceof TokenCipherError ? err.code : "error";
+        if (cipherState !== code) {
+          cipherState = code;
+          api.logger.error(
+            `syntropy: token cipher DISABLED (${code}); encrypted tokens unreadable`,
+          );
+        }
+        return null;
+      }
+    };
 
     // Schema + vault detection, RETRIED with backoff. This ran once at register
     // and a failure was final: vault stayed null, so vault-stored tokens were
@@ -375,17 +414,13 @@ const syntropyPlugin = {
     const ensureStorage = createRetryingInit(
       async () => {
         await ensureSyntropySchema(sql);
-        cipher = await tokenCipherFromEnv();
-        if (cipher) {
-          api.logger.info(`syntropy: token store = app cipher (key id ${cipher.keyId})`);
-        }
         if (await vaultRpcsInstalled(sql)) {
           vault = createSyntropyVault(sql);
           api.logger.info("syntropy: vault=supabase (RPCs installed)");
         } else {
           vault = null;
           api.logger.warn(
-            "syntropy: vault=legacy-plaintext — install supabase-migrations/0001 to enable vault path",
+            "syntropy: vault absent — token writes need the app cipher (or OPENCLAW_ALLOW_PLAINTEXT_TOKENS=1, dev only)",
           );
         }
       },
@@ -446,10 +481,22 @@ const syntropyPlugin = {
 
           const cacheKey = `${channel}:${peerId}`;
           await ensureStorage();
-          const user = await resolveUser(sql, vault, channel, peerId, cipher, (code) =>
-            api.logger.error(
-              `syntropy: stored token unreadable (${code}); user treated as unpaired`,
-            ),
+          const user = await resolveUser(
+            sql,
+            vault,
+            channel,
+            peerId,
+            await currentCipher(),
+            (code) =>
+              api.logger.error(
+                `syntropy: stored token unreadable (${code}); user treated as unpaired`,
+              ),
+            (ok) =>
+              ok
+                ? api.logger.info("syntropy: migrated one stored token to ciphertext")
+                : api.logger.warn(
+                    "syntropy: could not migrate a stored token to ciphertext; kept as is",
+                  ),
           );
 
           return await decideProfileInjection({
