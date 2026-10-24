@@ -7,6 +7,7 @@ import { evictClerkSessionCache } from "../../../src/gateway/clerk-session-valid
 // convention can't drift across the three identity hooks (oc-hygiene #7).
 import { safeErr } from "../../shared/log-redact.js";
 import { deriveChannel, deriveIdentityPeer } from "../../shared/session-key.js";
+import { tokenCipherFromEnv } from "../../syntropy/src/token-cipher.js";
 // SYN-281: lazily-resolved vault client for the pairing token write. Deep
 // import into the syntropy extension mirrors db.ts's own upsertSyntropyToken
 // dependency (extension→extension, both under extensions/).
@@ -81,8 +82,8 @@ const persistUserIdentityPlugin = {
         } else {
           vault = null;
           api.logger.warn(
-            "persist-user-identity: Syntropy token storage = LEGACY PLAINTEXT (vault RPCs " +
-              "absent; install supabase-migrations to enable encryption at rest)",
+            "persist-user-identity: Syntropy Vault RPCs absent: token writes need the app cipher " +
+              "(OPENCLAW_TOKEN_KEK_NAME + OPENCLAW_TOKEN_DEK_WRAPPED), or OPENCLAW_ALLOW_PLAINTEXT_TOKENS=1 for dev",
           );
         }
         api.logger.info("persist-user-identity: schema ready");
@@ -162,6 +163,9 @@ const persistUserIdentityPlugin = {
       // Getter, not value: vault is resolved lazily in ensureReady() AFTER this
       // registration. Passing `vault` here would capture null permanently.
       getVault: () => vault,
+      // Loaded at the token write ONLY (never in ensureReady): a cipher misconfig or a KMS
+      // failure fails just that write (surfaced as tokenPersistFailed), not identity binding.
+      getCipher: () => tokenCipherFromEnv(),
       pendingIdentify,
     });
 

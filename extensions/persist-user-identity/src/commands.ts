@@ -16,6 +16,7 @@ import { logToken, maskPeerForDisplay, redactPeer, safeErr } from "../../shared/
 // SYN-281: the SINGLE vault-aware writer of `syntropy_tokens`. This consumer
 // must delegate to it, never hand-roll a second (vault-blind) INSERT.
 import { upsertSyntropyToken } from "../../syntropy/src/db.js";
+import type { TokenCipher } from "../../syntropy/src/token-cipher.js";
 import type { SyntropyVault } from "../../syntropy/src/vault.js";
 import {
   createUser,
@@ -50,6 +51,11 @@ export type IdentityCommandDeps = {
    * path (the exact defect this closes). Guarded by an executable test.
    */
   getVault: () => SyntropyVault | null;
+  /**
+   * App-side token cipher (Cloud SQL move), resolved lazily like the vault.
+   * When it returns a cipher, the token is stored encrypted and never via the Vault or plaintext.
+   */
+  getCipher?: () => Promise<TokenCipher | null>;
   /** Pending !identify results so !verify can use the email as user_identifier. */
   pendingIdentify: Map<string, { email: string; userId: string; expiresAt: number }>;
 };
@@ -154,7 +160,14 @@ export function registerIdentityCommands(api: OpenClawPluginApi, deps: IdentityC
       let tokenPersistFailed = false;
       if (verified.authToken) {
         try {
-          await upsertSyntropyToken(sql, deps.getVault(), user.id, verified.authToken, "pairing");
+          await upsertSyntropyToken(
+            sql,
+            deps.getVault(),
+            user.id,
+            verified.authToken,
+            "pairing",
+            deps.getCipher ? await deps.getCipher() : null,
+          );
           api.logger.info(
             `persist-user-identity: stored Syntropy auth token for user ${logToken(user.id)}`,
           );
