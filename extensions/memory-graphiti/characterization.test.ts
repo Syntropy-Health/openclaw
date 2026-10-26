@@ -146,11 +146,16 @@ describe("characterization: createClient backend precedence", () => {
 
 const searchFactsSpy = vi.spyOn(GraphitiRestClient.prototype, "searchFacts");
 const addMessagesSpy = vi.spyOn(GraphitiRestClient.prototype, "addMessages");
+// Capture's read-back goes through getEpisodes: stub it so no fetch ever fires.
+const getEpisodesSpy = vi.spyOn(GraphitiRestClient.prototype, "getEpisodes");
+/** Capture is fire-and-forget: let it run before asserting. */
+const flush = () => new Promise((r) => setTimeout(r, 0));
 
 describe("characterization: before_agent_start recall hook", () => {
   beforeEach(() => {
     searchFactsSpy.mockReset().mockResolvedValue([]);
     addMessagesSpy.mockReset().mockResolvedValue(undefined);
+    getEpisodesSpy.mockReset().mockResolvedValue([]);
   });
 
   afterEach(() => {
@@ -228,6 +233,7 @@ describe("characterization: agent_end capture hook", () => {
   beforeEach(() => {
     searchFactsSpy.mockReset().mockResolvedValue([]);
     addMessagesSpy.mockReset().mockResolvedValue(undefined);
+    getEpisodesSpy.mockReset().mockResolvedValue([]);
   });
 
   afterEach(() => {
@@ -257,6 +263,7 @@ describe("characterization: agent_end capture hook", () => {
       },
     );
 
+    await flush();
     expect(addMessagesSpy).toHaveBeenCalledOnce();
     const [groupId, captured] = addMessagesSpy.mock.calls[0] as [
       string,
@@ -268,6 +275,8 @@ describe("characterization: agent_end capture hook", () => {
     expect(captured).toHaveLength(2);
     expect(captured.map((m) => m.content)).toEqual(["Hello", "Hi!"]);
     expect(captured.map((m) => m.role_type)).toEqual(["user", "assistant"]);
+    // role mapping: assistant -> "openclaw"; user -> "user"
+    expect(captured.map((m) => m.role)).toEqual(["user", "openclaw"]);
     // each batch carries a unique receipt marker so read-back can find it
     expect(
       captured.every((m) =>
@@ -287,6 +296,7 @@ describe("characterization: agent_end capture hook", () => {
       { success: false, messages: [{ role: "user", content: "Hello" }] },
       { sessionKey: "agent:main:cli:main" },
     );
+    await flush();
     expect(addMessagesSpy).not.toHaveBeenCalled();
   });
 
@@ -299,6 +309,7 @@ describe("characterization: agent_end capture hook", () => {
       { success: true, messages: [{ role: "tool", content: "only tool output" }] },
       { sessionKey: "agent:main:cli:main" },
     );
+    await flush();
     expect(addMessagesSpy).not.toHaveBeenCalled();
   });
 });

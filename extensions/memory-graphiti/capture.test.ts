@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { captureWithReceipts } from "./capture.js";
+import { captureWithReceipts, MAX_BATCH_CHARS, toBatches } from "./capture.js";
 import type { MemoryClient } from "./client.js";
 import {
   contentHashOf,
@@ -7,72 +7,106 @@ import {
   entryHash,
   IngestNotConfirmedError,
   opaqueGroupId,
+  type ConfirmResult,
   type IngestItem,
 } from "./receipts.js";
 
 const G = "oc_group";
-const confirmingClient = () => {
-  const ingest = vi.fn(async (groupId: string, items: IngestItem[]) => {
-    const entryHashes = items.map(entryHash);
-    return {
-      store: "fake",
-      groupId,
-      episodeIds: ["ep"],
-      entryHashes,
-      contentHash: contentHashOf(entryHashes),
-      ingestedAt: "2026-10-26T00:00:00Z",
-    };
-  });
-  return { client: { ingest } as unknown as MemoryClient, ingest };
-};
 const msgs = (...pairs: Array<[string, "user" | "assistant"]>) =>
   pairs.map(([content, roleType]) => ({ content, roleType }));
 
+/** A store stand-in: `confirm` answers from a scripted queue (default: confirmed). */
+function fakeStore(script: Array<ConfirmResult | Error> = []) {
+  let n = 0;
+  const submit = vi.fn(async (_g: string, _items: IngestItem[]) => ({ ref: `ep-${++n}` }));
+  const confirm = vi.fn(async (_g: string, _items: IngestItem[], sub: { ref: string }) => {
+    const next = script.shift() ?? { status: "confirmed", episodeIds: [sub.ref] };
+    if (next instanceof Error) {
+      throw next;
+    }
+    return next;
+  });
+  const client = { label: "fake", submit, confirm } as unknown as MemoryClient;
+  return { client, submit, confirm };
+}
+const run = (
+  client: MemoryClient,
+  ledger = createMemoryReceiptLedger(),
+  m = msgs(["hi", "user"]),
+) => captureWithReceipts({ client, ledger, groupId: G, messages: m, inFlight: new Set() });
+
 describe("captureWithReceipts (A&D B + C)", () => {
-  it("ingests uncovered entries and records one receipt per entry hash", async () => {
-    const { client, ingest } = confirmingClient();
+  it("submits uncovered entries, then receipts them on a confirmed read-back", async () => {
+    const { client, submit } = fakeStore();
     const ledger = createMemoryReceiptLedger();
-    const r = await captureWithReceipts({
-      client,
-      ledger,
-      groupId: G,
-      messages: msgs(["hi", "user"], ["hello", "assistant"]),
-      inFlight: new Set(),
-    });
-    expect(r).toEqual({ ingested: 2, skipped: 0, dropped: 0 });
-    expect(ingest).toHaveBeenCalledOnce();
-    const covered = await ledger.covered(G, [
-      entryHash({ role: "user", text: "hi" }),
-      entryHash({ role: "assistant", text: "hello" }),
-    ]);
-    expect(covered.size).toBe(2);
+    const r = await run(client, ledger, msgs(["hi", "user"], ["hello", "assistant"]));
+    expect(r).toMatchObject({ sent: 2, confirmed: 2, skipped: 0, dropped: 0 });
+    expect(submit).toHaveBeenCalledOnce();
+    expect(ledger.rows.size).toBe(2);
+    expect(ledger.pend.size).toBe(0);
   });
 
-  it("a replay of the whole session sends only what has no receipt yet", async () => {
-    const { client, ingest } = confirmingClient();
+  it("a whole-session replay sends only what has no receipt yet", async () => {
+    const { client, submit } = fakeStore();
     const ledger = createMemoryReceiptLedger();
     const base = msgs(["hi", "user"], ["hello", "assistant"]);
-    await captureWithReceipts({ client, ledger, groupId: G, messages: base, inFlight: new Set() });
-    const r = await captureWithReceipts({
-      client,
-      ledger,
-      groupId: G,
-      messages: [...base, ...msgs(["more", "user"])],
-      inFlight: new Set(),
-    });
-    expect(r).toEqual({ ingested: 1, skipped: 2, dropped: 0 });
-    expect(ingest.mock.calls[1][1]).toEqual([{ role: "user", text: "more" }]);
+    await run(client, ledger, base);
+    const r = await run(client, ledger, [...base, ...msgs(["more", "user"])]);
+    expect(r).toMatchObject({ sent: 1, confirmed: 1, skipped: 2 });
+    expect(submit.mock.calls[1][1]).toEqual([{ role: "user", text: "more" }]);
   });
 
-  it("NOT confirmed ⇒ NO receipt (the content stays held), and the in-flight mark is released", async () => {
-    const ingest = vi.fn(async () => {
-      throw new IngestNotConfirmedError("nope", "readback_mismatch");
+  it("still processing ⇒ no receipt, recorded as PENDING; the next turn re-CHECKS, never re-sends", async () => {
+    const { client, submit, confirm } = fakeStore([{ status: "pending" }]);
+    const ledger = createMemoryReceiptLedger();
+    const r1 = await run(client, ledger);
+    expect(r1).toMatchObject({ sent: 1, confirmed: 0 });
+    expect(ledger.rows.size).toBe(0);
+    expect([...ledger.pend.values()]).toEqual(["ep-1"]);
+    const r2 = await run(client, ledger);
+    expect(submit).toHaveBeenCalledOnce(); // no duplicate at the store
+    expect(confirm.mock.calls[1][2]).toEqual({ ref: "ep-1" });
+    expect(r2).toMatchObject({ sent: 0, confirmed: 1 });
+    expect(ledger.rows.size).toBe(1);
+    expect(ledger.pend.size).toBe(0);
+  });
+
+  it("a transient read-back failure keeps the submission pending (re-checked, not re-sent)", async () => {
+    const { client, submit } = fakeStore([
+      { status: "pending" },
+      new IngestNotConfirmedError("timeout", "store_error"),
+    ]);
+    const ledger = createMemoryReceiptLedger();
+    await run(client, ledger);
+    await run(client, ledger);
+    expect(submit).toHaveBeenCalledOnce();
+    expect(ledger.pend.size).toBe(1);
+  });
+
+  it("a read-back MISMATCH clears the pending row, and the next turn re-sends cleanly", async () => {
+    const { client, submit } = fakeStore([
+      { status: "pending" },
+      new IngestNotConfirmedError("differs", "readback_mismatch"),
+    ]);
+    const ledger = createMemoryReceiptLedger();
+    await run(client, ledger);
+    const r2 = await run(client, ledger);
+    expect(r2.mismatched).toBe(1);
+    expect(ledger.pend.size).toBe(0);
+    await run(client, ledger);
+    expect(submit).toHaveBeenCalledTimes(2);
+    expect(ledger.rows.size).toBe(1);
+  });
+
+  it("a store refusal: no receipt, no pending, the error surfaces; the in-flight mark is released", async () => {
+    const submit = vi.fn(async () => {
+      throw new IngestNotConfirmedError("503", "store_error");
     });
     const ledger = createMemoryReceiptLedger();
     const inFlight = new Set<string>();
     await expect(
       captureWithReceipts({
-        client: { ingest } as unknown as MemoryClient,
+        client: { label: "fake", submit, confirm: vi.fn() } as unknown as MemoryClient,
         ledger,
         groupId: G,
         messages: msgs(["hi", "user"]),
@@ -80,64 +114,78 @@ describe("captureWithReceipts (A&D B + C)", () => {
       }),
     ).rejects.toThrow(IngestNotConfirmedError);
     expect(ledger.rows.size).toBe(0);
+    expect(ledger.pend.size).toBe(0);
     expect(inFlight.size).toBe(0);
   });
 
-  it("recovery: after a failed ingest, the next capture sends it again and receipts it", async () => {
-    const ledger = createMemoryReceiptLedger();
-    const failing = vi.fn(async () => {
-      throw new IngestNotConfirmedError("down", "store_error");
-    });
-    await captureWithReceipts({
-      client: { ingest: failing } as unknown as MemoryClient,
-      ledger,
-      groupId: G,
-      messages: msgs(["hi", "user"]),
-      inFlight: new Set(),
-    }).catch(() => {});
-    const { client } = confirmingClient();
-    const r = await captureWithReceipts({
-      client,
-      ledger,
-      groupId: G,
-      messages: msgs(["hi", "user"]),
-      inFlight: new Set(),
-    });
-    expect(r.ingested).toBe(1);
-    expect(ledger.rows.size).toBe(1);
-  });
-
   it("minimises before sending; an unsafe message is dropped, never sent", async () => {
-    const { client, ingest } = confirmingClient();
-    const r = await captureWithReceipts({
+    const { client, submit } = fakeStore();
+    const r = await run(
       client,
-      ledger: createMemoryReceiptLedger(),
-      groupId: G,
-      messages: msgs(
+      undefined,
+      msgs(
         [
           "[USER_IDENTITY]\nexternal_id: user_2abcDEF345ghiJKL678mnoPQR\n[/USER_IDENTITY]\n\nhi",
           "user",
         ],
         ["[USER_IDENTITY]\nunclosed\n\noops", "user"],
       ),
-      inFlight: new Set(),
-    });
-    expect(r).toEqual({ ingested: 1, skipped: 0, dropped: 1 });
-    expect(ingest.mock.calls[0][1]).toEqual([{ role: "user", text: "hi" }]);
+    );
+    expect(r).toMatchObject({ sent: 1, dropped: 1 });
+    expect(submit.mock.calls[0][1]).toEqual([{ role: "user", text: "hi" }]);
   });
 
   it("entries already in flight for the group are not sent twice concurrently", async () => {
-    const { client, ingest } = confirmingClient();
-    const inFlight = new Set([`${G}\u0000${entryHash({ role: "user", text: "hi" })}`]);
+    const { client, submit } = fakeStore();
     const r = await captureWithReceipts({
       client,
       ledger: createMemoryReceiptLedger(),
       groupId: G,
       messages: msgs(["hi", "user"]),
-      inFlight,
+      inFlight: new Set([`${G}\u0000${entryHash({ role: "user", text: "hi" })}`]),
     });
-    expect(r).toEqual({ ingested: 0, skipped: 1, dropped: 0 });
-    expect(ingest).not.toHaveBeenCalled();
+    expect(r).toMatchObject({ sent: 0, skipped: 1 });
+    expect(submit).not.toHaveBeenCalled();
+  });
+
+  it("a backlog larger than one batch is split into size-capped batches, each receipted", async () => {
+    const { client, submit } = fakeStore();
+    const big = "x".repeat(Math.floor(MAX_BATCH_CHARS / 3));
+    const ledger = createMemoryReceiptLedger();
+    const r = await run(
+      client,
+      ledger,
+      msgs(
+        [`${big}1`, "user"],
+        [`${big}2`, "assistant"],
+        [`${big}3`, "user"],
+        [`${big}4`, "assistant"],
+      ),
+    );
+    expect(submit.mock.calls.length).toBeGreaterThan(1);
+    expect(r).toMatchObject({ sent: 4, confirmed: 4 });
+  });
+
+  it("a single entry too long for any batch is HELD (counted), never sent", async () => {
+    const { client, submit } = fakeStore();
+    const r = await run(client, undefined, msgs(["y".repeat(MAX_BATCH_CHARS + 1), "assistant"]));
+    expect(r.tooLong).toBe(1);
+    expect(submit).not.toHaveBeenCalled();
+  });
+});
+
+describe("toBatches", () => {
+  it("keeps order, never exceeds the cap, and separates oversized items", () => {
+    const items = [
+      { role: "user" as const, text: "a".repeat(5000) },
+      { role: "assistant" as const, text: "b".repeat(5000) },
+      { role: "user" as const, text: "c".repeat(MAX_BATCH_CHARS + 10) },
+      { role: "assistant" as const, text: "d" },
+    ];
+    const { batches, tooLong } = toBatches(items);
+    expect(tooLong.map((i) => i.text[0])).toEqual(["c"]);
+    expect(batches.flat().map((i) => i.text[0])).toEqual(["a", "b", "d"]);
+    expect(batches.length).toBe(2);
   });
 });
 
@@ -156,9 +204,14 @@ describe("receipt identity", () => {
     expect(opaqueGroupId(raw)).toBe(opaqueGroupId(raw));
     expect(opaqueGroupId(raw)).not.toContain(raw);
     expect(opaqueGroupId(raw)).toMatch(/^oc_[0-9a-f]{32}$/);
-    expect(opaqueGroupId("other")).not.toBe(opaqueGroupId(raw));
   });
-  it("the memory ledger forgets a whole group and only that group", async () => {
+  it("a keyed (peppered) id differs from the unkeyed one and depends on the pepper", () => {
+    const raw = "user_2abcDEF345ghiJKL678mnoPQR";
+    expect(opaqueGroupId(raw, "p1")).toMatch(/^ok_[0-9a-f]{32}$/);
+    expect(opaqueGroupId(raw, "p1")).not.toBe(opaqueGroupId(raw));
+    expect(opaqueGroupId(raw, "p1")).not.toBe(opaqueGroupId(raw, "p2"));
+  });
+  it("the memory ledger forgets a whole group (receipts and pending) and only that group", async () => {
     const ledger = createMemoryReceiptLedger();
     const r = (g: string) => ({
       store: "s",
@@ -170,8 +223,10 @@ describe("receipt identity", () => {
     });
     await ledger.record(r("A"));
     await ledger.record(r("B"));
+    await ledger.addPending("A", ["h3"], "ep", "s");
     expect(await ledger.deleteGroup("A")).toBe(2);
     expect((await ledger.covered("A", ["h1"])).size).toBe(0);
+    expect((await ledger.pending("A", ["h3"])).size).toBe(0);
     expect((await ledger.covered("B", ["h1", "h2"])).size).toBe(2);
   });
 });

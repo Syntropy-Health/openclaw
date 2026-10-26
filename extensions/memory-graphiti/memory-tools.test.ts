@@ -26,6 +26,7 @@
 
 import { describe, expect, it, vi } from "vitest";
 import { GraphitiRestClient } from "./client.js";
+import { opaqueGroupId } from "./receipts.js";
 import { ZepCloudClient } from "./zep-cloud-client.js";
 
 const QA_NUMBERS = ["+1000000001", "+1000000002"];
@@ -167,7 +168,7 @@ describe("memory_search", () => {
       await tools.memory_search?.("call-1", { query: "coffee", maxFacts: 5 });
 
       expect(searchSpy).toHaveBeenCalledOnce();
-      expect(searchSpy).toHaveBeenCalledWith("coffee", ["u-1"], 5);
+      expect(searchSpy).toHaveBeenCalledWith("coffee", [opaqueGroupId("u-1")], 5);
     } finally {
       searchSpy.mockRestore();
     }
@@ -223,7 +224,7 @@ describe("memory_recall", () => {
       await tools.memory_recall?.("call-1", { lastN: 7 });
 
       expect(epSpy).toHaveBeenCalledOnce();
-      expect(epSpy).toHaveBeenCalledWith("u-2", 7);
+      expect(epSpy).toHaveBeenCalledWith(opaqueGroupId("u-2"), 7);
     } finally {
       epSpy.mockRestore();
     }
@@ -284,7 +285,7 @@ describe("memory_store", () => {
 
       expect(addSpy).toHaveBeenCalledOnce();
       const [groupId, messages] = addSpy.mock.calls[0];
-      expect(groupId).toBe("u-3");
+      expect(groupId).toBe(opaqueGroupId("u-3"));
       expect(messages).toHaveLength(1);
       expect(messages[0]).toMatchObject({
         content: "User prefers morning workouts",
@@ -296,7 +297,7 @@ describe("memory_store", () => {
       expect(typeof messages[0].timestamp).toBe("string");
       expect(Number.isNaN(Date.parse(messages[0].timestamp as string))).toBe(false);
       expect(res?.details?.stored).toBe(true);
-      expect(res?.details?.groupId).toBe("u-3");
+      expect(res?.details?.groupId).toBe(opaqueGroupId("u-3"));
     } finally {
       addSpy.mockRestore();
     }
@@ -382,8 +383,8 @@ describe("graphiti_* deprecated aliases — back-compat + shared impl", () => {
 
       // both routed through the one underlying client method, identically
       expect(searchSpy).toHaveBeenCalledTimes(2);
-      expect(searchSpy.mock.calls[0]).toEqual(["q", ["u-9"], 3]);
-      expect(searchSpy.mock.calls[1]).toEqual(["q", ["u-9"], 3]);
+      expect(searchSpy.mock.calls[0]).toEqual(["q", [opaqueGroupId("u-9")], 3]);
+      expect(searchSpy.mock.calls[1]).toEqual(["q", [opaqueGroupId("u-9")], 3]);
     } finally {
       searchSpy.mockRestore();
     }
@@ -406,8 +407,8 @@ describe("graphiti_* deprecated aliases — back-compat + shared impl", () => {
       await tools.graphiti_episodes?.("c2", { lastN: 4 });
 
       expect(epSpy).toHaveBeenCalledTimes(2);
-      expect(epSpy.mock.calls[0]).toEqual(["u-10", 4]);
-      expect(epSpy.mock.calls[1]).toEqual(["u-10", 4]);
+      expect(epSpy.mock.calls[0]).toEqual([opaqueGroupId("u-10"), 4]);
+      expect(epSpy.mock.calls[1]).toEqual([opaqueGroupId("u-10"), 4]);
     } finally {
       epSpy.mockRestore();
     }

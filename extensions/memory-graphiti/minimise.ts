@@ -13,9 +13,6 @@
  * never a silent leak.
  */
 
-/** Blocks that carry `[NAME] … [/NAME]` pairs. */
-const PAIRED_BLOCK = /\[([A-Z][A-Z_]{3,})\][\s\S]*?\[\/\1\]/g;
-
 /** `<graphiti-facts> … </graphiti-facts>` recalled-memory block. */
 const FACTS_BLOCK = /<graphiti-facts>[\s\S]*?<\/graphiti-facts>/g;
 
@@ -41,6 +38,12 @@ const KNOWN_TAGS = [
   "CATCH_PHRASE_MATCH",
 ];
 const SURVIVING_TAG = new RegExp(`\\[\\/?(?:${KNOWN_TAGS.join("|")})\\]|<\\/?graphiti-facts>`);
+
+/**
+ * Known `[NAME] … [/NAME]` context blocks only. A user's own bracketed text
+ * (e.g. "[NOTE] call Dr X [/NOTE]") is NOT a context block and is kept.
+ */
+const PAIRED_BLOCK = new RegExp(`\\[(${KNOWN_TAGS.join("|")})\\][\\s\\S]*?\\[\\/\\1\\]`, "g");
 
 /** A Clerk user id (`user_` + 20+ base62 chars). */
 const CLERK_ID = /\buser_[A-Za-z0-9]{20,}\b/g;

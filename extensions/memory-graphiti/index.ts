@@ -25,7 +25,12 @@ import {
   type GraphitiConfig,
   type GroupIdContext,
 } from "./config.js";
-import { externalIdScopeKey, resolveIdentityScopeKey } from "./identity.js";
+import {
+  externalIdScopeKey,
+  resolveIdentityScopeKey,
+  resolveVerifiedExternalId,
+} from "./identity.js";
+import { minimiseForMemory } from "./minimise.js";
 import {
   createMemoryReceiptLedger,
   createPgReceiptLedger,
@@ -270,8 +275,21 @@ const memoryPlugin = {
       `memory-graphiti: registered (backend: ${client.label}, strategy: ${cfg.groupIdStrategy}${identitySql ? ", identity-db: connected" : ""})`,
     );
 
-    // Track last known group_id from agent_end for use in before_agent_start
-    let lastGroupId = cfg.userId ?? "default";
+    // Group ids are keyed (HMAC) when OPENCLAW_MEMORY_GROUP_KEY is set, so the
+    // store cannot link a group back to a Clerk id it holds elsewhere. Without it
+    // they are an unkeyed hash: hidden from casual view, but LINKABLE.
+    const pepper = process.env.OPENCLAW_MEMORY_GROUP_KEY?.trim() || undefined;
+    const opaque = (raw: string) => opaqueGroupId(raw, pepper);
+    if (approval && !pepper) {
+      api.logger.warn(
+        "memory-graphiti: OPENCLAW_MEMORY_GROUP_KEY unset — group ids are an unkeyed hash, linkable by a party holding raw Clerk ids",
+      );
+    }
+
+    // Track last known group_id from agent_end for use in the graphiti_* tools
+    // (which have no per-call identity). Always opaque, like every other group id.
+    let lastGroupId = opaque(cfg.userId ?? "default");
+    const toolGroup = () => (cfg.userId ? opaque(cfg.userId) : lastGroupId);
 
     // Receipt ledger (A&D C). Postgres when the identity DB is configured; else an
     // in-memory ledger (receipts then do not survive a restart, so the sweep holds
@@ -292,6 +310,9 @@ const memoryPlugin = {
       ledger = {
         covered: async (g, h) => (await ready(), pg.covered(g, h)),
         record: async (r) => (await ready(), pg.record(r)),
+        pending: async (g, h) => (await ready(), pg.pending(g, h)),
+        addPending: async (g, h, ref, store) => (await ready(), pg.addPending(g, h, ref, store)),
+        clearPending: async (g, h) => (await ready(), pg.clearPending(g, h)),
         deleteGroup: async (g) => (await ready(), pg.deleteGroup(g)),
       };
     } else {
@@ -310,29 +331,44 @@ const memoryPlugin = {
      * never recalled (the no_identity class, CTO #16922).
      */
     const resolveMemoryGroup = async (
-      ctx: GroupIdContext,
+      ctx: GroupIdContext & { deviceId?: string | null },
     ): Promise<{ groupId: string; identified: boolean }> => {
+      if (approval) {
+        // Real users: ONLY a verified identity the gate would also accept (same
+        // peer derivation, external_id present, reconciled with the turn's Clerk
+        // sub). Anything else gets no memory — including a turn the gate blocks.
+        if (identitySql) {
+          try {
+            const ext = await resolveVerifiedExternalId(identitySql, ctx);
+            if (ext) {
+              return { groupId: opaque(ext), identified: true };
+            }
+          } catch (err) {
+            api.logger.warn(`memory-graphiti: identity resolution failed: ${String(err)}`);
+          }
+        }
+        return { groupId: "", identified: false };
+      }
       if (identitySql && cfg.groupIdStrategy === "identity") {
         const externalKey = externalIdScopeKey(ctx);
         if (externalKey) {
-          return { groupId: opaqueGroupId(externalKey), identified: true };
+          return { groupId: opaque(externalKey), identified: true };
         }
         try {
           const scopeKey = await resolveIdentityScopeKey(identitySql, ctx);
           if (scopeKey) {
-            return { groupId: opaqueGroupId(scopeKey), identified: true };
+            return { groupId: opaque(scopeKey), identified: true };
           }
         } catch (err) {
           api.logger.warn(
             `memory-graphiti: identity resolution failed, falling back: ${String(err)}`,
           );
         }
-        return { groupId: opaqueGroupId(deriveGroupId(ctx, cfg)), identified: false };
+        return { groupId: opaque(deriveGroupId(ctx, cfg)), identified: false };
       }
-      const raw = cfg.userId ?? (ctx.sessionKey ? deriveGroupId(ctx, cfg) : null);
-      return raw === null
-        ? { groupId: lastGroupId, identified: false }
-        : { groupId: opaqueGroupId(raw), identified: cfg.userId !== undefined };
+      // Non-identity strategies (self-hosted / QA): as before, but opaque. A turn
+      // with no session key uses the strategy's fallback, never another user's.
+      return { groupId: opaque(cfg.userId ?? deriveGroupId(ctx, cfg)), identified: false };
     };
 
     // ========================================================================
@@ -386,7 +422,7 @@ const memoryPlugin = {
 
       try {
         // Tools use lastGroupId which is set by hooks (identity-resolved when applicable)
-        const facts = await client.searchFacts(query, [cfg.userId ?? lastGroupId], maxFacts);
+        const facts = await client.searchFacts(query, [toolGroup()], maxFacts);
 
         if (facts.length === 0) {
           return {
@@ -446,7 +482,7 @@ const memoryPlugin = {
       }
 
       try {
-        const episodes = await client.getEpisodes(cfg.userId ?? lastGroupId, lastN);
+        const episodes = await client.getEpisodes(toolGroup(), lastN);
 
         if (episodes.length === 0) {
           return {
@@ -520,7 +556,7 @@ const memoryPlugin = {
         };
       }
 
-      const groupId = cfg.userId ?? lastGroupId;
+      const groupId = toolGroup();
       // GraphitiMessage shape — mirrors the auto-capture hook's message shape
       // (content / role_type / role / timestamp / source_description). The tool
       // attributes the content to the user turn under the `openclaw` role, and
@@ -678,15 +714,18 @@ const memoryPlugin = {
         }
 
         try {
-          const facts = await client.searchFacts(event.prompt, [groupId], cfg.maxFacts);
+          // The search query is minimised too (no Clerk id or context block leaves).
+          const query = minimiseForMemory(event.prompt);
+          if (!query) {
+            return;
+          }
+          const facts = await client.searchFacts(query, [groupId], cfg.maxFacts);
 
           if (facts.length === 0) {
             return;
           }
 
-          api.logger.info?.(
-            `memory-graphiti: injecting ${facts.length} facts for group ${groupId}`,
-          );
+          api.logger.info?.(`memory-graphiti: injecting ${facts.length} facts`);
 
           return {
             prependContext: formatGraphitiFacts(facts),
@@ -733,7 +772,7 @@ const memoryPlugin = {
           void captureWithReceipts({ client, ledger, groupId, messages: extracted, inFlight })
             .then((r) =>
               api.logger.info?.(
-                `memory-graphiti: capture ingested=${r.ingested} skipped=${r.skipped} dropped=${r.dropped}`,
+                `memory-graphiti: capture confirmed=${r.confirmed} sent=${r.sent} skipped=${r.skipped} dropped=${r.dropped} tooLong=${r.tooLong} mismatched=${r.mismatched}`,
               ),
             )
             .catch((err) => {

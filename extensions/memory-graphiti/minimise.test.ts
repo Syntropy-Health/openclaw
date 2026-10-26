@@ -68,3 +68,11 @@ describe("minimiseForMemory (CTO #16917 item 4)", () => {
     );
   });
 });
+
+describe("minimiseForMemory keeps the user's own bracketed text", () => {
+  it("a user's [NOTE]…[/NOTE] is not a context block", () => {
+    expect(minimiseForMemory("[NOTE] call Dr X tomorrow [/NOTE]")).toBe(
+      "[NOTE] call Dr X tomorrow [/NOTE]",
+    );
+  });
+});

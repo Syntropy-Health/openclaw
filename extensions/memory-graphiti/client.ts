@@ -3,8 +3,10 @@ import {
   contentHashOf,
   entryHash,
   IngestNotConfirmedError,
+  type ConfirmResult,
   type IngestItem,
   type MemoryReceipt,
+  type Submission,
 } from "./receipts.js";
 
 export type FactResult = {
@@ -46,11 +48,18 @@ export interface MemoryClient {
   getEpisodes(groupId: string, lastN?: number): Promise<EpisodeResult[]>;
   healthcheck(): Promise<boolean>;
   /**
-   * Ingest and CONFIRM by read-back. Resolves to a receipt only when the store
-   * demonstrably holds every item; otherwise throws IngestNotConfirmedError and
-   * no receipt exists (the transcript sweep then holds the content).
+   * Hand a batch to the store. Resolves with the store's reference (Zep episode
+   * uuid, or the REST batch marker) once ACCEPTED, not yet confirmed. Throws
+   * IngestNotConfirmedError("store_error") if the store refused it.
    */
-  ingest(groupId: string, items: IngestItem[]): Promise<MemoryReceipt>;
+  submit(groupId: string, items: IngestItem[]): Promise<Submission>;
+  /**
+   * Check a submission by READ-BACK. "confirmed" only when the store demonstrably
+   * holds exactly these items and has finished processing them; "pending" while
+   * it is still processing. Throws IngestNotConfirmedError("readback_mismatch")
+   * when what the store holds differs from what was sent.
+   */
+  confirm(groupId: string, items: IngestItem[], submission: Submission): Promise<ConfirmResult>;
   /** Delete everything the store holds for this group (the user's forget). */
   forget(groupId: string): Promise<void>;
   readonly label: string;
@@ -86,57 +95,61 @@ export function buildReceipt(
 const SEARCH_TIMEOUT_MS = 5_000;
 const INGEST_TIMEOUT_MS = 10_000;
 const HEALTHCHECK_TIMEOUT_MS = 3_000;
-const READBACK_TIMEOUT_MS = 30_000;
-const READBACK_INTERVAL_MS = 2_000;
 
 export class GraphitiRestClient implements MemoryClient {
   readonly label: string;
 
-  constructor(
-    private readonly serverUrl: string,
-    private readonly readback: { timeoutMs: number; intervalMs: number } = {
-      timeoutMs: READBACK_TIMEOUT_MS,
-      intervalMs: READBACK_INTERVAL_MS,
-    },
-  ) {
+  constructor(private readonly serverUrl: string) {
     this.label = `graphiti-rest @ ${serverUrl}`;
   }
 
   /**
-   * POST /messages is asynchronous (202, no ids), so confirmation is a read-back
-   * poll: each batch carries a unique marker in source_description, and the
-   * receipt is issued only once episodes carrying that marker hold every item.
-   * INFERRED until checked against a live server: Graphiti stores
-   * source_description verbatim and keeps each message text in episode content.
+   * POST /messages is asynchronous (202, no ids). Each batch carries a unique
+   * marker in source_description; that marker is the submission ref.
    */
-  async ingest(groupId: string, items: IngestItem[]): Promise<MemoryReceipt> {
-    const marker = `openclaw:receipt:${crypto.randomUUID()}`;
-    await this.addMessages(
-      groupId,
-      items.map((m) => ({ content: m.text, role_type: m.role, source_description: marker })),
-    );
-    const deadline = Date.now() + this.readback.timeoutMs;
-    for (;;) {
-      const eps = (await this.getEpisodes(groupId, Math.max(20, items.length * 2))).filter((e) =>
-        e.source_description?.includes(marker),
+  async submit(groupId: string, items: IngestItem[]): Promise<Submission> {
+    const ref = `openclaw:receipt:${crypto.randomUUID()}`;
+    const timestamp = new Date().toISOString();
+    try {
+      await this.addMessages(
+        groupId,
+        items.map((m) => ({
+          content: m.text,
+          role_type: m.role,
+          role: m.role === "assistant" ? "openclaw" : "user",
+          timestamp,
+          source_description: ref,
+        })),
       );
-      const allHeld = items.every((m) => eps.some((e) => e.content?.includes(m.text)));
-      if (allHeld) {
-        return buildReceipt(
-          this.label,
-          groupId,
-          items,
-          eps.map((e) => e.uuid),
-        );
-      }
-      if (Date.now() >= deadline) {
-        throw new IngestNotConfirmedError(
-          `read-back did not confirm ${items.length} item(s) within ${this.readback.timeoutMs}ms`,
-          "readback_timeout",
-        );
-      }
-      await new Promise((r) => setTimeout(r, this.readback.intervalMs));
+    } catch (err) {
+      throw new IngestNotConfirmedError(
+        `graphiti POST /messages failed: ${String(err)}`,
+        "store_error",
+      );
     }
+    return { ref };
+  }
+
+  /**
+   * Read-back: the episodes carrying this batch's marker must hold every item
+   * EXACTLY (the message text, optionally "role: " prefixed), not merely contain
+   * it as a substring. INFERRED until checked against a live server: Graphiti
+   * stores source_description verbatim and one episode per message.
+   */
+  async confirm(
+    groupId: string,
+    items: IngestItem[],
+    submission: Submission,
+  ): Promise<ConfirmResult> {
+    const eps = (await this.getEpisodes(groupId, Math.max(20, items.length * 2))).filter(
+      (e) => e.source_description === submission.ref,
+    );
+    const holds = (e: EpisodeResult, m: IngestItem) =>
+      e.content === m.text || e.content === `${m.role}: ${m.text}`;
+    if (items.every((m) => eps.some((e) => holds(e, m)))) {
+      return { status: "confirmed", episodeIds: eps.map((e) => e.uuid) };
+    }
+    return { status: "pending" };
   }
 
   /** DELETE /group/{group_id}. INFERRED endpoint; verify on a live server. */

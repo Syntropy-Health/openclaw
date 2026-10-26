@@ -3,20 +3,32 @@
  * [PRINCIPAL-RULED 2026-10-26] "use Zep now, zep is accepted as BAA."
  *
  * Without `phiCloudApproval` the QA-only rail applies unchanged (tripwire.test.ts).
- * With it, the HOOK paths (capture, recall) may serve real, IDENTIFIED users;
- * anonymous turns get no memory; the graphiti_* tools stay QA-only; and what
- * leaves for the store is minimised and keyed by an opaque group id.
+ * With it, the HOOK paths (capture, recall) may serve real users — but only a
+ * VERIFIED identity the auth gate would also accept (same peer derivation,
+ * external_id present, reconciled with the turn's Clerk sub). Everyone else
+ * gets no memory, the graphiti_* tools stay QA-only, and what leaves for the
+ * store is minimised and keyed by an opaque group id.
  */
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-// The identity DB / receipt ledger: every query succeeds with no rows.
+// Identity DB: peer → lp_users.external_id (null = registered but unverified).
+const db = vi.hoisted(() => ({ peers: new Map<string, string | null>() }));
 vi.mock("postgres", () => {
-  const sql = Object.assign(() => Promise.resolve([]), { end: () => Promise.resolve() });
+  const sql = Object.assign(
+    (strings: TemplateStringsArray, ...values: unknown[]) => {
+      if (strings.join("?").includes("lp_user_channels")) {
+        const peer = values[1] as string;
+        return Promise.resolve(db.peers.has(peer) ? [{ external_id: db.peers.get(peer) }] : []);
+      }
+      return Promise.resolve([]);
+    },
+    { end: () => Promise.resolve() },
+  );
   return { default: () => sql };
 });
 
 import { graphitiConfigSchema } from "./config.js";
-import { entryHash, opaqueGroupId } from "./receipts.js";
+import { opaqueGroupId } from "./receipts.js";
 import { ZepCloudClient } from "./zep-cloud-client.js";
 
 const APPROVAL = {
@@ -26,15 +38,12 @@ const APPROVAL = {
 };
 const REAL_WHATSAPP = { dmPolicy: "allowlist", allowFrom: ["+15551234567"] };
 const CLERK = "user_2abcDEF345ghiJKL678mnoPQR";
-const IDENTIFIED_CTX = {
+const ctxFor = (peer: string, externalId?: string) => ({
   messageProvider: "shrinemobile",
-  sessionKey: "agent:main:openresponses-user:u1",
-  externalId: CLERK,
-};
-const ANON_CTX = {
-  messageProvider: "shrinemobile",
-  sessionKey: "agent:main:openresponses-user:u2",
-};
+  sessionKey: `agent:main:openresponses-user:${peer}`,
+  ...(externalId ? { externalId } : {}),
+});
+const VERIFIED = ctxFor("u1", CLERK);
 
 const flush = () => new Promise((r) => setTimeout(r, 0));
 
@@ -85,19 +94,23 @@ const cloudCfg = (extra: Record<string, unknown> = {}) => ({
   ...extra,
 });
 
-const fakeReceipt = async (groupId: string) => ({
-  store: "zep-cloud",
-  groupId,
-  episodeIds: ["ep-1"],
-  entryHashes: [],
-  contentHash: "x",
-  ingestedAt: "2026-10-26T00:00:00Z",
+/** Stub the store edge; return the submit spy ("not called" = nothing sent). */
+function spyStore() {
+  vi.spyOn(ZepCloudClient.prototype, "confirm").mockResolvedValue({
+    status: "confirmed",
+    episodeIds: ["ep-1"],
+  });
+  return vi.spyOn(ZepCloudClient.prototype, "submit").mockResolvedValue({ ref: "ep-1" });
+}
+
+afterEach(() => {
+  vi.restoreAllMocks();
+  db.peers.clear();
+  delete process.env.GETZEP_API_KEY;
 });
 
-afterEach(() => vi.restoreAllMocks());
-
-describe("phiCloudApproval config (cited, complete or rejected)", () => {
-  it("parses a complete approval", () => {
+describe("phiCloudApproval config (cited, complete, per-user — or rejected)", () => {
+  it("parses a complete approval with the identity strategy", () => {
     expect(
       graphitiConfigSchema.parse(cloudCfg({ phiCloudApproval: APPROVAL })).phiCloudApproval,
     ).toEqual(APPROVAL);
@@ -110,6 +123,27 @@ describe("phiCloudApproval config (cited, complete or rejected)", () => {
     [{ ...APPROVAL, extra: 1 }, /unknown keys/],
   ])("rejects a half-written approval %#", (a, err) => {
     expect(() => graphitiConfigSchema.parse(cloudCfg({ phiCloudApproval: a }))).toThrow(err);
+  });
+  it("rejects the approval with a fixed userId (would pool every user into one memory)", () => {
+    expect(() =>
+      graphitiConfigSchema.parse(cloudCfg({ phiCloudApproval: APPROVAL, userId: "fixed" })),
+    ).toThrow(/per-user memory/);
+  });
+  it("rejects the approval with a non-identity strategy", () => {
+    expect(() =>
+      graphitiConfigSchema.parse(
+        cloudCfg({ phiCloudApproval: APPROVAL, groupIdStrategy: "channel-sender" }),
+      ),
+    ).toThrow(/per-user memory/);
+  });
+  it("zep-cloud without apiKey reads GETZEP_API_KEY from the env (no ${...} in shared config)", () => {
+    process.env.GETZEP_API_KEY = "z_from_env";
+    const { apiKey: _omit, ...noKey } = cloudCfg();
+    expect(graphitiConfigSchema.parse(noKey).apiKey).toBe("z_from_env");
+  });
+  it("zep-cloud with neither apiKey nor env fails THIS plugin, naming only the variable", () => {
+    const { apiKey: _omit, ...noKey } = cloudCfg();
+    expect(() => graphitiConfigSchema.parse(noKey)).toThrow(/GETZEP_API_KEY/);
   });
 });
 
@@ -128,8 +162,9 @@ describe("registration with the approval", () => {
 });
 
 describe("capture under the approval", () => {
-  it("an IDENTIFIED real user's turn is ingested — minimised, under an OPAQUE group id", async () => {
-    const ingest = vi.spyOn(ZepCloudClient.prototype, "ingest").mockImplementation(fakeReceipt);
+  it("a VERIFIED user's turn is sent — minimised, under an OPAQUE group id", async () => {
+    db.peers.set("u1", CLERK);
+    const submit = spyStore();
     const { hooks } = await register(cloudCfg({ phiCloudApproval: APPROVAL }));
     await hooks.agent_end?.(
       {
@@ -142,77 +177,61 @@ describe("capture under the approval", () => {
           { role: "assistant", content: "Sorry to hear that." },
         ],
       },
-      IDENTIFIED_CTX,
+      VERIFIED,
     );
     await flush();
-    expect(ingest).toHaveBeenCalledOnce();
-    const [groupId, items] = ingest.mock.calls[0];
+    expect(submit).toHaveBeenCalledOnce();
+    const [groupId, items] = submit.mock.calls[0];
     expect(groupId).toBe(opaqueGroupId(CLERK));
-    expect(groupId).not.toContain(CLERK);
-    expect(JSON.stringify(items)).not.toContain(CLERK);
+    expect(JSON.stringify([groupId, items])).not.toContain(CLERK);
     expect(items).toEqual([
       { role: "user", text: "I slept badly" },
       { role: "assistant", text: "Sorry to hear that." },
     ]);
   });
 
-  it("an ANONYMOUS turn is never sent (no_identity), even with the approval", async () => {
-    const ingest = vi.spyOn(ZepCloudClient.prototype, "ingest").mockImplementation(fakeReceipt);
+  it.each([
+    ["anonymous (no identity row)", () => {}, ctxFor("u2")],
+    [
+      "a turn the gate blocks: verified Clerk sub but no bound identity row",
+      () => {},
+      ctxFor("u3", CLERK),
+    ],
+    [
+      "a Clerk sub that does not match the row (reconcile)",
+      () => db.peers.set("u4", "user_someoneElse0000000000000"),
+      ctxFor("u4", CLERK),
+    ],
+    [
+      "a registered but UNVERIFIED peer (no external_id)",
+      () => db.peers.set("u5", null),
+      ctxFor("u5"),
+    ],
+  ])("%s: nothing is sent and nothing is recalled", async (_label, setup, ctx) => {
+    setup();
+    const submit = spyStore();
+    const search = vi.spyOn(ZepCloudClient.prototype, "searchFacts").mockResolvedValue([]);
     const { hooks } = await register(cloudCfg({ phiCloudApproval: APPROVAL }));
+    await hooks.before_agent_start?.({ prompt: "what do you know about me?" }, ctx);
     await hooks.agent_end?.(
       { success: true, messages: [{ role: "user", content: "hello there" }] },
-      ANON_CTX,
+      ctx,
     );
     await flush();
-    expect(ingest).not.toHaveBeenCalled();
-  });
-
-  it("a whole-session replay on the next turn sends only the NEW entries (receipt de-dup)", async () => {
-    const ingest = vi
-      .spyOn(ZepCloudClient.prototype, "ingest")
-      .mockImplementation(async (g, items) => ({
-        ...(await fakeReceipt(g)),
-        entryHashes: items.map(entryHash),
-      }));
-    // In-memory ledger (no identity DB): a fixed identified userId, so de-dup is
-    // observable end to end through the hook. (The pg ledger SQL is unit-tested.)
-    const { hooks } = await register({
-      backend: "zep-cloud",
-      apiKey: "z_key",
-      groupIdStrategy: "channel-sender",
-      userId: "fixed-user",
-      phiCloudApproval: APPROVAL,
-    });
-    const turn1 = [
-      { role: "user", content: "I slept badly" },
-      { role: "assistant", content: "Sorry to hear that." },
-    ];
-    await hooks.agent_end?.({ success: true, messages: turn1 }, IDENTIFIED_CTX);
-    await flush();
-    await hooks.agent_end?.(
-      { success: true, messages: [...turn1, { role: "user", content: "and today?" }] },
-      IDENTIFIED_CTX,
-    );
-    await flush();
-    expect(ingest).toHaveBeenCalledTimes(2);
-    expect(ingest.mock.calls[1][1]).toEqual([{ role: "user", text: "and today?" }]);
+    expect(search).not.toHaveBeenCalled();
+    expect(submit).not.toHaveBeenCalled();
   });
 });
 
 describe("recall and tools under the approval", () => {
-  it("recall runs for an identified user, keyed by the opaque group", async () => {
+  it("recall runs for a verified user, keyed by the opaque group, with a minimised query", async () => {
+    db.peers.set("u1", CLERK);
     const search = vi.spyOn(ZepCloudClient.prototype, "searchFacts").mockResolvedValue([]);
     const { hooks } = await register(cloudCfg({ phiCloudApproval: APPROVAL }));
-    await hooks.before_agent_start?.({ prompt: "what do you know about me?" }, IDENTIFIED_CTX);
+    await hooks.before_agent_start?.({ prompt: `my id is ${CLERK}, what do you know?` }, VERIFIED);
     expect(search).toHaveBeenCalledOnce();
     expect(search.mock.calls[0][1]).toEqual([opaqueGroupId(CLERK)]);
-  });
-
-  it("recall does NOT run for an anonymous user", async () => {
-    const search = vi.spyOn(ZepCloudClient.prototype, "searchFacts").mockResolvedValue([]);
-    const { hooks } = await register(cloudCfg({ phiCloudApproval: APPROVAL }));
-    await hooks.before_agent_start?.({ prompt: "what do you know about me?" }, ANON_CTX);
-    expect(search).not.toHaveBeenCalled();
+    expect(search.mock.calls[0][0]).not.toContain(CLERK);
   });
 
   it("the graphiti_* tools stay QA-only: no per-call identity, so no cross-user read", async () => {
@@ -225,7 +244,8 @@ describe("recall and tools under the approval", () => {
       ["memory_recall", {}],
       ["memory_store", { text: "remember this" }],
     ] as const) {
-      await tools[name]?.("t1", params);
+      expect(tools[name], `${name} must be registered`).toBeTypeOf("function");
+      await tools[name]("t1", params);
     }
     expect(search).not.toHaveBeenCalled();
     expect(episodes).not.toHaveBeenCalled();

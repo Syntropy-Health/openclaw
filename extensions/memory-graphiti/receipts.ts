@@ -12,7 +12,7 @@
  * double as de-duplication: agent_end sees the whole session every turn, and
  * only entries without a receipt are sent again.
  */
-import { createHash } from "node:crypto";
+import { createHash, createHmac } from "node:crypto";
 
 export type IngestItem = { role: "user" | "assistant"; text: string };
 
@@ -30,6 +30,12 @@ export type MemoryReceipt = {
   /** When read-back confirmed (not when enqueued). */
   ingestedAt: string;
 };
+
+/** What the store accepted, before it is confirmed: Zep episode uuid, or the REST batch marker. */
+export type Submission = { ref: string };
+
+/** Result of checking a submission: confirmed (receipt-able) or still processing. */
+export type ConfirmResult = { status: "confirmed"; episodeIds: string[] } | { status: "pending" };
 
 /** Thrown by an adapter when it cannot CONFIRM ingestion. No receipt is issued. */
 export class IngestNotConfirmedError extends Error {
@@ -64,7 +70,13 @@ export function textHash(text: string): string {
  * Clerk id: a namespaced sha256, stable so recall and capture agree.
  * (A separate Zep project per app is a later hardening; see the A&D.)
  */
-export function opaqueGroupId(rawScope: string): string {
+export function opaqueGroupId(rawScope: string, pepper?: string): string {
+  if (pepper) {
+    // Keyed: a party that knows the raw Clerk ids (e.g. the store, which may hold
+    // other data keyed by them) still cannot link the group back without the pepper.
+    return `ok_${createHmac("sha256", pepper).update(`openclaw-memory:v1:${rawScope}`).digest("hex").slice(0, 32)}`;
+  }
+  // Unkeyed: hides the raw id from casual view, but is LINKABLE by anyone holding raw ids.
   return `oc_${sha256(`openclaw-memory:v1:${rawScope}`).slice(0, 32)}`;
 }
 
@@ -76,7 +88,15 @@ export interface ReceiptLedger {
   /** The subset of `hashes` that already has a receipt in `groupId`. */
   covered(groupId: string, hashes: string[]): Promise<Set<string>>;
   record(receipt: MemoryReceipt): Promise<void>;
-  /** Delete every receipt for a group (the user's forget). Returns rows removed. */
+  /**
+   * Sent but not yet confirmed: hash → the store's submission ref. Persisted
+   * BEFORE read-back, so a failed or slow confirmation is re-CHECKED next time,
+   * never re-SENT (no duplicate episodes at the store).
+   */
+  pending(groupId: string, hashes: string[]): Promise<Map<string, string>>;
+  addPending(groupId: string, hashes: string[], ref: string, store: string): Promise<void>;
+  clearPending(groupId: string, hashes: string[]): Promise<void>;
+  /** Delete every receipt AND pending row for a group (the user's forget). Returns receipts removed. */
   deleteGroup(groupId: string): Promise<number>;
 }
 
@@ -97,6 +117,15 @@ export async function ensureReceiptSchema(sql: Sql): Promise<void> {
       ingested_at TIMESTAMPTZ NOT NULL,
       created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
       UNIQUE (group_id, entry_hash)
+    )`;
+  await sql`
+    CREATE TABLE IF NOT EXISTS lp_memory_pending (
+      group_id TEXT NOT NULL,
+      entry_hash TEXT NOT NULL,
+      ref TEXT NOT NULL,
+      store TEXT NOT NULL,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+      PRIMARY KEY (group_id, entry_hash)
     )`;
 }
 
@@ -121,7 +150,31 @@ export function createPgReceiptLedger(sql: Sql): ReceiptLedger {
           ON CONFLICT (group_id, entry_hash) DO NOTHING`;
       }
     },
+    async pending(groupId, hashes) {
+      if (hashes.length === 0) {
+        return new Map();
+      }
+      const rows = await sql<{ entry_hash: string; ref: string }>`
+        SELECT entry_hash, ref FROM lp_memory_pending
+        WHERE group_id = ${groupId} AND entry_hash = ANY(${hashes})`;
+      return new Map(rows.map((r) => [r.entry_hash, r.ref]));
+    },
+    async addPending(groupId, hashes, ref, store) {
+      for (const h of hashes) {
+        await sql`
+          INSERT INTO lp_memory_pending (group_id, entry_hash, ref, store)
+          VALUES (${groupId}, ${h}, ${ref}, ${store})
+          ON CONFLICT (group_id, entry_hash) DO NOTHING`;
+      }
+    },
+    async clearPending(groupId, hashes) {
+      if (hashes.length > 0) {
+        await sql`
+          DELETE FROM lp_memory_pending WHERE group_id = ${groupId} AND entry_hash = ANY(${hashes})`;
+      }
+    },
     async deleteGroup(groupId) {
+      await sql`DELETE FROM lp_memory_pending WHERE group_id = ${groupId}`;
       const rows = await sql<{ id: string }>`
         DELETE FROM lp_memory_receipts WHERE group_id = ${groupId} RETURNING id`;
       return rows.length;
@@ -130,11 +183,38 @@ export function createPgReceiptLedger(sql: Sql): ReceiptLedger {
 }
 
 /** In-memory ledger for tests and for a plugin with no database. */
-export function createMemoryReceiptLedger(): ReceiptLedger & { rows: Map<string, MemoryReceipt> } {
+export function createMemoryReceiptLedger(): ReceiptLedger & {
+  rows: Map<string, MemoryReceipt>;
+  pend: Map<string, string>;
+} {
   const rows = new Map<string, MemoryReceipt>();
+  const pend = new Map<string, string>();
   const key = (g: string, h: string) => `${g}\u0000${h}`;
   return {
     rows,
+    pend,
+    async pending(groupId, hashes) {
+      const out = new Map<string, string>();
+      for (const h of hashes) {
+        const ref = pend.get(key(groupId, h));
+        if (ref !== undefined) {
+          out.set(h, ref);
+        }
+      }
+      return out;
+    },
+    async addPending(groupId, hashes, ref) {
+      for (const h of hashes) {
+        if (!pend.has(key(groupId, h))) {
+          pend.set(key(groupId, h), ref);
+        }
+      }
+    },
+    async clearPending(groupId, hashes) {
+      for (const h of hashes) {
+        pend.delete(key(groupId, h));
+      }
+    },
     async covered(groupId, hashes) {
       return new Set(hashes.filter((h) => rows.has(key(groupId, h))));
     },
@@ -146,6 +226,11 @@ export function createMemoryReceiptLedger(): ReceiptLedger & { rows: Map<string,
       }
     },
     async deleteGroup(groupId) {
+      for (const k of [...pend.keys()]) {
+        if (k.startsWith(`${groupId}\u0000`)) {
+          pend.delete(k);
+        }
+      }
       let n = 0;
       for (const k of [...rows.keys()]) {
         if (k.startsWith(`${groupId}\u0000`)) {

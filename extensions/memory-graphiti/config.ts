@@ -227,7 +227,13 @@ export const graphitiConfigSchema = {
     // Validate the resolved backend has the credential it needs
     // ------------------------------------------------------------------
     if (backend === "zep-cloud" && !apiKey) {
-      throw new Error("backend 'zep-cloud' requires apiKey (Zep Cloud API key)");
+      // Read the env directly (NOT via ${...} in the shared openclaw.json, where a missing
+      // variable fails the WHOLE gateway's config load). Missing here fails only this plugin.
+      const envKey = process.env.GETZEP_API_KEY?.trim();
+      if (!envKey) {
+        throw new Error("backend 'zep-cloud' requires apiKey (or the GETZEP_API_KEY env var)");
+      }
+      apiKey = envKey;
     }
     if (backend === "self-hosted" && !serverUrl) {
       // Preserve the legacy message when nothing at all was configured, so a
@@ -336,6 +342,13 @@ export const graphitiConfigSchema = {
         throw new Error("phiCloudApproval.date must be YYYY-MM-DD");
       }
       phiCloudApproval = { ruling, approvalsRow, date };
+      // The approval serves REAL users, so it must partition per verified user. A fixed
+      // userId or a static/session/channel strategy would pool or mis-key their memory.
+      if (groupIdStrategy !== "identity" || userId !== undefined || staticGroupId) {
+        throw new Error(
+          "phiCloudApproval requires groupIdStrategy 'identity' with no userId/staticGroupId (per-user memory)",
+        );
+      }
     }
 
     return {

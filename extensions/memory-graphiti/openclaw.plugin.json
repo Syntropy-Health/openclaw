@@ -49,6 +49,20 @@
       "placeholder": "10",
       "help": "Maximum number of facts to inject during auto-recall",
       "advanced": true
+    },
+    "backend": {
+      "label": "Backend",
+      "help": "'self-hosted' (default) uses the Graphiti REST API at serverUrl; 'zep-cloud' uses Zep Cloud (apiKey, or the GETZEP_API_KEY env var)."
+    },
+    "qaNumbers": {
+      "label": "QA Numbers (PHI tripwire)",
+      "help": "Known-synthetic/QA WhatsApp numbers (E.164).",
+      "advanced": true
+    },
+    "phiCloudApproval": {
+      "label": "PHI cloud approval",
+      "help": "Recorded principal approval { ruling (verbatim), approvalsRow, date } that lets zep-cloud store identified real users' minimised chat. Absent: QA-only.",
+      "advanced": true
     }
   },
   "configSchema": {
@@ -84,6 +98,35 @@
         "type": "number",
         "minimum": 1,
         "maximum": 100
+      },
+      "backend": {
+        "type": "string",
+        "enum": ["self-hosted", "zep-cloud"]
+      },
+      "qaNumbers": {
+        "type": "array",
+        "items": {
+          "type": "string"
+        }
+      },
+      "phiCloudApproval": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["ruling", "approvalsRow", "date"],
+        "properties": {
+          "ruling": {
+            "type": "string",
+            "minLength": 20
+          },
+          "approvalsRow": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "date": {
+            "type": "string",
+            "pattern": "^\\d{4}-\\d{2}-\\d{2}$"
+          }
+        }
       }
     }
   }

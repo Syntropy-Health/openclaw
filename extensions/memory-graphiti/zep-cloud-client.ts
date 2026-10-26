@@ -6,7 +6,6 @@
 import { ZepClient } from "@getzep/zep-cloud";
 import {
   batchText,
-  buildReceipt,
   type MemoryClient,
   type FactResult,
   type EpisodeResult,
@@ -15,8 +14,9 @@ import {
 import {
   IngestNotConfirmedError,
   textHash,
+  type ConfirmResult,
   type IngestItem,
-  type MemoryReceipt,
+  type Submission,
 } from "./receipts.js";
 
 /**
@@ -53,19 +53,14 @@ export class ZepCloudClient implements MemoryClient {
     });
   }
 
-  /**
-   * Ingest and confirm by read-back. graph.add returns the Episode it created;
-   * the episode is then fetched by uuid and its content compared (sha256) with
-   * exactly what was sent. A receipt exists only when they match.
-   */
-  async ingest(groupId: string, items: IngestItem[]): Promise<MemoryReceipt> {
-    const data = batchText(items);
+  /** graph.add returns the Episode it created; its uuid is the submission ref. */
+  async submit(groupId: string, items: IngestItem[]): Promise<Submission> {
     let uuid: string | undefined;
     try {
       await this.ensureUser(groupId);
       const ep = await this.zep.graph.add({
         userId: groupId,
-        data,
+        data: batchText(items),
         type: "message",
         sourceDescription: "openclaw",
       });
@@ -76,22 +71,40 @@ export class ZepCloudClient implements MemoryClient {
     if (!uuid) {
       throw new IngestNotConfirmedError("zep graph.add returned no episode uuid", "store_error");
     }
-    let echoed: string | undefined;
+    return { ref: uuid };
+  }
+
+  /**
+   * Read the episode back by uuid. Confirmed only when its content is exactly
+   * what was sent (sha256) AND Zep reports it processed (graph extraction done);
+   * a still-processing episode is "pending" and is re-checked later, never re-sent.
+   */
+  async confirm(
+    _groupId: string,
+    items: IngestItem[],
+    submission: Submission,
+  ): Promise<ConfirmResult> {
+    let ep: { content?: string; processed?: boolean } | undefined;
     try {
-      echoed = (await this.zep.graph.episode.get(uuid))?.content;
+      ep = await this.zep.graph.episode.get(submission.ref);
     } catch (err) {
+      if ((err as { statusCode?: number }).statusCode === 404) {
+        return { status: "pending" }; // not visible yet
+      }
       throw new IngestNotConfirmedError(
         `zep episode read-back failed: ${String(err)}`,
         "store_error",
       );
     }
-    if (typeof echoed !== "string" || textHash(echoed) !== textHash(data)) {
+    if (typeof ep?.content !== "string" || textHash(ep.content) !== textHash(batchText(items))) {
       throw new IngestNotConfirmedError(
         "zep episode read-back content does not match what was sent",
         "readback_mismatch",
       );
     }
-    return buildReceipt(this.label, groupId, items, [uuid]);
+    return ep.processed === true
+      ? { status: "confirmed", episodeIds: [submission.ref] }
+      : { status: "pending" };
   }
 
   /** Delete the Zep user and with it the user's graph. A missing user is already forgotten. */
