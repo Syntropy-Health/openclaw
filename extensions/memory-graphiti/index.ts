@@ -9,6 +9,8 @@
  * Provides auto-capture on agent_end and auto-recall on before_agent_start.
  */
 
+import os from "node:os";
+import path from "node:path";
 import { Type } from "@sinclair/typebox";
 import { openPluginPool, type OpenClawPluginApi } from "openclaw/plugin-sdk";
 import postgres from "postgres";
@@ -25,6 +27,7 @@ import {
   type GraphitiConfig,
   type GroupIdContext,
 } from "./config.js";
+import { forgetUser } from "./forget.js";
 import {
   externalIdScopeKey,
   resolveIdentityScopeKey,
@@ -40,6 +43,9 @@ import {
 } from "./receipts.js";
 import { computeIsQaOnly, senderZepAllowed, type TripwireBreach } from "./tripwire.js";
 import { ZepCloudClient } from "./zep-cloud-client.js";
+
+/** Minimum pepper length: 32 random bytes as hex is 64 chars; anything under 32 is refused. */
+export const MIN_PEPPER_CHARS = 32;
 
 // ============================================================================
 // Client factory
@@ -278,11 +284,18 @@ const memoryPlugin = {
     // Group ids are keyed (HMAC) when OPENCLAW_MEMORY_GROUP_KEY is set, so the
     // store cannot link a group back to a Clerk id it holds elsewhere. Without it
     // they are an unkeyed hash: hidden from casual view, but LINKABLE.
-    const pepper = process.env.OPENCLAW_MEMORY_GROUP_KEY?.trim() || undefined;
+    const rawPepper = process.env.OPENCLAW_MEMORY_GROUP_KEY?.trim() ?? "";
+    const pepper = rawPepper.length >= MIN_PEPPER_CHARS ? rawPepper : undefined;
     const opaque = (raw: string) => opaqueGroupId(raw, pepper);
-    if (approval && !pepper) {
-      api.logger.warn(
-        "memory-graphiti: OPENCLAW_MEMORY_GROUP_KEY unset — group ids are an unkeyed hash, linkable by a party holding raw Clerk ids",
+    // Under the approval, real users' memory REQUIRES the keyed id (CTO #16929):
+    // without a valid pepper, capture and recall refuse — fail closed, loud. An
+    // unkeyed hash would be linkable by a store that holds raw Clerk ids, and
+    // adding the pepper later would orphan everything captured before it.
+    const memoryRefused = approval !== undefined && pepper === undefined;
+    if (memoryRefused) {
+      api.logger.error(
+        `memory-graphiti: OPENCLAW_MEMORY_GROUP_KEY missing or shorter than ${MIN_PEPPER_CHARS} chars — ` +
+          "capture and recall REFUSED under the PHI cloud approval (fail closed)",
       );
     }
 
@@ -674,6 +687,40 @@ const memoryPlugin = {
         const cmd = program.command("graphiti").description("Graphiti memory plugin commands");
 
         cmd
+          .command("forget")
+          .description(
+            "Operator erase: delete ONE user's memory group(s), receipts and transcripts (counts only)",
+          )
+          .requiredOption("--user <id>", "internal user id (lp_users.id)")
+          .option(
+            "--state-dir <dir>",
+            "openclaw state dir (default: $OPENCLAW_STATE_DIR or ~/.openclaw)",
+          )
+          .action(async (opts: { user: string; stateDir?: string }) => {
+            if (!identitySql) {
+              console.error(
+                "graphiti forget: needs the identity database (groupIdStrategy identity)",
+              );
+              process.exitCode = 2;
+              return;
+            }
+            const stateDir =
+              opts.stateDir ??
+              (process.env.OPENCLAW_STATE_DIR?.trim() || path.join(os.homedir(), ".openclaw"));
+            const r = await forgetUser({
+              sql: identitySql as unknown as Parameters<typeof forgetUser>[0]["sql"],
+              client,
+              ledger,
+              opaque,
+              userId: opts.user,
+              stateDir,
+            });
+            console.log(
+              `graphiti forget: userFound=${r.userFound} storeGroups=${r.storeGroups} receipts=${r.receipts} transcripts=${r.transcripts}`,
+            );
+          });
+
+        cmd
           .command("status")
           .description("Check Graphiti server connectivity")
           .action(async () => {
@@ -698,6 +745,9 @@ const memoryPlugin = {
 
         // Identity-resolved, opaque group (the verified Clerk `sub` first, so the
         // HTTP/Clerk graph unifies with the same person's other channels, #834/#836).
+        if (memoryRefused) {
+          return;
+        }
         const { groupId, identified } = await resolveMemoryGroup(ctx);
         if (approval && !identified) {
           return; // no_identity: an anonymous/gated turn gets no memory
@@ -750,6 +800,9 @@ const memoryPlugin = {
           }
 
           // The SAME resolver recall uses, so recall and capture cannot drift.
+          if (memoryRefused) {
+            return;
+          }
           const { groupId, identified } = await resolveMemoryGroup(ctx);
           if (approval && !identified) {
             return; // no_identity: an anonymous/gated turn is never sent

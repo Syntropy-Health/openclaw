@@ -9,7 +9,7 @@
  * gets no memory, the graphiti_* tools stay QA-only, and what leaves for the
  * store is minimised and keyed by an opaque group id.
  */
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 // Identity DB: peer → lp_users.external_id (null = registered but unverified).
 const db = vi.hoisted(() => ({ peers: new Map<string, string | null>() }));
@@ -44,6 +44,8 @@ const ctxFor = (peer: string, externalId?: string) => ({
   ...(externalId ? { externalId } : {}),
 });
 const VERIFIED = ctxFor("u1", CLERK);
+/** A valid group-id pepper (32 random bytes as hex in production). */
+const PEPPER = "a".repeat(64);
 
 const flush = () => new Promise((r) => setTimeout(r, 0));
 
@@ -103,7 +105,12 @@ function spyStore() {
   return vi.spyOn(ZepCloudClient.prototype, "submit").mockResolvedValue({ ref: "ep-1" });
 }
 
+beforeEach(() => {
+  process.env.OPENCLAW_MEMORY_GROUP_KEY = PEPPER;
+});
+
 afterEach(() => {
+  delete process.env.OPENCLAW_MEMORY_GROUP_KEY;
   vi.restoreAllMocks();
   db.peers.clear();
   delete process.env.GETZEP_API_KEY;
@@ -182,7 +189,7 @@ describe("capture under the approval", () => {
     await flush();
     expect(submit).toHaveBeenCalledOnce();
     const [groupId, items] = submit.mock.calls[0];
-    expect(groupId).toBe(opaqueGroupId(CLERK));
+    expect(groupId).toBe(opaqueGroupId(CLERK, PEPPER));
     expect(JSON.stringify([groupId, items])).not.toContain(CLERK);
     expect(items).toEqual([
       { role: "user", text: "I slept badly" },
@@ -223,6 +230,47 @@ describe("capture under the approval", () => {
   });
 });
 
+describe("the group-id pepper is REQUIRED under the approval (CTO #16929)", () => {
+  it.each([
+    ["missing", undefined],
+    ["too short", "short-pepper"],
+  ])("pepper %s: capture and recall REFUSE, loudly", async (_label, value) => {
+    if (value === undefined) {
+      delete process.env.OPENCLAW_MEMORY_GROUP_KEY;
+    } else {
+      process.env.OPENCLAW_MEMORY_GROUP_KEY = value;
+    }
+    db.peers.set("u1", CLERK);
+    const submit = spyStore();
+    const search = vi.spyOn(ZepCloudClient.prototype, "searchFacts").mockResolvedValue([]);
+    const { hooks, logger } = await register(cloudCfg({ phiCloudApproval: APPROVAL }));
+    await hooks.before_agent_start?.({ prompt: "what do you know about me?" }, VERIFIED);
+    await hooks.agent_end?.(
+      { success: true, messages: [{ role: "user", content: "I slept badly" }] },
+      VERIFIED,
+    );
+    await flush();
+    expect(search).not.toHaveBeenCalled();
+    expect(submit).not.toHaveBeenCalled();
+    expect(logger.error.mock.calls.map((c) => String(c[0])).join("\n")).toMatch(
+      /OPENCLAW_MEMORY_GROUP_KEY.*REFUSED/,
+    );
+  });
+
+  it("the keyed group id is what reaches the store (not the unkeyed hash)", async () => {
+    db.peers.set("u1", CLERK);
+    const submit = spyStore();
+    const { hooks } = await register(cloudCfg({ phiCloudApproval: APPROVAL }));
+    await hooks.agent_end?.(
+      { success: true, messages: [{ role: "user", content: "I slept badly" }] },
+      VERIFIED,
+    );
+    await flush();
+    expect(submit.mock.calls[0][0]).toMatch(/^ok_/);
+    expect(submit.mock.calls[0][0]).not.toBe(opaqueGroupId(CLERK));
+  });
+});
+
 describe("recall and tools under the approval", () => {
   it("recall runs for a verified user, keyed by the opaque group, with a minimised query", async () => {
     db.peers.set("u1", CLERK);
@@ -230,7 +278,7 @@ describe("recall and tools under the approval", () => {
     const { hooks } = await register(cloudCfg({ phiCloudApproval: APPROVAL }));
     await hooks.before_agent_start?.({ prompt: `my id is ${CLERK}, what do you know?` }, VERIFIED);
     expect(search).toHaveBeenCalledOnce();
-    expect(search.mock.calls[0][1]).toEqual([opaqueGroupId(CLERK)]);
+    expect(search.mock.calls[0][1]).toEqual([opaqueGroupId(CLERK, PEPPER)]);
     expect(search.mock.calls[0][0]).not.toContain(CLERK);
   });
 
