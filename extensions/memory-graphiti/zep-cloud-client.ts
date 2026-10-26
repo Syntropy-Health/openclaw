@@ -108,12 +108,13 @@ export class ZepCloudClient implements MemoryClient {
   }
 
   /** Delete the Zep user and with it the user's graph. A missing user is already forgotten. */
-  async forget(groupId: string): Promise<void> {
+  async forget(groupId: string): Promise<boolean> {
     try {
       await this.zep.user.delete(groupId);
+      return true;
     } catch (err: unknown) {
       if ((err as { statusCode?: number }).statusCode === 404) {
-        return;
+        return false;
       }
       throw err;
     }

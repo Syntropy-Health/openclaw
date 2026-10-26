@@ -292,6 +292,11 @@ const memoryPlugin = {
     // unkeyed hash would be linkable by a store that holds raw Clerk ids, and
     // adding the pepper later would orphan everything captured before it.
     const memoryRefused = approval !== undefined && pepper === undefined;
+    if (rawPepper && !pepper) {
+      api.logger.warn(
+        `memory-graphiti: OPENCLAW_MEMORY_GROUP_KEY is set but shorter than ${MIN_PEPPER_CHARS} chars — ignored`,
+      );
+    }
     if (memoryRefused) {
       api.logger.error(
         `memory-graphiti: OPENCLAW_MEMORY_GROUP_KEY missing or shorter than ${MIN_PEPPER_CHARS} chars — ` +
@@ -704,9 +709,20 @@ const memoryPlugin = {
               process.exitCode = 2;
               return;
             }
+            if (memoryRefused) {
+              // Without the pepper the group ids differ: forget would target the WRONG
+              // group and report success. Refuse instead.
+              console.error(
+                "graphiti forget: OPENCLAW_MEMORY_GROUP_KEY missing or invalid in this process — refusing",
+              );
+              process.exitCode = 2;
+              return;
+            }
             const stateDir =
               opts.stateDir ??
-              (process.env.OPENCLAW_STATE_DIR?.trim() || path.join(os.homedir(), ".openclaw"));
+              (process.env.OPENCLAW_STATE_DIR?.trim() ||
+                process.env.CLAWDBOT_STATE_DIR?.trim() ||
+                path.join(os.homedir(), ".openclaw"));
             const r = await forgetUser({
               sql: identitySql as unknown as Parameters<typeof forgetUser>[0]["sql"],
               client,
@@ -716,7 +732,7 @@ const memoryPlugin = {
               stateDir,
             });
             console.log(
-              `graphiti forget: userFound=${r.userFound} storeGroups=${r.storeGroups} receipts=${r.receipts} transcripts=${r.transcripts}`,
+              `graphiti forget: userFound=${r.userFound} storeGroupsDeleted=${r.storeGroupsDeleted} storeGroupsAbsent=${r.storeGroupsAbsent} receipts=${r.receipts} transcripts=${r.transcripts} sharedSkipped=${r.sharedSkipped} lockedSkipped=${r.lockedSkipped}`,
             );
           });
 

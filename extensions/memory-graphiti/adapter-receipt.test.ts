@@ -101,14 +101,14 @@ describe("Zep Cloud: submit → episode uuid; confirm → read-back", () => {
 
   it("forget deletes the Zep user; an already-missing user counts as forgotten", async () => {
     const { c, zep } = zepWith({});
-    await c.forget("oc_g");
+    expect(await c.forget("oc_g")).toBe(true);
     expect(zep.user.delete).toHaveBeenCalledWith("oc_g");
     const gone = zepWith({
       userDelete: async () => {
         throw Object.assign(new Error("not found"), { statusCode: 404 });
       },
     });
-    await expect(gone.c.forget("oc_g")).resolves.toBeUndefined();
+    await expect(gone.c.forget("oc_g")).resolves.toBe(false);
     const broken = zepWith({
       userDelete: async () => {
         throw Object.assign(new Error("boom"), { statusCode: 500 });

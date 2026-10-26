@@ -60,8 +60,8 @@ export interface MemoryClient {
    * when what the store holds differs from what was sent.
    */
   confirm(groupId: string, items: IngestItem[], submission: Submission): Promise<ConfirmResult>;
-  /** Delete everything the store holds for this group (the user's forget). */
-  forget(groupId: string): Promise<void>;
+  /** Delete everything the store holds for this group. True if it existed, false if already absent. */
+  forget(groupId: string): Promise<boolean>;
   readonly label: string;
 }
 
@@ -153,14 +153,18 @@ export class GraphitiRestClient implements MemoryClient {
   }
 
   /** DELETE /group/{group_id}. INFERRED endpoint; verify on a live server. */
-  async forget(groupId: string): Promise<void> {
+  async forget(groupId: string): Promise<boolean> {
     const res = await fetch(`${this.serverUrl}/group/${encodeURIComponent(groupId)}`, {
       method: "DELETE",
       signal: AbortSignal.timeout(INGEST_TIMEOUT_MS),
     });
-    if (!res.ok && res.status !== 404) {
+    if (res.status === 404) {
+      return false;
+    }
+    if (!res.ok) {
       throw new Error(`Graphiti DELETE /group failed (${res.status})`);
     }
+    return true;
   }
 
   /**
