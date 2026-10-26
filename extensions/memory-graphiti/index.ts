@@ -732,7 +732,7 @@ const memoryPlugin = {
               stateDir,
             });
             console.log(
-              `graphiti forget: userFound=${r.userFound} storeGroupsDeleted=${r.storeGroupsDeleted} storeGroupsAbsent=${r.storeGroupsAbsent} receipts=${r.receipts} transcripts=${r.transcripts} sharedSkipped=${r.sharedSkipped} lockedSkipped=${r.lockedSkipped}`,
+              `graphiti forget: userFound=${r.userFound} storeGroupsDeleted=${r.storeGroupsDeleted} storeGroupsAbsent=${r.storeGroupsAbsent} receipts=${r.receipts} transcripts=${r.transcripts} sharedSkipped=${r.sharedSkipped} lockedSkipped=${r.lockedSkipped} vanished=${r.vanished}`,
             );
           });
 

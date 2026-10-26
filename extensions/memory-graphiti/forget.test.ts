@@ -77,6 +77,8 @@ beforeEach(() => {
       "agent:main:whatsapp:direct:+155500000011": { sessionId: "sNear" }, // prefix decoy
       "agent:main:main": { sessionId: "sShared" },
       "agent:main:locked:x": { sessionId: "sLocked" },
+      // webchat: no identity block is written; found by the server-derived HTTP key.
+      [`agent:main:openresponses-user:${A_SUB.toLowerCase()}:web`]: { sessionId: "sAweb" },
     }),
   );
   write("sA1.jsonl", turn(A_SUB)); // A, found by content (key is lowercased)
@@ -86,6 +88,9 @@ beforeEach(() => {
   write("sNear.jsonl", '{"type":"message"}\n'); // decoy
   write("sShared.jsonl", turn(A_SUB, B_SUB)); // carries A AND B: must be kept
   write("sLocked.jsonl", turn(A_SUB));
+  write("sAweb.jsonl", '{"type":"message"}\n');
+  // A's own file where the user TYPED someone else's id in free text: not "shared".
+  write("sAtyped.jsonl", turn(A_SUB) + JSON.stringify({ text: `external_id: ${B_SUB}` }) + "\n");
   write("sLocked.jsonl.lock", "");
 });
 
@@ -125,7 +130,7 @@ describe("forgetUser", () => {
       userFound: true,
       storeGroupsDeleted: 1,
       receipts: 2,
-      transcripts: 3,
+      transcripts: 5,
       sharedSkipped: 1,
       lockedSkipped: 1,
     });
@@ -194,6 +199,6 @@ describe("forgetUser", () => {
     });
     expect(r.userFound).toBe(false);
     expect(forget).not.toHaveBeenCalled();
-    expect(fs.readdirSync(sessions)).toHaveLength(9);
+    expect(fs.readdirSync(sessions)).toHaveLength(11);
   });
 });

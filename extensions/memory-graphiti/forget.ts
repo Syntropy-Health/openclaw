@@ -44,11 +44,17 @@ export type ForgetResult = {
   sharedSkipped: number;
   /** Files the gateway holds a lock on: kept, re-run when idle. */
   lockedSkipped: number;
+  /** Files that disappeared between listing and reading/deleting (concurrent rename): re-run. */
+  vanished: number;
 };
 
 /** Live + archived transcript files (never locks, never sessions.json). */
 const TRANSCRIPT = /\.jsonl(\.(deleted|reset|bak)\.[^/\\]+)?$/;
-const EXTERNAL_ID = /external_id:\s*([^\s"\\]+)/g;
+/** external_id inside a [USER_IDENTITY] block (JSON-escaped "\\n" on disk, or a real newline). */
+const EXTERNAL_ID =
+  /\[USER_IDENTITY\](?:\\n|\n)(?:(?!\[\/USER_IDENTITY\])[\s\S]){0,400}?external_id:\s*([^\s"\\]+)/g;
+/** HTTP session keys: agent:<agent>:<prefix>-user:<lowercased verified sub>[:hint]. */
+const HTTP_USER_PREFIX = /^(openresponses|openai)-user$/;
 /** Channels whose "peer" is a client-supplied device id: never a deletion selector. */
 const CLIENT_SUPPLIED_PEER_CHANNELS = new Set(["shrinemobile", "webchat"]);
 
@@ -65,12 +71,17 @@ export function sessionsDirs(stateDir: string): string[] {
 }
 
 /** Transcript bases (live session files) whose key names one of `peers` on its own channel. */
-function basesForPeers(dir: string, peers: Array<{ channel: string; peer: string }>): Set<string> {
+function basesForPeers(
+  dir: string,
+  peers: Array<{ channel: string; peer: string }>,
+  externalId: string | null,
+): Set<string> {
   const bases = new Set<string>();
   const indexPath = path.join(dir, "sessions.json");
-  if (peers.length === 0 || !fs.existsSync(indexPath)) {
+  if ((peers.length === 0 && !externalId) || !fs.existsSync(indexPath)) {
     return bases;
   }
+  const sub = externalId?.toLowerCase() ?? null;
   let index: Record<string, { sessionId?: string; sessionFile?: string }>;
   try {
     index = JSON.parse(fs.readFileSync(indexPath, "utf8"));
@@ -85,9 +96,13 @@ function basesForPeers(dir: string, peers: Array<{ channel: string; peer: string
     const channel = parts[2];
     const rest = parts.slice(3);
     const peerPart = rest[0] === "direct" ? rest.slice(1).join(":") : rest.join(":");
-    const hit = peers.some(
-      (p) => p.channel.toLowerCase() === channel && p.peer.toLowerCase() === peerPart,
-    );
+    // HTTP: the key's scope segment is the server-derived, lowercased verified sub
+    // (not client-chosen when a Clerk token is present). Channel peers: same channel
+    // AND the whole peer.
+    const httpHit = sub !== null && HTTP_USER_PREFIX.test(channel) && rest[0] === sub;
+    const hit =
+      httpHit ||
+      peers.some((p) => p.channel.toLowerCase() === channel && p.peer.toLowerCase() === peerPart);
     const file = entry?.sessionFile ?? (entry?.sessionId ? `${entry.sessionId}.jsonl` : null);
     if (hit && file) {
       bases.add(path.basename(file));
@@ -97,9 +112,14 @@ function basesForPeers(dir: string, peers: Array<{ channel: string; peer: string
 }
 
 /** The external_ids an identity block in this file names. */
-function externalIdsIn(file: string): Set<string> {
+function externalIdsIn(file: string): Set<string> | null {
   const ids = new Set<string>();
-  const text = fs.readFileSync(file, "utf8");
+  let text: string;
+  try {
+    text = fs.readFileSync(file, "utf8");
+  } catch {
+    return null; // renamed/removed concurrently (archive, retention sweep)
+  }
   for (const m of text.matchAll(EXTERNAL_ID)) {
     if (m[1] && m[1] !== "none") {
       ids.add(m[1]);
@@ -112,19 +132,25 @@ function externalIdsIn(file: string): Set<string> {
 export function userTranscriptFiles(
   dir: string,
   user: { externalId: string | null; peers: Array<{ channel: string; peer: string }> },
-): { files: string[]; sharedSkipped: number } {
+): { files: string[]; sharedSkipped: number; vanished: number } {
   const bases = basesForPeers(
     dir,
     user.peers.filter((p) => !CLIENT_SUPPLIED_PEER_CHANNELS.has(p.channel.toLowerCase())),
+    user.externalId,
   );
   const files: string[] = [];
   let sharedSkipped = 0;
+  let vanished = 0;
   for (const f of fs.readdirSync(dir)) {
     if (!TRANSCRIPT.test(f)) {
       continue;
     }
     const full = path.join(dir, f);
     const ids = externalIdsIn(full);
+    if (ids === null) {
+      vanished++;
+      continue;
+    }
     const byContent = user.externalId !== null && ids.has(user.externalId);
     const byKey = [...bases].some((b) => f === b || f.startsWith(`${b}.`));
     if (!byContent && !byKey) {
@@ -137,7 +163,7 @@ export function userTranscriptFiles(
     }
     files.push(full);
   }
-  return { files, sharedSkipped };
+  return { files, sharedSkipped, vanished };
 }
 
 export async function forgetUser(opts: {
@@ -158,6 +184,7 @@ export async function forgetUser(opts: {
     transcripts: 0,
     sharedSkipped: 0,
     lockedSkipped: 0,
+    vanished: 0,
   };
 
   const users = await sql<{ id: string; external_id: string | null }>`
@@ -188,19 +215,24 @@ export async function forgetUser(opts: {
   }
 
   for (const dir of sessionsDirs(stateDir)) {
-    const { files, sharedSkipped } = userTranscriptFiles(dir, {
+    const { files, sharedSkipped, vanished } = userTranscriptFiles(dir, {
       externalId: user.external_id,
       peers: channels.map((c) => ({ channel: c.channel, peer: c.channel_peer_id })),
     });
     res.sharedSkipped += sharedSkipped;
+    res.vanished += vanished;
     for (const file of files) {
       const live = file.replace(/(\.jsonl)\..*$/, "$1");
       if (fs.existsSync(`${live}.lock`)) {
         res.lockedSkipped++;
         continue;
       }
-      fs.rmSync(file, { force: true });
-      res.transcripts++;
+      try {
+        fs.rmSync(file);
+        res.transcripts++;
+      } catch {
+        res.vanished++;
+      }
     }
   }
   return res;
