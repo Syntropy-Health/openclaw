@@ -184,10 +184,24 @@ describe("wiring/identity-scope", () => {
 // `!verify`, a step they could not complete.
 describe("SYNTROPY_GATE on HTTP channels (CTO #16865)", () => {
   // Anything that tells the user to run a command or fetch a pairing code.
-  const DEAD_END = /[!/]\s*verify|!identify|pair device|pairing code|6-digit|type:\s*[!/]/i;
+  const DEAD_END =
+    /[!/]\s*verify|!identify|pair(ing)?\s+(a\s+|your\s+)?device|pairing code|6-digit|type:\s*[!/]/i;
+  // The HTTP copy legitimately NAMES the forbidden steps inside its own "Do not
+  // ..." prohibition. Scan the copy with every prohibition sentence removed, so a
+  // future edit that tells the user to pair a device (outside a "Do not") fails.
+  const withoutProhibitions = (s: string) =>
+    s.replace(/Do not[^.]*\.(\s*[^.\n]*do not work here\.)?/gi, "");
 
   it("RED arm: the HTTP gate never tells the user to type !verify or pair a device", () => {
-    expect(SYNTROPY_GATE_HTTP).not.toMatch(DEAD_END);
+    expect(withoutProhibitions(SYNTROPY_GATE_HTTP)).not.toMatch(DEAD_END);
+  });
+
+  it("the prohibition strip is not a blanket eraser (an instruction outside it is caught)", () => {
+    const regressed = SYNTROPY_GATE_HTTP.replace(
+      "[/SYNTROPY_GATE]",
+      "Ask them to pair a device first.\n[/SYNTROPY_GATE]",
+    );
+    expect(withoutProhibitions(regressed)).toMatch(DEAD_END);
   });
 
   it("control: the messaging gate DOES carry the command (so the RED arm can fail)", () => {
@@ -230,15 +244,8 @@ describe("SYNTROPY_GATE on HTTP channels (CTO #16865)", () => {
         fetchProfile: vi.fn(),
       });
       expect(res).toEqual({ prependContext: SYNTROPY_GATE_HTTP });
-      expect(res.prependContext).not.toMatch(DEAD_END);
     },
   );
-
-  it("wiring: the before_agent_start hook passes the turn's channel into the decision", async () => {
-    const { readFile } = await import("node:fs/promises");
-    const src = await readFile(new URL("./index.ts", import.meta.url), "utf8");
-    const code = src.replace(/\/\*[\s\S]*?\*\//g, "").replace(/^\s*\/\/.*$/gm, "");
-    const call = code.slice(code.indexOf("return await decideProfileInjection({"));
-    expect(call.slice(0, 400)).toMatch(/\n\s*channel,\n/);
-  });
+  // Hook-level wiring (channel taken from ctx.messageProvider, not the session
+  // key) is exercised behaviourally in ./hook-gate-channel.test.ts.
 });
