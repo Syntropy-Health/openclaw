@@ -1,4 +1,11 @@
 // Shared types and interface for memory backends
+import {
+  contentHashOf,
+  entryHash,
+  IngestNotConfirmedError,
+  type IngestItem,
+  type MemoryReceipt,
+} from "./receipts.js";
 
 export type FactResult = {
   uuid: string;
@@ -38,7 +45,38 @@ export interface MemoryClient {
   searchFacts(query: string, groupIds?: string[] | null, maxFacts?: number): Promise<FactResult[]>;
   getEpisodes(groupId: string, lastN?: number): Promise<EpisodeResult[]>;
   healthcheck(): Promise<boolean>;
+  /**
+   * Ingest and CONFIRM by read-back. Resolves to a receipt only when the store
+   * demonstrably holds every item; otherwise throws IngestNotConfirmedError and
+   * no receipt exists (the transcript sweep then holds the content).
+   */
+  ingest(groupId: string, items: IngestItem[]): Promise<MemoryReceipt>;
+  /** Delete everything the store holds for this group (the user's forget). */
+  forget(groupId: string): Promise<void>;
   readonly label: string;
+}
+
+/** The text one ingest batch sends: one line block per item, role-tagged. */
+export function batchText(items: IngestItem[]): string {
+  return items.map((m) => `[${m.role}] ${m.text}`).join("\n\n");
+}
+
+/** Build the receipt for a confirmed batch. */
+export function buildReceipt(
+  store: string,
+  groupId: string,
+  items: IngestItem[],
+  episodeIds: string[],
+): MemoryReceipt {
+  const entryHashes = items.map(entryHash);
+  return {
+    store,
+    groupId,
+    episodeIds,
+    entryHashes,
+    contentHash: contentHashOf(entryHashes),
+    ingestedAt: new Date().toISOString(),
+  };
 }
 
 // ============================================================================
@@ -48,12 +86,68 @@ export interface MemoryClient {
 const SEARCH_TIMEOUT_MS = 5_000;
 const INGEST_TIMEOUT_MS = 10_000;
 const HEALTHCHECK_TIMEOUT_MS = 3_000;
+const READBACK_TIMEOUT_MS = 30_000;
+const READBACK_INTERVAL_MS = 2_000;
 
 export class GraphitiRestClient implements MemoryClient {
   readonly label: string;
 
-  constructor(private readonly serverUrl: string) {
+  constructor(
+    private readonly serverUrl: string,
+    private readonly readback: { timeoutMs: number; intervalMs: number } = {
+      timeoutMs: READBACK_TIMEOUT_MS,
+      intervalMs: READBACK_INTERVAL_MS,
+    },
+  ) {
     this.label = `graphiti-rest @ ${serverUrl}`;
+  }
+
+  /**
+   * POST /messages is asynchronous (202, no ids), so confirmation is a read-back
+   * poll: each batch carries a unique marker in source_description, and the
+   * receipt is issued only once episodes carrying that marker hold every item.
+   * INFERRED until checked against a live server: Graphiti stores
+   * source_description verbatim and keeps each message text in episode content.
+   */
+  async ingest(groupId: string, items: IngestItem[]): Promise<MemoryReceipt> {
+    const marker = `openclaw:receipt:${crypto.randomUUID()}`;
+    await this.addMessages(
+      groupId,
+      items.map((m) => ({ content: m.text, role_type: m.role, source_description: marker })),
+    );
+    const deadline = Date.now() + this.readback.timeoutMs;
+    for (;;) {
+      const eps = (await this.getEpisodes(groupId, Math.max(20, items.length * 2))).filter((e) =>
+        e.source_description?.includes(marker),
+      );
+      const allHeld = items.every((m) => eps.some((e) => e.content?.includes(m.text)));
+      if (allHeld) {
+        return buildReceipt(
+          this.label,
+          groupId,
+          items,
+          eps.map((e) => e.uuid),
+        );
+      }
+      if (Date.now() >= deadline) {
+        throw new IngestNotConfirmedError(
+          `read-back did not confirm ${items.length} item(s) within ${this.readback.timeoutMs}ms`,
+          "readback_timeout",
+        );
+      }
+      await new Promise((r) => setTimeout(r, this.readback.intervalMs));
+    }
+  }
+
+  /** DELETE /group/{group_id}. INFERRED endpoint; verify on a live server. */
+  async forget(groupId: string): Promise<void> {
+    const res = await fetch(`${this.serverUrl}/group/${encodeURIComponent(groupId)}`, {
+      method: "DELETE",
+      signal: AbortSignal.timeout(INGEST_TIMEOUT_MS),
+    });
+    if (!res.ok && res.status !== 404) {
+      throw new Error(`Graphiti DELETE /group failed (${res.status})`);
+    }
   }
 
   /**

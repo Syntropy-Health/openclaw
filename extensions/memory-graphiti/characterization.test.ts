@@ -21,6 +21,7 @@ import { GraphitiRestClient } from "./client.js";
 import type { GraphitiConfig } from "./config.js";
 import { resolveIdentityScopeKey } from "./identity.js";
 import { createClient } from "./index.js";
+import { opaqueGroupId } from "./receipts.js";
 import { ZepCloudClient } from "./zep-cloud-client.js";
 
 // ============================================================================
@@ -188,7 +189,7 @@ describe("characterization: before_agent_start recall hook", () => {
     expect(searchFactsSpy).toHaveBeenCalledOnce();
     const [query, groupIds, maxFacts] = searchFactsSpy.mock.calls[0];
     expect(query).toBe("what do you know about me?");
-    expect(groupIds).toEqual(["telegram:7550356539"]);
+    expect(groupIds).toEqual([opaqueGroupId("telegram:7550356539")]);
     expect(maxFacts).toBe(7);
 
     // facts injected via prependContext, HTML-escaped, wrapped, with date suffix
@@ -262,14 +263,19 @@ describe("characterization: agent_end capture hook", () => {
       Array<{ content: string; role_type: string; role: string }>,
     ];
 
-    expect(groupId).toBe("telegram:7550356539");
+    expect(groupId).toBe(opaqueGroupId("telegram:7550356539"));
     // system, tool, and whitespace-only user are excluded
     expect(captured).toHaveLength(2);
     expect(captured.map((m) => m.content)).toEqual(["Hello", "Hi!"]);
     expect(captured.map((m) => m.role_type)).toEqual(["user", "assistant"]);
-    // role mapping: assistant -> "openclaw"; user -> messageProvider
-    expect(captured[0].role).toBe("telegram");
-    expect(captured[1].role).toBe("openclaw");
+    // each batch carries a unique receipt marker so read-back can find it
+    expect(
+      captured.every((m) =>
+        /^openclaw:receipt:/.test(
+          String((m as { source_description?: string }).source_description),
+        ),
+      ),
+    ).toBe(true);
   });
 
   it("does not call addMessages when the run was unsuccessful", async () => {

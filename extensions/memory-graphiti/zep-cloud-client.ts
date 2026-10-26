@@ -4,7 +4,20 @@
  */
 
 import { ZepClient } from "@getzep/zep-cloud";
-import type { MemoryClient, FactResult, EpisodeResult, GraphitiMessage } from "./client.js";
+import {
+  batchText,
+  buildReceipt,
+  type MemoryClient,
+  type FactResult,
+  type EpisodeResult,
+  type GraphitiMessage,
+} from "./client.js";
+import {
+  IngestNotConfirmedError,
+  textHash,
+  type IngestItem,
+  type MemoryReceipt,
+} from "./receipts.js";
 
 /**
  * Maps Zep Cloud userId concept to our groupId.
@@ -38,6 +51,59 @@ export class ZepCloudClient implements MemoryClient {
       type: "message",
       sourceDescription: messages[0]?.source_description ?? "openclaw",
     });
+  }
+
+  /**
+   * Ingest and confirm by read-back. graph.add returns the Episode it created;
+   * the episode is then fetched by uuid and its content compared (sha256) with
+   * exactly what was sent. A receipt exists only when they match.
+   */
+  async ingest(groupId: string, items: IngestItem[]): Promise<MemoryReceipt> {
+    const data = batchText(items);
+    let uuid: string | undefined;
+    try {
+      await this.ensureUser(groupId);
+      const ep = await this.zep.graph.add({
+        userId: groupId,
+        data,
+        type: "message",
+        sourceDescription: "openclaw",
+      });
+      uuid = ep?.uuid;
+    } catch (err) {
+      throw new IngestNotConfirmedError(`zep graph.add failed: ${String(err)}`, "store_error");
+    }
+    if (!uuid) {
+      throw new IngestNotConfirmedError("zep graph.add returned no episode uuid", "store_error");
+    }
+    let echoed: string | undefined;
+    try {
+      echoed = (await this.zep.graph.episode.get(uuid))?.content;
+    } catch (err) {
+      throw new IngestNotConfirmedError(
+        `zep episode read-back failed: ${String(err)}`,
+        "store_error",
+      );
+    }
+    if (typeof echoed !== "string" || textHash(echoed) !== textHash(data)) {
+      throw new IngestNotConfirmedError(
+        "zep episode read-back content does not match what was sent",
+        "readback_mismatch",
+      );
+    }
+    return buildReceipt(this.label, groupId, items, [uuid]);
+  }
+
+  /** Delete the Zep user and with it the user's graph. A missing user is already forgotten. */
+  async forget(groupId: string): Promise<void> {
+    try {
+      await this.zep.user.delete(groupId);
+    } catch (err: unknown) {
+      if ((err as { statusCode?: number }).statusCode === 404) {
+        return;
+      }
+      throw err;
+    }
   }
 
   /**

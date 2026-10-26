@@ -12,14 +12,27 @@
 import { Type } from "@sinclair/typebox";
 import { openPluginPool, type OpenClawPluginApi } from "openclaw/plugin-sdk";
 import postgres from "postgres";
+import { captureWithReceipts } from "./capture.js";
 import {
   GraphitiRestClient,
   type FactResult,
   type GraphitiMessage,
   type MemoryClient,
 } from "./client.js";
-import { deriveGroupId, graphitiConfigSchema, type GraphitiConfig } from "./config.js";
+import {
+  deriveGroupId,
+  graphitiConfigSchema,
+  type GraphitiConfig,
+  type GroupIdContext,
+} from "./config.js";
 import { externalIdScopeKey, resolveIdentityScopeKey } from "./identity.js";
+import {
+  createMemoryReceiptLedger,
+  createPgReceiptLedger,
+  ensureReceiptSchema,
+  opaqueGroupId,
+  type ReceiptLedger,
+} from "./receipts.js";
 import { computeIsQaOnly, senderZepAllowed, type TripwireBreach } from "./tripwire.js";
 import { ZepCloudClient } from "./zep-cloud-client.js";
 
@@ -206,7 +219,19 @@ const memoryPlugin = {
     // client (by actual type, not by cfg.backend) while the live allow-list is
     // not provably QA-only. The loader wraps register() in try/catch → this marks
     // the plugin status=error loudly and the gateway survives.
-    if (isCloud && !isQaOnly()) {
+    // A RECORDED principal approval (cfg.phiCloudApproval, cited ruling + ledger
+    // row + date) lifts the QA-only rule for the HOOK paths (recall, capture),
+    // which resolve a per-turn identity. It is logged loudly at every boot so the
+    // rail visibly changed rather than disappeared.
+    const approval = isCloud ? cfg.phiCloudApproval : undefined;
+    if (approval) {
+      api.logger.warn(
+        `memory-graphiti: PHI cloud approval in force — real users' minimised chat may be stored on ${client.label} ` +
+          `(approvals row ${approval.approvalsRow}, ${approval.date}). The graphiti_* tools stay QA-only.`,
+      );
+    }
+
+    if (isCloud && !approval && !isQaOnly()) {
       throw new Error(
         "phi_tripwire: refusing to register memory-graphiti on zep-cloud while the " +
           "WhatsApp allow-list is not provably QA-only (PHI exposure risk). Set " +
@@ -225,6 +250,13 @@ const memoryPlugin = {
     const zepAllowed = (senderE164: string | null | undefined): boolean =>
       !isCloud || senderZepAllowed(senderE164, qaNumbers);
 
+    // The HOOK gate: as zepAllowed, plus the recorded approval. NOT used by the
+    // graphiti_* tools: they have no per-call ctx and key on the shared
+    // lastGroupId (the last user who spoke), so lifting the rail there would let
+    // one user read another's memory. Tools therefore stay QA-only on cloud.
+    const hookZepAllowed = (senderE164: string | null | undefined): boolean =>
+      approval !== undefined || zepAllowed(senderE164);
+
     // Identity DB connection — only created when using "identity" strategy
     const identitySql =
       cfg.groupIdStrategy === "identity" && cfg.databaseUrl
@@ -240,6 +272,68 @@ const memoryPlugin = {
 
     // Track last known group_id from agent_end for use in before_agent_start
     let lastGroupId = cfg.userId ?? "default";
+
+    // Receipt ledger (A&D C). Postgres when the identity DB is configured; else an
+    // in-memory ledger (receipts then do not survive a restart, so the sweep holds
+    // and re-ingest is de-duplicated only per process — fail closed, logged).
+    let ledger: ReceiptLedger;
+    if (identitySql) {
+      const pg = createPgReceiptLedger(
+        identitySql as unknown as Parameters<typeof createPgReceiptLedger>[0],
+      );
+      let schema: Promise<void> | null = null;
+      const ready = () =>
+        (schema ??= ensureReceiptSchema(
+          identitySql as unknown as Parameters<typeof ensureReceiptSchema>[0],
+        ).catch((err) => {
+          schema = null;
+          throw err;
+        }));
+      ledger = {
+        covered: async (g, h) => (await ready(), pg.covered(g, h)),
+        record: async (r) => (await ready(), pg.record(r)),
+        deleteGroup: async (g) => (await ready(), pg.deleteGroup(g)),
+      };
+    } else {
+      api.logger.warn(
+        "memory-graphiti: no identity database; receipts are in-memory only (transcripts will be held, not purged)",
+      );
+      ledger = createMemoryReceiptLedger();
+    }
+    const inFlight = new Set<string>();
+
+    /**
+     * The memory group for a turn: identity-resolved where possible, ALWAYS
+     * opaque (a namespaced hash, never a raw Clerk id or phone number), plus
+     * whether a real identity backed it. Under the cloud approval, an
+     * unidentified (anonymous or gated) turn gets NO memory: it is never sent and
+     * never recalled (the no_identity class, CTO #16922).
+     */
+    const resolveMemoryGroup = async (
+      ctx: GroupIdContext,
+    ): Promise<{ groupId: string; identified: boolean }> => {
+      if (identitySql && cfg.groupIdStrategy === "identity") {
+        const externalKey = externalIdScopeKey(ctx);
+        if (externalKey) {
+          return { groupId: opaqueGroupId(externalKey), identified: true };
+        }
+        try {
+          const scopeKey = await resolveIdentityScopeKey(identitySql, ctx);
+          if (scopeKey) {
+            return { groupId: opaqueGroupId(scopeKey), identified: true };
+          }
+        } catch (err) {
+          api.logger.warn(
+            `memory-graphiti: identity resolution failed, falling back: ${String(err)}`,
+          );
+        }
+        return { groupId: opaqueGroupId(deriveGroupId(ctx, cfg)), identified: false };
+      }
+      const raw = cfg.userId ?? (ctx.sessionKey ? deriveGroupId(ctx, cfg) : null);
+      return raw === null
+        ? { groupId: lastGroupId, identified: false }
+        : { groupId: opaqueGroupId(raw), identified: cfg.userId !== undefined };
+    };
 
     // ========================================================================
     // Tools
@@ -566,31 +660,11 @@ const memoryPlugin = {
           return;
         }
 
-        // Derive group_id: identity strategy queries DB for canonical user,
-        // other strategies use synchronous derivation.
-        let groupId: string;
-        if (identitySql && cfg.groupIdStrategy === "identity") {
-          // Prefer the verified external caller identity (Clerk JWT `sub` for
-          // HTTP chat callers) BEFORE the DB lookup: the HTTP path has no
-          // channel/peer to query on, and keying on it unifies the HTTP/Clerk
-          // graph with the same person's WhatsApp graph (#834/#836). Channel
-          // callers carry no externalId → existing DB/derive path is unchanged.
-          const externalKey = externalIdScopeKey(ctx);
-          if (externalKey) {
-            groupId = externalKey;
-          } else {
-            try {
-              const scopeKey = await resolveIdentityScopeKey(identitySql, ctx);
-              groupId = scopeKey ?? deriveGroupId(ctx, cfg);
-            } catch (err) {
-              api.logger.warn(
-                `memory-graphiti: identity resolution failed, falling back: ${String(err)}`,
-              );
-              groupId = deriveGroupId(ctx, cfg);
-            }
-          }
-        } else {
-          groupId = cfg.userId ?? (ctx.sessionKey ? deriveGroupId(ctx, cfg) : lastGroupId);
+        // Identity-resolved, opaque group (the verified Clerk `sub` first, so the
+        // HTTP/Clerk graph unifies with the same person's other channels, #834/#836).
+        const { groupId, identified } = await resolveMemoryGroup(ctx);
+        if (approval && !identified) {
+          return; // no_identity: an anonymous/gated turn gets no memory
         }
 
         // PHI tripwire (recall): on cloud, only recall for a QA sender. A non-QA
@@ -598,7 +672,7 @@ const memoryPlugin = {
         // entirely (no network, no prependContext). Gate on the host-resolved
         // ctx.senderE164, NOT the session key (which collapses DMs to `main`).
         // Self-hosted is never gated.
-        if (!zepAllowed(ctx.senderE164)) {
+        if (!hookZepAllowed(ctx.senderE164)) {
           onBreach({ op: "searchFacts", backendLabel: client.label, reason: "non-qa-sender" });
           return;
         }
@@ -636,24 +710,10 @@ const memoryPlugin = {
             return;
           }
 
-          let groupId: string;
-          if (identitySql && cfg.groupIdStrategy === "identity") {
-            // Prefer the verified external caller identity (Clerk JWT `sub`) so
-            // capture keys the SAME graph recall does (#834/#836) — the shared
-            // externalIdScopeKey helper guarantees recall+capture cannot drift.
-            const externalKey = externalIdScopeKey(ctx);
-            if (externalKey) {
-              groupId = externalKey;
-            } else {
-              try {
-                const scopeKey = await resolveIdentityScopeKey(identitySql, ctx);
-                groupId = scopeKey ?? deriveGroupId(ctx, cfg);
-              } catch {
-                groupId = deriveGroupId(ctx, cfg);
-              }
-            }
-          } else {
-            groupId = cfg.userId ?? deriveGroupId(ctx, cfg);
+          // The SAME resolver recall uses, so recall and capture cannot drift.
+          const { groupId, identified } = await resolveMemoryGroup(ctx);
+          if (approval && !identified) {
+            return; // no_identity: an anonymous/gated turn is never sent
           }
           // Store for use in before_agent_start
           lastGroupId = groupId;
@@ -663,28 +723,25 @@ const memoryPlugin = {
           // drop it (no addMessages, no network). Never throws (capture is
           // already fire-and-forget). Gate on the host-resolved ctx.senderE164,
           // NOT the session key. Self-hosted is never gated.
-          if (!zepAllowed(ctx.senderE164)) {
+          if (!hookZepAllowed(ctx.senderE164)) {
             onBreach({ op: "addMessages", backendLabel: client.label, reason: "non-qa-sender" });
             return;
           }
 
-          const timestamp = new Date().toISOString();
-          const graphitiMessages = extracted.map((m) => ({
-            content: m.content,
-            role_type: m.roleType as "user" | "assistant" | "system",
-            role: m.roleType === "assistant" ? "openclaw" : (ctx.messageProvider ?? "user"),
-            timestamp,
-            source_description: `openclaw:${ctx.messageProvider ?? "cli"}`,
-          }));
-
-          // Fire-and-forget: don't block on Graphiti processing
-          client.addMessages(groupId, graphitiMessages).catch((err) => {
-            api.logger.warn(`memory-graphiti: capture failed: ${String(err)}`);
-          });
-
-          api.logger.info?.(
-            `memory-graphiti: queued ${graphitiMessages.length} messages for group ${groupId}`,
-          );
+          // Minimise → skip receipted → ingest with read-back → record receipt.
+          // Not awaited: a chat turn never waits on memory. Counts only in logs.
+          void captureWithReceipts({ client, ledger, groupId, messages: extracted, inFlight })
+            .then((r) =>
+              api.logger.info?.(
+                `memory-graphiti: capture ingested=${r.ingested} skipped=${r.skipped} dropped=${r.dropped}`,
+              ),
+            )
+            .catch((err) => {
+              const reason = (err as { reason?: string }).reason ?? "error";
+              api.logger.warn(
+                `memory-graphiti: capture not confirmed (${reason}); content held: ${String(err)}`,
+              );
+            });
         } catch (err) {
           api.logger.warn(`memory-graphiti: capture failed: ${String(err)}`);
         }
