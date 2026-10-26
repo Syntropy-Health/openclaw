@@ -23,6 +23,7 @@
 
 import { createRetryingInit, openPluginPool, type OpenClawPluginApi } from "openclaw/plugin-sdk";
 import postgres from "postgres";
+import { isHttpGateChannel } from "../../shared/http-channels.js";
 import { TtlCache } from "./cache.js";
 import { callSyntropyTool, type SyntropyToolResult } from "./client.js";
 import { parseSyntropyConfig } from "./config.js";
@@ -133,6 +134,29 @@ The user needs to complete pairing first:
 [/SYNTROPY_GATE]`;
 
 /**
+ * The data gate for HTTP surfaces (shrinemobile, webchat). Chat commands do not
+ * dispatch there, so this copy must NEVER tell the user to type `!verify` (or any
+ * command) or to fetch a pairing code: that instruction is a dead end the user
+ * cannot complete (measured on staging 2026-10-23, CTO #16865). Honest and
+ * short, with no promised date. The real mobile access path is mono #595.
+ */
+export const SYNTROPY_GATE_HTTP = `[SYNTROPY_GATE]
+status: LOCKED
+reason: No Syntropy auth token found for this user.
+
+Health tools (food logging, diet scoring, check-ins) are NOT available.
+Linking health data is not available in this app yet.
+If the user asks for something that needs their health data, say plainly that
+it is not available in this app yet. Do not give a date. Do not tell them to
+type any command or to pair a device; those steps do not work here.
+[/SYNTROPY_GATE]`;
+
+/** The data-gate block for `channel`: command-free copy on HTTP surfaces. */
+export function syntropyGateFor(channel: string | null | undefined): string {
+  return isHttpGateChannel(channel) ? SYNTROPY_GATE_HTTP : SYNTROPY_GATE;
+}
+
+/**
  * Decide the `before_agent_start` result for a (possibly-resolved) user —
  * extracted from the hook closure so the wiring is unit-testable without a DB.
  *
@@ -146,6 +170,11 @@ The user needs to complete pairing first:
 export async function decideProfileInjection(opts: {
   user: ResolvedUser | null;
   cacheKey: string;
+  /**
+   * The turn's channel. REQUIRED (not optional) so a call site cannot forget it
+   * and silently fall back to the `!verify` copy on an HTTP surface.
+   */
+  channel: string;
   resolvedUsers: TtlCache<string, ResolvedUser>;
   profileBlocks: TtlCache<string, string>;
   fetchProfile: (authToken: string) => Promise<SyntropyToolResult>;
@@ -157,6 +186,7 @@ export async function decideProfileInjection(opts: {
   const {
     user,
     cacheKey,
+    channel,
     resolvedUsers,
     profileBlocks,
     fetchProfile,
@@ -168,7 +198,7 @@ export async function decideProfileInjection(opts: {
     resolvedUsers.delete(cacheKey);
     profileBlocks.delete(cacheKey);
     profileNegative?.delete(cacheKey);
-    return { prependContext: SYNTROPY_GATE };
+    return { prependContext: syntropyGateFor(channel) };
   }
 
   resolvedUsers.set(cacheKey, user);
@@ -502,6 +532,7 @@ const syntropyPlugin = {
           return await decideProfileInjection({
             user,
             cacheKey,
+            channel,
             resolvedUsers,
             profileBlocks,
             profileInFlight,
