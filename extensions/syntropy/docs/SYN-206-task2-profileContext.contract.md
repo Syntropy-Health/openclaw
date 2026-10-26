@@ -46,7 +46,8 @@ The hook (priority 35) already resolves the user and, on success, caches the
   `const profileBlocks = new TtlCache<string, string>({ ttlMs: USER_CACHE_TTL_MS, maxSize: USER_CACHE_MAX_SIZE });`
   (Same 10-min TTL / 10k bound. Key: the existing `${channel}:${peerId}` cacheKey.)
 - **Unpaired** (`!user`): unchanged behavior — `resolvedUsers.delete(cacheKey)`,
-  also `profileBlocks.delete(cacheKey)`, return `{ prependContext: SYNTROPY_GATE }`.
+  also `profileBlocks.delete(cacheKey)`, return `{ prependContext: syntropyGateFor(channel) }`
+  (the command-free `SYNTROPY_GATE_HTTP` on HTTP surfaces, else `SYNTROPY_GATE`; CTO #16865).
 - **Paired**: after `resolvedUsers.set(cacheKey, user)`, call:
   ```ts
   const block = await resolveProfileContext({

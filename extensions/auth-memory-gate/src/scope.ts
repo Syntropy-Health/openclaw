@@ -1,4 +1,5 @@
 import type postgres from "postgres";
+import { HTTP_GATE_CHANNELS } from "../../shared/http-channels.js";
 import { deriveScopeKey } from "../../shared/scope-key.js";
 
 // ---------------------------------------------------------------------------
@@ -246,8 +247,10 @@ export function formatHardGateReplyAppend(): string {
  * go straight to the agent with NO plugin-command dispatch, so `!identify` /
  * `!verify` cannot run there; a gated HTTP user verifies by signing in (Clerk),
  * which binds the device ([G1]). Their gate message says so.
+ *
+ * Re-exported from the shared module so the syntropy data gate uses the SAME set.
  */
-export const HTTP_GATE_CHANNELS: ReadonlySet<string> = new Set(["webchat", "shrinemobile"]);
+export { HTTP_GATE_CHANNELS };
 
 /**
  * The user-facing reply for a hard-gated turn, sent INSTEAD of a model answer via
