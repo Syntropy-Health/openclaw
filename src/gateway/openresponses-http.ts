@@ -59,6 +59,7 @@ import {
   type StreamingEvent,
   type Usage,
 } from "./open-responses.schema.js";
+import { reportStructuralHint } from "./structural-hint-log.js";
 import type { TauMeter } from "./tau-meter.js";
 
 type OpenResponsesHttpOptions = {
@@ -284,7 +285,11 @@ function resolveOpenResponsesSessionKey(params: {
   user?: string | undefined;
   userScope?: string | undefined;
 }): string {
-  return resolveSessionKey({ ...params, prefix: "openresponses" });
+  return resolveSessionKey({
+    ...params,
+    prefix: "openresponses",
+    onStructuralHint: reportStructuralHint,
+  });
 }
 
 function createEmptyUsage(): Usage {

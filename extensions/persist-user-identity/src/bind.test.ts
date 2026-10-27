@@ -292,3 +292,34 @@ describe("autoBindVerifiedPeer — never reassigns another account's device (RED
     expect(links.get("shrinemobile|dev-new")).toBe(USER_A.id);
   });
 });
+
+describe("autoBindVerifiedPeer — reinstall never locks out the real user", () => {
+  it("A reinstalls (NEW device id): a fresh binding is created while A's old binding still exists", async () => {
+    const links = new Map([["shrinemobile|dev-A1", USER_A.id]]);
+    const { sql } = statefulBindSql([USER_A, USER_B], links);
+    const user = await autoBindVerifiedPeer(sql, {
+      externalId: "user_2A",
+      channel: "shrinemobile",
+      channelPeerId: "dev-A2",
+    });
+    expect(user.id).toBe(USER_A.id);
+    expect(links.get("shrinemobile|dev-A2")).toBe(USER_A.id);
+    expect(links.get("shrinemobile|dev-A1")).toBe(USER_A.id);
+  });
+
+  it("A's OLD device later presented by B is still refused (stays A's)", async () => {
+    const links = new Map([
+      ["shrinemobile|dev-A1", USER_A.id],
+      ["shrinemobile|dev-A2", USER_A.id],
+    ]);
+    const { sql } = statefulBindSql([USER_A, USER_B], links);
+    await expect(
+      autoBindVerifiedPeer(sql, {
+        externalId: "user_2B",
+        channel: "shrinemobile",
+        channelPeerId: "dev-A1",
+      }),
+    ).rejects.toBeInstanceOf(AutoBindRefusedError);
+    expect(links.get("shrinemobile|dev-A1")).toBe(USER_A.id);
+  });
+});

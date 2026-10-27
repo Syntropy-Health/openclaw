@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 /**
  * Cross-user isolation for VERIFIED HTTP turns (peer-steering fix).
  *
@@ -146,8 +147,10 @@ describe("persist-user-identity — [G1] auto-bind refusal is logged at WARN wit
       externalId: "user_2A",
       deviceId: "dev-B",
     });
+    // Findable without the raw id: the line carries sha256(deviceId)[:12].
+    const devHash = createHash("sha256").update("dev-B").digest("hex").slice(0, 12);
     expect(api.logger.warn).toHaveBeenCalledWith(
-      "persist-user-identity: [G1] auto-bind refused: device bound to another account",
+      `persist-user-identity: [G1] auto-bind refused: device bound to another account device=${devHash}`,
     );
     expect(api.logger.error).not.toHaveBeenCalled();
     const logged = [api.logger.warn, api.logger.error, api.logger.info]
@@ -156,6 +159,7 @@ describe("persist-user-identity — [G1] auto-bind refusal is logged at WARN wit
     for (const id of ["dev-B", "user_2A", "user_2B", "uid-A", "uid-B"]) {
       expect(logged).not.toContain(id);
     }
+    expect(logged).toContain(`device=${devHash}`);
     // The upsert was attempted with the ownership guard.
     expect(
       calls().some(

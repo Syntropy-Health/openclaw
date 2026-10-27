@@ -60,7 +60,10 @@ async function boot() {
   const api = createMockApi({ databaseUrl: "postgresql://mock/test", hardGate: true });
   plugin.register(api);
   const hook = api._hooks.find((h) => h.name === "before_agent_start")!.handler;
+  const sending = api._hooks.find((h) => h.name === "message_sending")!.handler;
   return {
+    send: async (to: string, channelId: string) =>
+      (await sending({ to, content: "hi" }, { channelId })) as { content?: string },
     fire: async (ctx: Record<string, unknown>) =>
       (await hook({}, ctx)) as { prependContext?: string; shortCircuitReply?: string },
     calls: () => state.calls as SqlCall[],
@@ -170,4 +173,28 @@ describe("auth-memory-gate — an unverified HTTP-shaped session never resolves 
       }
     },
   );
+});
+
+describe("auth-memory-gate — verified turns key the gate by the sub, not the device (RED arm)", () => {
+  test("a gated verified caller sending a victim's device id never adds the victim's device key", async () => {
+    const { fire, send } = await boot();
+    const res = await fire({
+      sessionKey: "agent:main:openresponses-user:user_2nobody",
+      messageProvider: "shrinemobile",
+      externalId: "user_2nobody",
+      deviceId: "dev-B",
+    });
+    expect(res.prependContext).toContain("[IDENTITY_GATE]");
+    // The safety net keys on channel:to; the victim's device must not be marked gated.
+    const out = await send("dev-B", "shrinemobile");
+    expect(out).toEqual({});
+  });
+
+  test("control: an unverified channel peer that is gated IS keyed by its peer", async () => {
+    const { fire, send } = await boot();
+    await fire({ sessionKey: "agent:main:telegram:direct:nobody", messageProvider: "telegram" });
+    const out = await send("nobody", "telegram");
+    expect(out.content).toContain("hi");
+    expect(out.content).not.toBe("hi");
+  });
 });

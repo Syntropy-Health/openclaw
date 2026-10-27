@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { createRetryingInit, type OpenClawPluginApi } from "openclaw/plugin-sdk";
 // Gateway Clerk-verify + session deny-list — extension→src deep import per the
 // established convention (kapso precedent); src never imports extensions.
@@ -131,9 +132,11 @@ const persistUserIdentityPlugin = {
             } catch (err) {
               if (err instanceof AutoBindRefusedError) {
                 // Not a failure: a client sent a device id another account owns.
-                // No ids in the line (device id / sub are identifiers).
+                // No raw ids in the line; a sha256 prefix of the device id lets ops
+                // find a stuck row without logging the identifier itself.
+                const deviceHash = createHash("sha256").update(deviceId).digest("hex").slice(0, 12);
                 api.logger.warn(
-                  "persist-user-identity: [G1] auto-bind refused: device bound to another account",
+                  `persist-user-identity: [G1] auto-bind refused: device bound to another account device=${deviceHash}`,
                 );
               } else {
                 api.logger.error(

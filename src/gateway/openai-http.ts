@@ -21,6 +21,7 @@ import {
   resolveChannelFromHeader,
   resolveSessionKey,
 } from "./http-utils.js";
+import { reportStructuralHint } from "./structural-hint-log.js";
 import type { TauMeter } from "./tau-meter.js";
 
 type OpenAiHttpOptions = {
@@ -141,7 +142,7 @@ function resolveOpenAiSessionKey(params: {
   user?: string | undefined;
   userScope?: string | undefined;
 }): string {
-  return resolveSessionKey({ ...params, prefix: "openai" });
+  return resolveSessionKey({ ...params, prefix: "openai", onStructuralHint: reportStructuralHint });
 }
 
 function coerceRequest(val: unknown): OpenAiChatCompletionRequest {

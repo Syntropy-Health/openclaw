@@ -12,9 +12,10 @@
 
 import { createHash } from "node:crypto";
 import type { IncomingMessage } from "node:http";
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { derivePeerId } from "../../extensions/shared/session-key.js";
 import {
+  createStructuralHintReporter,
   deriveUserScopeFromSub,
   resolveChannelFromHeader,
   resolveSessionKey,
@@ -270,5 +271,110 @@ describe("resolveSessionKey — legacy (no scope) path unchanged", () => {
     const b = resolveSessionKey({ req: reqWith(), agentId: "main", prefix: "openresponses" });
     expect(a).not.toBe(b); // randomUUID per request
     expect(a.startsWith("agent:main:openresponses:")).toBe(true);
+  });
+});
+
+describe("resolveSessionKey — hint is case-insensitive", () => {
+  it("`Thread-42` and `thread-42` stay ONE session", () => {
+    const key = (hint: string) =>
+      resolveSessionKey({
+        req: reqWith({ "x-openclaw-session-key": hint }),
+        agentId: "main",
+        userScope: "user_2abc",
+        prefix: "openresponses",
+      });
+    expect(key("Thread-42")).toBe(key("thread-42"));
+    expect(key("THREAD-42")).toBe(
+      `agent:main:openresponses-user:user_2abc:${hintSegment("thread-42")}`,
+    );
+  });
+});
+
+describe("resolveSessionKey — structural-hint attempt detection", () => {
+  const run = (
+    hint: string | undefined,
+    onStructuralHint: (f: unknown) => void,
+    scope = "user_2caller",
+  ) =>
+    resolveSessionKey({
+      req: reqWith(hint === undefined ? {} : { "x-openclaw-session-key": hint }),
+      agentId: "main",
+      userScope: scope,
+      prefix: "openresponses",
+      onStructuralHint,
+    });
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it("`direct:x` reports direct=true colon=true main=false", () => {
+    const seen: unknown[] = [];
+    run("direct:x", (f) => seen.push(f));
+    expect(seen).toEqual([{ direct: true, colon: true, main: false }]);
+  });
+
+  it("segment match is case-insensitive; `main` alone is structural", () => {
+    const seen: unknown[] = [];
+    run("x:DIRECT:y", (f) => seen.push(f));
+    run("Main", (f) => seen.push(f));
+    expect(seen).toEqual([
+      { direct: true, colon: true, main: false },
+      { direct: false, colon: false, main: true },
+    ]);
+  });
+
+  it("a plain hint, no hint, or a substring (directory / mainline) reports nothing", () => {
+    const seen: unknown[] = [];
+    for (const h of ["thread-42", undefined, "directory", "mainline"]) {
+      run(h, (f) => seen.push(f));
+    }
+    expect(seen).toEqual([]);
+  });
+
+  it("the legacy (no scope) path does not report", () => {
+    const seen: unknown[] = [];
+    resolveSessionKey({
+      req: reqWith({ "x-openclaw-session-key": "agent:main:webchat:direct:x" }),
+      agentId: "main",
+      prefix: "openresponses",
+      onStructuralHint: (f) => seen.push(f),
+    });
+    expect(seen).toEqual([]);
+  });
+
+  it("the warn line has the flags only — never the hint text or the sub", () => {
+    const lines: string[] = [];
+    run(
+      "direct:user_2victim",
+      createStructuralHintReporter((m) => lines.push(m)),
+    );
+    expect(lines).toEqual([
+      "openresponses: session hint carried structural tokens (direct=true colon=true main=false)",
+    ]);
+    const all = lines.join("\n");
+    for (const s of ["user_2victim", "user_2caller", "direct:"]) {
+      expect(all).not.toContain(s);
+    }
+  });
+
+  it("rate-limits to one line per 10 s, then reports how many were suppressed", () => {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    vi.setSystemTime(new Date("2026-10-27T00:00:00Z"));
+    const lines: string[] = [];
+    const report = createStructuralHintReporter((m) => lines.push(m));
+    run("direct:a", report);
+    run("a:b", report);
+    run("main", report);
+    expect(lines).toHaveLength(1);
+    vi.setSystemTime(new Date("2026-10-27T00:00:09.999Z"));
+    run("direct:b", report);
+    expect(lines).toHaveLength(1);
+    vi.setSystemTime(new Date("2026-10-27T00:00:10.000Z"));
+    run("main:x", report);
+    expect(lines).toEqual([
+      "openresponses: session hint carried structural tokens (direct=true colon=true main=false)",
+      "openresponses: session hint carried structural tokens (direct=false colon=true main=true) suppressed=3",
+    ]);
   });
 });

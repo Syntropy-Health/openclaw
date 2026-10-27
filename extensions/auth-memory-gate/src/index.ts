@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { openPluginPool, type OpenClawPluginApi } from "openclaw/plugin-sdk";
 import postgres from "postgres";
 import { isHttpShapedSession } from "../../shared/http-channels.js";
@@ -162,7 +163,12 @@ const authMemoryGatePlugin = {
           return {};
         }
 
-        const gateKey = `${channel}:${peerId}`;
+        // On a VERIFIED turn the gate is keyed by the sub (hashed), never by the
+        // client-supplied device id: a caller sending a victim's device id must
+        // not mark the victim's device as gated for the message_sending net.
+        const gateKey = verifiedSub
+          ? `ext:${createHash("sha256").update(verifiedSub).digest("hex").slice(0, 16)}`
+          : `${channel}:${peerId}`;
         try {
           await ensureReady();
           // Cross-check the peer row against the turn's VERIFIED identity
