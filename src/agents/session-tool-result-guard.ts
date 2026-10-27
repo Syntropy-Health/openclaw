@@ -7,6 +7,7 @@ import type {
 } from "../plugins/types.js";
 import { emitSessionTranscriptUpdate } from "../sessions/transcript-events.js";
 import { HARD_MAX_TOOL_RESULT_CHARS } from "./pi-embedded-runner/tool-result-truncation.js";
+import { replaceImageBlocksForPersistence } from "./session-image-placeholder.js";
 import { makeMissingToolResult, sanitizeToolCallInputs } from "./session-transcript-repair.js";
 import { extractToolCallsFromAssistant, extractToolResultId } from "./tool-call-id.js";
 
@@ -109,7 +110,11 @@ export function installSessionToolResultGuard(
   flushPendingToolResults: () => void;
   getPendingIds: () => string[];
 } {
-  const originalAppend = sessionManager.appendMessage.bind(sessionManager);
+  const appendRaw = sessionManager.appendMessage.bind(sessionManager);
+  // Every write goes through here, last: image blocks are persisted as text placeholders
+  // (never base64), on a copy, so the in-memory message the model sees keeps its image.
+  const originalAppend = (message: AgentMessage) =>
+    appendRaw(replaceImageBlocksForPersistence(message) as never);
   const pending = new Map<string, string | undefined>();
   const persistMessage = (message: AgentMessage) => {
     const transformer = opts?.transformMessageForPersistence;
