@@ -49,6 +49,8 @@ import { createSyntropyVault, vaultRpcsInstalled, type SyntropyVault } from "./v
 // active-user count per gateway instance.
 const USER_CACHE_TTL_MS = 10 * 60 * 1000;
 const USER_CACHE_MAX_SIZE = 10_000;
+// sessionKey → verified cacheKey record (see verifiedSessions in register()).
+const VERIFIED_SESSION_TTL_MS = 2 * 60 * 1000;
 
 // Session-key parsing moved to ./session-key.ts for testability.
 
@@ -520,9 +522,12 @@ const syntropyPlugin = {
 
     // sessionKey → cacheKey (`ext:<externalId>`) for VERIFIED turns, written by
     // before_agent_start and read by the sync tool factory (whose ctx carries no
-    // externalId). Same TTL/bound as resolvedUsers.
+    // externalId). Rewritten (set OR deleted) as the FIRST statement of every
+    // hook run, so a later unverified run on the same key cannot reuse it. Short
+    // TTL: the factory runs right after the hook (run.ts early hook → attempt.ts
+    // createOpenClawCodingTools), so a record only needs to outlive one run.
     const verifiedSessions = new TtlCache<string, string>({
-      ttlMs: USER_CACHE_TTL_MS,
+      ttlMs: VERIFIED_SESSION_TTL_MS,
       maxSize: USER_CACHE_MAX_SIZE,
     });
 
@@ -546,6 +551,28 @@ const syntropyPlugin = {
     api.on(
       "before_agent_start",
       async (_event, ctx) => {
+        // FIRST statement, before any await or anything that can throw: this
+        // run's verified-session record for the key is either (re)written or
+        // removed, so a record from an earlier VERIFIED run on the same session
+        // key can never serve a later unverified run's tool factory.
+        //
+        // Runner isolation (src/plugins/hooks.ts runModifyingHook, global runner
+        // catchErrors: true): each handler's throw is caught and the loop goes on,
+        // so another plugin failing does not skip this handler. But if the runner
+        // call ITSELF rejects in run.ts (early call, caught there), attempt.ts
+        // builds the tools (createOpenClawCodingTools) BEFORE its late rerun of
+        // before_agent_start — so the factory CAN run for a run in which this hook
+        // has not executed. It then sees only a record ≤ VERIFIED_SESSION_TTL_MS
+        // old from an earlier run on the same key; the short TTL bounds that.
+        const recordKey = typeof ctx?.sessionKey === "string" ? ctx.sessionKey : "";
+        const recordSub = typeof ctx?.externalId === "string" ? ctx.externalId.trim() : "";
+        if (recordKey) {
+          if (recordSub) {
+            verifiedSessions.set(recordKey, `ext:${recordSub}`);
+          } else {
+            verifiedSessions.delete(recordKey);
+          }
+        }
         try {
           const sessionKey = ctx?.sessionKey ?? "";
           const channel = ctx?.messageProvider ?? deriveChannel(sessionKey);
@@ -566,11 +593,10 @@ const syntropyPlugin = {
           // user's identity and SJ token.
           const externalId = ctx?.externalId?.trim();
           if (externalId) {
+            // The session record was written at the top of the handler, so the
+            // factory sees this session as verified even if the lookup fails (it
+            // then finds no cached user and returns no tools — fail closed).
             const cacheKey = `ext:${externalId}`;
-            // Recorded BEFORE the lookup so the tool factory sees this session as
-            // verified even if the lookup fails (it then finds no cached user and
-            // returns no tools — fail closed).
-            if (sessionKey) verifiedSessions.set(sessionKey, cacheKey);
             await ensureStorage();
             const user = await resolveUserByExternalId(
               sql,

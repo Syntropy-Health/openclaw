@@ -8,7 +8,7 @@
  * gateway now hashes the hint, and this suite proves the identity hook does not
  * rely on that.
  */
-import { beforeEach, describe, expect, test, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 import type { OpenClawPluginApi } from "../../../src/plugins/types.js";
 import { queriedWith, type SqlCall } from "../../shared/identity-fixture-test-helpers.js";
 
@@ -244,4 +244,40 @@ describe("syntropy — an unverified HTTP-shaped session never resolves a peer (
       expect(state.tokensUsed).not.toContain("sj_tok_B");
     },
   );
+});
+
+describe("syntropy — a verified-session record cannot be replayed (RED arm)", () => {
+  const K = "agent:main:openresponses-user:user_2a:h0123456789abcdef";
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  test("verified hook for A on K, then an UNVERIFIED hook on K → the factory for K gets no tools", async () => {
+    const { fire, factory } = await boot();
+    await fire({ sessionKey: K, messageProvider: "shrinemobile", externalId: "user_2A" });
+    expect(factory({ sessionKey: K, messageChannel: "shrinemobile" })!.map((t) => t.token)).toEqual(
+      ["sj_tok_A"],
+    );
+    await fire({ sessionKey: K, messageProvider: "shrinemobile" });
+    expect(factory({ sessionKey: K, messageChannel: "shrinemobile" })).toBeNull();
+  });
+
+  test("an unverified hook clears the record even on a non-HTTP-reported channel", async () => {
+    const { fire, factory } = await boot();
+    await fire({ sessionKey: K, messageProvider: "shrinemobile", externalId: "user_2A" });
+    await fire({ sessionKey: K, messageProvider: "whatsapp" });
+    expect(factory({ sessionKey: K, messageChannel: "whatsapp" })).toBeNull();
+  });
+
+  test("with no preceding hook, an EXPIRED record (> 2 min) gives no tools", async () => {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    vi.setSystemTime(new Date("2026-10-27T00:00:00Z"));
+    const { fire, factory } = await boot();
+    await fire({ sessionKey: K, messageProvider: "shrinemobile", externalId: "user_2A" });
+    vi.setSystemTime(new Date("2026-10-27T00:01:59Z"));
+    expect(factory({ sessionKey: K, messageChannel: "shrinemobile" })).not.toBeNull();
+    vi.setSystemTime(new Date("2026-10-27T00:02:01Z"));
+    expect(factory({ sessionKey: K, messageChannel: "shrinemobile" })).toBeNull();
+  });
 });
