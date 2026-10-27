@@ -36,6 +36,7 @@ type JwtPayload = {
   aud?: unknown;
   exp?: unknown;
   nbf?: unknown;
+  azp?: unknown;
   [key: string]: unknown;
 };
 
@@ -50,6 +51,17 @@ export type VerifyClerkJwtOptions = {
   now?: number;
   /** Injectable JWKS fetcher; used INSTEAD of network fetch when provided. */
   fetchJwks?: (url: string) => Promise<Jwks>;
+  /**
+   * Allowed `azp` (authorized party) values. When a NON-EMPTY list is given the
+   * token's `azp` must be a string in it; unset/empty → no azp check
+   * (behaviour-preserving, so operators can observe real values first).
+   */
+  authorizedParties?: string[];
+  /**
+   * With an allow-list set, a token WITHOUT `azp` passes only when this is
+   * `true`. Never admits a present-but-unlisted azp.
+   */
+  allowMissingAzp?: boolean;
 };
 
 export type VerifiedClerkJwt = {
@@ -182,6 +194,18 @@ function claimsPass(payload: JwtPayload, opts: VerifyClerkJwtOptions, now: numbe
   // Subject must be a non-empty string.
   if (typeof payload.sub !== "string" || payload.sub.length === 0) {
     return false;
+  }
+
+  // Authorized party, when an allow-list is configured.
+  const parties = opts.authorizedParties;
+  if (Array.isArray(parties) && parties.length > 0) {
+    if (payload.azp === undefined) {
+      if (opts.allowMissingAzp !== true) {
+        return false;
+      }
+    } else if (typeof payload.azp !== "string" || !parties.includes(payload.azp)) {
+      return false;
+    }
   }
 
   return true;

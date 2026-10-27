@@ -5,6 +5,7 @@ import type {
   GatewayTrustedProxyConfig,
 } from "../config/config.js";
 import { readTailscaleWhoisIdentity, type TailscaleWhoisIdentity } from "../infra/tailscale.js";
+import { logInfo } from "../logger.js";
 import { safeEqualSecret } from "../security/secret-equal.js";
 import {
   AUTH_RATE_LIMIT_SCOPE_SHARED_SECRET,
@@ -47,6 +48,10 @@ export type ResolvedClerkAuth = {
   sessionResolver?: ClerkSessionResolver;
   /** Positive-cache TTL for session validation (ms). Config knob. */
   sessionCacheTtlMs?: number;
+  /** Allowed `azp` values; unset → azp not enforced (see VerifyClerkJwtOptions). */
+  authorizedParties?: string[];
+  /** With `authorizedParties` set, accept a token with no azp. */
+  allowMissingAzp?: boolean;
 };
 
 /**
@@ -347,8 +352,60 @@ export function resolveClerkAuth(
     env,
   );
 
-  return { jwksUrl, issuer, audience, sessionResolver, sessionCacheTtlMs };
+  const partiesSource =
+    clerkConfig?.authorizedParties ?? (env.OPENCLAW_CLERK_AUTHORIZED_PARTIES ?? "").split(",");
+  const parties = partiesSource.map((p) => p.trim()).filter(Boolean);
+  const authorizedParties = parties.length > 0 ? parties : undefined;
+  const allowMissingAzp =
+    clerkConfig?.allowMissingAzp ??
+    ["1", "true"].includes((env.OPENCLAW_CLERK_ALLOW_MISSING_AZP ?? "").trim().toLowerCase());
+
+  return {
+    jwksUrl,
+    issuer,
+    audience,
+    sessionResolver,
+    sessionCacheTtlMs,
+    authorizedParties,
+    allowMissingAzp,
+  };
 }
+
+const AZP_OBSERVE_CAP = 20;
+const AZP_VALUE_MAX = 100;
+
+/**
+ * Per-process `azp` observation log: one info line per DISTINCT azp value
+ * (`clerk: observed azp=<value>` / `azp=absent`), at most {@link AZP_OBSERVE_CAP}
+ * distinct values, then silent. Lets operators measure the real azp values before
+ * setting OPENCLAW_CLERK_AUTHORIZED_PARTIES. Only the azp value is ever logged —
+ * sanitized to `[A-Za-z0-9:/._-]` and capped at 100 chars; never the token, sub,
+ * or any other claim.
+ */
+export function createAzpObserver(
+  log: (message: string) => void,
+  cap: number = AZP_OBSERVE_CAP,
+): (azp: unknown) => void {
+  const seen = new Set<string>();
+  return (azp) => {
+    if (seen.size >= cap) {
+      return;
+    }
+    const value =
+      azp === undefined
+        ? "absent"
+        : typeof azp === "string"
+          ? azp.replace(/[^A-Za-z0-9:/._-]/g, "_").slice(0, AZP_VALUE_MAX)
+          : "non-string";
+    if (seen.has(value)) {
+      return;
+    }
+    seen.add(value);
+    log(`clerk: observed azp=${value}`);
+  };
+}
+
+const observeAzp = createAzpObserver((message) => logInfo(message));
 
 /**
  * Boot-assert (G-lane [G3], A&D §7 should-fix ii): the three Clerk gateway settings
@@ -396,18 +453,24 @@ export function looksLikeJws(token: string): boolean {
 export async function authorizeClerkJwt(
   token: string,
   clerk: ResolvedClerkAuth,
-  options?: Pick<VerifyClerkJwtOptions, "now" | "fetchJwks">,
+  options?: Pick<VerifyClerkJwtOptions, "now" | "fetchJwks"> & {
+    /** Observer for the verified token's azp (default: the per-process info log). */
+    onObservedAzp?: (azp: unknown) => void;
+  },
 ): Promise<{ ok: true; externalId: string; sid?: string } | { ok: false }> {
   const verified = await verifyClerkJwt(token, {
     jwksUrl: clerk.jwksUrl,
     issuer: clerk.issuer,
     audience: clerk.audience,
+    authorizedParties: clerk.authorizedParties,
+    allowMissingAzp: clerk.allowMissingAzp,
     now: options?.now,
     fetchJwks: options?.fetchJwks,
   });
   if (!verified) {
     return { ok: false };
   }
+  (options?.onObservedAzp ?? observeAzp)(verified.claims.azp);
   const sid = typeof verified.claims.sid === "string" ? verified.claims.sid : undefined;
   return { ok: true, externalId: verified.sub, sid };
 }

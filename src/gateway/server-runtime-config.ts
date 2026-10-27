@@ -4,7 +4,7 @@ import type {
   GatewayTailscaleConfig,
   loadConfig,
 } from "../config/config.js";
-import { logInfo } from "../logger.js";
+import { logInfo, logWarn } from "../logger.js";
 import {
   assertClerkConfigAllOrNone,
   assertGatewayAuthConfigured,
@@ -110,6 +110,10 @@ export async function resolveGatewayRuntimeConfig(params: {
         ? `[gateway] clerk session validation: ACTIVE (server-side revocation; cache ${resolvedAuth.clerk.sessionCacheTtlMs ?? 30000}ms)`
         : "[gateway] clerk session validation: INACTIVE (no backend secret) — JWT-verify only, NO revocation",
     );
+    // azp is opt-in (behaviour-preserving); say so once at boot until it is set.
+    if (!resolvedAuth.clerk.authorizedParties?.length) {
+      logWarn("clerk: azp not enforced (set OPENCLAW_CLERK_AUTHORIZED_PARTIES)");
+    }
   }
   if (tailscaleMode === "funnel" && authMode !== "password") {
     throw new Error(

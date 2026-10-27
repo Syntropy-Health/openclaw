@@ -37,6 +37,34 @@ describe("config schema regressions", () => {
     expect(res.ok).toBe(true);
   });
 
+  it("accepts gateway.auth.clerk incl. authorizedParties + allowMissingAzp (strict schema)", () => {
+    // gateway.auth is .strict(): a key missing from the zod object would stop the
+    // gateway booting from a config file that sets it.
+    const res = validateConfigObject({
+      gateway: {
+        auth: {
+          clerk: {
+            jwksUrl: "https://clerk.example.test/.well-known/jwks.json",
+            issuer: "https://clerk.example.test",
+            audience: "openclaw",
+            authorizedParties: ["https://shrinelongevity.com"],
+            allowMissingAzp: true,
+          },
+        },
+      },
+    });
+
+    expect(res.ok).toBe(true);
+  });
+
+  it("rejects an unknown key under gateway.auth.clerk (strict)", () => {
+    const res = validateConfigObject({
+      gateway: { auth: { clerk: { authorisedParties: ["https://x.test"] } } },
+    });
+
+    expect(res.ok).toBe(false);
+  });
+
   it("accepts gateway.channelHealthCheckMinutes (strict-schema gap regression)", () => {
     // The field exists on GatewayConfig (types.gateway.ts) and is honored at
     // runtime, but was missing from the .strict() gateway zod object — so any
