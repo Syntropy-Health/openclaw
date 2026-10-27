@@ -111,13 +111,20 @@ const STEER_WEB = "agent:main:openresponses-user:user_2A:direct:user_2B";
 
 describe("syntropy — verified HTTP turns resolve by external_id (RED arm)", () => {
   test.each([
-    ["shrinemobile", STEER_DEVICE],
-    ["webchat", STEER_WEB],
+    ["shrinemobile", STEER_DEVICE, undefined],
+    ["webchat", STEER_WEB, undefined],
+    // A victim's device id (X-OpenClaw-Device-Id) on an un-steered key.
+    ["shrinemobile", "agent:main:openresponses-user:user_2a", "dev-B"],
   ])(
-    "caller A on %s steering the session peer to B gets A's token, never B's",
-    async (channel, sessionKey) => {
+    "caller A on %s (session %s, device %s) gets A's token, never B's",
+    async (channel, sessionKey, deviceId) => {
       const { fire, factory, calls } = await boot();
-      await fire({ sessionKey, messageProvider: channel, externalId: "user_2A" });
+      await fire({
+        sessionKey,
+        messageProvider: channel,
+        externalId: "user_2A",
+        ...(deviceId ? { deviceId } : {}),
+      });
       const tools = factory({ sessionKey, messageChannel: channel });
       expect(tools).not.toBeNull();
       expect(tools!.map((t) => t.token)).toEqual(["sj_tok_A"]);
@@ -146,12 +153,21 @@ describe("syntropy — verified HTTP turns resolve by external_id (RED arm)", ()
     expect(factory({ sessionKey, messageChannel: "shrinemobile" })).toBeNull();
   });
 
-  test("a verified external_id with no lp_users row is unpaired", async () => {
+  // shrinemobile + direct:dev-B is a key the OLD peer path resolved to B, so this
+  // arm fails for the right reason on the pre-fix code (B's token leaks).
+  test("a verified external_id with no lp_users row is unpaired (and never B)", async () => {
     const { fire, factory, mod } = await boot();
     const sessionKey = "agent:main:openresponses-user:user_2nobody:direct:dev-B";
-    const res = await fire({ sessionKey, messageProvider: "webchat", externalId: "user_2nobody" });
+    const res = await fire({
+      sessionKey,
+      messageProvider: "shrinemobile",
+      externalId: "user_2nobody",
+    });
+    expect(state.tokensUsed).not.toContain("sj_tok_B");
     expect(res.prependContext).toBe(mod.SYNTROPY_GATE_HTTP);
-    expect(factory({ sessionKey, messageChannel: "webchat" })).toBeNull();
+    const tools = factory({ sessionKey, messageChannel: "shrinemobile" });
+    expect(tools?.map((t) => t.token) ?? []).not.toContain("sj_tok_B");
+    expect(tools).toBeNull();
   });
 });
 

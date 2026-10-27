@@ -117,12 +117,14 @@ describe("persist-user-identity — verified turns resolve by external_id (RED a
   test("a verified external_id with no lp_users row gets the unknown-user block (no one else's)", async () => {
     const { fire } = await boot();
     const res = await fire({
+      // shrinemobile + direct:dev-B: the OLD peer path resolved this to B.
       sessionKey: "agent:main:openresponses-user:user_2nobody:direct:dev-B",
-      messageProvider: "webchat",
+      messageProvider: "shrinemobile",
       externalId: "user_2nobody",
     });
-    expect(res.prependContext).toContain("user_id: none");
     expect(res.prependContext).not.toContain("uid-B");
+    expect(res.prependContext).not.toContain("user_2B");
+    expect(res.prependContext).toContain("user_id: none");
   });
 });
 
