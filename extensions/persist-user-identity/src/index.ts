@@ -5,6 +5,7 @@ import { authorizeClerkJwt, resolveClerkAuth } from "../../../src/gateway/auth.j
 import { evictClerkSessionCache } from "../../../src/gateway/clerk-session-validation.js";
 // Session-key parsing is shared with auth-memory-gate + syntropy so the
 // convention can't drift across the three identity hooks (oc-hygiene #7).
+import { isHttpShapedSession } from "../../shared/http-channels.js";
 import { safeErr } from "../../shared/log-redact.js";
 import { deriveChannel, deriveIdentityPeer } from "../../shared/session-key.js";
 import { tokenCipherFromEnv } from "../../syntropy/src/token-cipher.js";
@@ -152,6 +153,12 @@ const persistUserIdentityPlugin = {
                 ? formatIdentityContext(verified, "new_session")
                 : formatUnknownUserContext(channel),
             };
+          }
+
+          // An UNVERIFIED HTTP-shaped session is unidentified: its session-key
+          // tail / device id is client-chosen and must never select a row.
+          if (isHttpShapedSession(channel, sessionKey)) {
+            return { prependContext: formatUnknownUserContext(channel) };
           }
 
           if (!peerId || peerId === "main" || peerId === "unknown") {

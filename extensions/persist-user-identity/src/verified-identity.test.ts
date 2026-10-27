@@ -168,3 +168,48 @@ describe("persist-user-identity — [G1] auto-bind refusal is logged at WARN wit
     expect(res.prependContext).toContain("user_id: uid-A");
   });
 });
+
+const LEGACY_STEERING: Array<[string, Record<string, unknown>]> = [
+  [
+    "X-OpenClaw-Channel shrinemobile + body user direct:dev-B",
+    { sessionKey: "agent:main:openresponses-user:direct:dev-B", messageProvider: "shrinemobile" },
+  ],
+  [
+    "raw session key agent:main:webchat:direct:user_2B",
+    { sessionKey: "agent:main:webchat:direct:user_2B", messageProvider: "webchat" },
+  ],
+  [
+    "raw shrinemobile session key with no provider",
+    { sessionKey: "agent:main:shrinemobile:direct:dev-B" },
+  ],
+];
+
+describe("persist-user-identity — an unverified HTTP-shaped session never resolves a peer (RED arm)", () => {
+  test.each(LEGACY_STEERING)("%s: no B identity injected", async (_name, ctx) => {
+    const { fire, calls } = await boot();
+    const res = await fire(ctx);
+    expect(res.prependContext ?? "").not.toContain("uid-B");
+    expect(res.prependContext ?? "").not.toContain("user_2B");
+    expect(res.prependContext).toContain("user_id: none");
+    expect(isSelectLookup(calls(), "dev-B")).toBe(false);
+    expect(isSelectLookup(calls(), "user_2B")).toBe(false);
+  });
+
+  test.each(["", "   ", "\t"])(
+    "a blank externalId (%j) is absent: no external_id lookup with a blank value",
+    async (externalId) => {
+      const { fire, calls } = await boot();
+      const res = await fire({
+        sessionKey: "agent:main:openresponses-user:direct:dev-B",
+        messageProvider: "shrinemobile",
+        externalId,
+      });
+      expect(res.prependContext ?? "").not.toContain("uid-B");
+      for (const c of calls()) {
+        if (c.text.startsWith("SELECT") && /external_id = \$/.test(c.text)) {
+          expect(String(c.values[0]).trim()).not.toBe("");
+        }
+      }
+    },
+  );
+});

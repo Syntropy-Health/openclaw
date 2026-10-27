@@ -158,7 +158,9 @@ describe("syntropy — verified HTTP turns resolve by external_id (RED arm)", ()
 describe("syntropy — tool factory fails closed on HTTP without a verified record", () => {
   test("an HTTP session with no verified record gets NO tools, even when its derived peer is cached", async () => {
     const { fire, factory } = await boot();
-    // Populate the peer cache for (shrinemobile, dev-B) through the channel path.
+    // Try to populate the peer cache for (shrinemobile, dev-B). Since the
+    // HTTP-shaped-session rule this hook no longer resolves a peer at all; the
+    // factory check below is the second, independent line.
     await fire({
       sessionKey: "agent:main:shrinemobile:direct:dev-B",
       messageProvider: "shrinemobile",
@@ -193,4 +195,53 @@ describe("syntropy — channel turns keep the peer path (characterization)", () 
     expect(res.prependContext).toBe(mod.SYNTROPY_GATE);
     expect(factory({ sessionKey, messageChannel: "telegram" })).toBeNull();
   });
+});
+
+// Legacy (non-Clerk) path: a shared-token caller can choose the channel header
+// and the session key's tail (body `user`, or a raw X-OpenClaw-Session-Key).
+const LEGACY_STEERING: Array<[string, Record<string, unknown>]> = [
+  [
+    "X-OpenClaw-Channel shrinemobile + body user direct:dev-B",
+    { sessionKey: "agent:main:openresponses-user:direct:dev-B", messageProvider: "shrinemobile" },
+  ],
+  [
+    "raw session key agent:main:webchat:direct:user_2B",
+    { sessionKey: "agent:main:webchat:direct:user_2B", messageProvider: "webchat" },
+  ],
+  [
+    "raw shrinemobile session key with no provider",
+    { sessionKey: "agent:main:shrinemobile:direct:dev-B" },
+  ],
+];
+
+const externalIdQueries = (calls: SqlCall[]) =>
+  calls.filter((c) => c.text.startsWith("SELECT") && /external_id = \$/.test(c.text));
+
+describe("syntropy — an unverified HTTP-shaped session never resolves a peer (RED arm)", () => {
+  test.each(LEGACY_STEERING)("%s: HTTP gate copy, no B profile, no tools", async (_name, ctx) => {
+    const { fire, factory, mod, calls } = await boot();
+    const res = await fire(ctx);
+    expect(res.prependContext).toBe(mod.SYNTROPY_GATE_HTTP);
+    expect(state.tokensUsed).not.toContain("sj_tok_B");
+    expect(queriedWith(calls(), "dev-B")).toBe(false);
+    expect(queriedWith(calls(), "user_2B")).toBe(false);
+    expect(factory({ sessionKey: ctx.sessionKey, messageChannel: ctx.messageProvider })).toBeNull();
+  });
+
+  test.each(["", "   ", "\t"])(
+    "a blank externalId (%j) is absent: no external_id query with a blank value, gated",
+    async (externalId) => {
+      const { fire, mod, calls } = await boot();
+      const res = await fire({
+        sessionKey: "agent:main:openresponses-user:direct:dev-B",
+        messageProvider: "shrinemobile",
+        externalId,
+      });
+      expect(res.prependContext).toBe(mod.SYNTROPY_GATE_HTTP);
+      for (const c of externalIdQueries(calls())) {
+        expect(String(c.values[0]).trim()).not.toBe("");
+      }
+      expect(state.tokensUsed).not.toContain("sj_tok_B");
+    },
+  );
 });

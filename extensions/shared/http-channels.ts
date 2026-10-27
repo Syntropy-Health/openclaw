@@ -1,3 +1,5 @@
+import { deriveChannel } from "./session-key.js";
+
 /**
  * HTTP chat surfaces (`x-openclaw-channel` allowlist, src/gateway/http-utils.ts).
  *
@@ -25,4 +27,32 @@ export const HTTP_GATE_CHANNELS: ReadonlySet<string> = new Set(["webchat", "shri
 /** True when `channel` is an HTTP surface where chat commands do not dispatch. */
 export function isHttpGateChannel(channel: string | null | undefined): boolean {
   return typeof channel === "string" && HTTP_GATE_CHANNELS.has(channel);
+}
+
+/** Session-key channel segments the gateway HTTP chat path mints (http-utils.ts). */
+const HTTP_SESSION_KEY_CHANNELS: ReadonlySet<string> = new Set([
+  "openresponses-user",
+  "openai-user",
+]);
+
+/**
+ * True for a session that arrived over the HTTP chat surface: the reported
+ * channel is an HTTP gate channel, or the session key's channel segment is one
+ * the gateway HTTP path mints (`openresponses-user` / `openai-user`), or is an
+ * HTTP gate channel itself (a raw `X-OpenClaw-Session-Key`).
+ *
+ * On such a session the session key's tail is CLIENT-INFLUENCED (body `user`,
+ * the session-key header), so an UNVERIFIED turn must never resolve an identity
+ * by (channel, peer). Shared by syntropy, persist-user-identity and
+ * auth-memory-gate so the three hooks cannot disagree.
+ */
+export function isHttpShapedSession(
+  channel: string | null | undefined,
+  sessionKey: string | null | undefined,
+): boolean {
+  if (isHttpGateChannel(channel)) {
+    return true;
+  }
+  const keyChannel = deriveChannel(sessionKey ?? "");
+  return HTTP_SESSION_KEY_CHANNELS.has(keyChannel) || isHttpGateChannel(keyChannel);
 }

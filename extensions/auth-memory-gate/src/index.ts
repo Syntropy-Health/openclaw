@@ -1,5 +1,6 @@
 import { openPluginPool, type OpenClawPluginApi } from "openclaw/plugin-sdk";
 import postgres from "postgres";
+import { isHttpShapedSession } from "../../shared/http-channels.js";
 import { logToken, redactPeer, safeErr } from "../../shared/log-redact.js";
 import { isConversationalSession } from "../../shared/session-key.js";
 import {
@@ -141,6 +142,14 @@ const authMemoryGatePlugin = {
         // session-key-derived) — MUST match persist-user-identity's [G1] bind
         // key, or the gate would miss the just-bound mobile row (A&D §7).
         const peerId = deriveIdentityPeer(ctx);
+        const verifiedSub = ctx?.externalId?.trim();
+
+        // An UNVERIFIED HTTP-shaped session is unidentified: its session-key
+        // tail / device id is client-chosen, so it never selects a row. Under
+        // hardGate it is gated (fail closed); no client-chosen key is recorded.
+        if (!verifiedSub && isHttpShapedSession(channel, sessionKey)) {
+          return hardGate ? gatedResult(channel, sessionKey) : {};
+        }
 
         if (!peerId || peerId === "main" || peerId === "unknown") {
           // No usable peer. On an HTTP surface under hardGate that is a client
@@ -164,7 +173,6 @@ const authMemoryGatePlugin = {
           // A VERIFIED turn resolves by external_id ONLY: the session/device-
           // derived peer is client-steerable, so it never selects the row (it
           // stays the gate/log key). Channel turns keep the (channel, peer) path.
-          const verifiedSub = ctx?.externalId?.trim();
           let row: Awaited<ReturnType<typeof findUserByChannelPeer>>;
           try {
             row = verifiedSub

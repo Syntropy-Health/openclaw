@@ -23,7 +23,7 @@
 
 import { createRetryingInit, openPluginPool, type OpenClawPluginApi } from "openclaw/plugin-sdk";
 import postgres from "postgres";
-import { isHttpGateChannel } from "../../shared/http-channels.js";
+import { isHttpGateChannel, isHttpShapedSession } from "../../shared/http-channels.js";
 import { TtlCache } from "./cache.js";
 import { callSyntropyTool, type SyntropyToolResult } from "./client.js";
 import { parseSyntropyConfig } from "./config.js";
@@ -186,16 +186,6 @@ If the user asks for something that needs their health data, say plainly that
 it is not available in this app yet. Do not give a date. Do not tell them to
 type any command or to pair a device; those steps do not work here.
 [/SYNTROPY_GATE]`;
-
-/**
- * True for an HTTP chat session: an HTTP gate channel, or a gateway HTTP session
- * key (`agent:<id>:openresponses-user:…` / `openai-user:…`) reported without one.
- */
-export function isHttpSession(channel: string | null | undefined, sessionKey: string): boolean {
-  if (isHttpGateChannel(channel)) return true;
-  const keyChannel = deriveChannel(sessionKey);
-  return keyChannel === "openresponses-user" || keyChannel === "openai-user";
-}
 
 /** The data-gate block for `channel`: command-free copy on HTTP surfaces. */
 export function syntropyGateFor(channel: string | null | undefined): string {
@@ -603,6 +593,13 @@ const syntropyPlugin = {
             });
           }
 
+          // An UNVERIFIED HTTP-shaped session is unidentified: its session-key
+          // tail (body `user`, a raw session-key header) is client-chosen, so it
+          // must never select a (channel, peer) row.
+          if (isHttpShapedSession(channel, sessionKey)) {
+            return { prependContext: SYNTROPY_GATE_HTTP };
+          }
+
           const peerId = derivePeerId(sessionKey);
 
           if (!peerId || peerId === "main" || peerId === "unknown") return {};
@@ -656,7 +653,7 @@ const syntropyPlugin = {
         if (verifiedCacheKey) {
           cacheKey = verifiedCacheKey;
         } else {
-          if (isHttpSession(channel, sessionKey)) return null;
+          if (isHttpShapedSession(channel, sessionKey)) return null;
           const peerId = derivePeerId(sessionKey);
           if (!peerId || peerId === "main" || peerId === "unknown") return null;
           cacheKey = `${channel}:${peerId}`;
