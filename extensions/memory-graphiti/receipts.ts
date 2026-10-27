@@ -96,6 +96,14 @@ export interface ReceiptLedger {
   pending(groupId: string, hashes: string[]): Promise<Map<string, string>>;
   addPending(groupId: string, hashes: string[], ref: string, store: string): Promise<void>;
   clearPending(groupId: string, hashes: string[]): Promise<void>;
+  /**
+   * Entries the user asked to FORGET (hashes only). Capture never sends them again,
+   * even though the gateway's live session may still replay them (agent_end sees the
+   * whole session). Kept after the forget, deliberately: deleting them would let the
+   * next turn re-upload exactly what was cleared.
+   */
+  tombstoned(groupId: string, hashes: string[]): Promise<Set<string>>;
+  addTombstones(groupId: string, hashes: string[]): Promise<void>;
   /** Delete every receipt AND pending row for a group (the user's forget). Returns receipts removed. */
   deleteGroup(groupId: string): Promise<number>;
 }
@@ -124,6 +132,13 @@ export async function ensureReceiptSchema(sql: Sql): Promise<void> {
       entry_hash TEXT NOT NULL,
       ref TEXT NOT NULL,
       store TEXT NOT NULL,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+      PRIMARY KEY (group_id, entry_hash)
+    )`;
+  await sql`
+    CREATE TABLE IF NOT EXISTS lp_memory_tombstones (
+      group_id TEXT NOT NULL,
+      entry_hash TEXT NOT NULL,
       created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
       PRIMARY KEY (group_id, entry_hash)
     )`;
@@ -173,6 +188,23 @@ export function createPgReceiptLedger(sql: Sql): ReceiptLedger {
           DELETE FROM lp_memory_pending WHERE group_id = ${groupId} AND entry_hash = ANY(${hashes})`;
       }
     },
+    async tombstoned(groupId, hashes) {
+      if (hashes.length === 0) {
+        return new Set();
+      }
+      const rows = await sql<{ entry_hash: string }>`
+        SELECT entry_hash FROM lp_memory_tombstones
+        WHERE group_id = ${groupId} AND entry_hash = ANY(${hashes})`;
+      return new Set(rows.map((r) => r.entry_hash));
+    },
+    async addTombstones(groupId, hashes) {
+      for (const h of hashes) {
+        await sql`
+          INSERT INTO lp_memory_tombstones (group_id, entry_hash)
+          VALUES (${groupId}, ${h})
+          ON CONFLICT (group_id, entry_hash) DO NOTHING`;
+      }
+    },
     async deleteGroup(groupId) {
       await sql`DELETE FROM lp_memory_pending WHERE group_id = ${groupId}`;
       const rows = await sql<{ id: string }>`
@@ -186,13 +218,24 @@ export function createPgReceiptLedger(sql: Sql): ReceiptLedger {
 export function createMemoryReceiptLedger(): ReceiptLedger & {
   rows: Map<string, MemoryReceipt>;
   pend: Map<string, string>;
+  tombs: Set<string>;
 } {
   const rows = new Map<string, MemoryReceipt>();
   const pend = new Map<string, string>();
+  const tombs = new Set<string>();
   const key = (g: string, h: string) => `${g}\u0000${h}`;
   return {
     rows,
     pend,
+    tombs,
+    async tombstoned(groupId, hashes) {
+      return new Set(hashes.filter((h) => tombs.has(key(groupId, h))));
+    },
+    async addTombstones(groupId, hashes) {
+      for (const h of hashes) {
+        tombs.add(key(groupId, h));
+      }
+    },
     async pending(groupId, hashes) {
       const out = new Map<string, string>();
       for (const h of hashes) {

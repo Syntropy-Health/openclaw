@@ -39,6 +39,8 @@ export type CaptureResult = {
   tooLong: number;
   /** Pending submissions whose read-back did NOT match: cleared so they can be re-sent. */
   mismatched: number;
+  /** Entries the user cleared ("Clear chat memory"): never sent again. */
+  tombstoned: number;
 };
 
 /** Split items into batches whose batchText fits MAX_BATCH_CHARS. Oversized single items are returned separately. */
@@ -79,6 +81,7 @@ export async function captureWithReceipts(opts: {
     dropped: 0,
     tooLong: 0,
     mismatched: 0,
+    tombstoned: 0,
   };
   const byHash = new Map<string, IngestItem>();
   for (const m of messages) {
@@ -91,9 +94,13 @@ export async function captureWithReceipts(opts: {
     byHash.set(entryHash(item), item);
   }
   const key = (h: string) => `${groupId}\u0000${h}`;
+  const tombs = await ledger.tombstoned(groupId, [...byHash.keys()]);
+  res.tombstoned = tombs.size;
   const covered = await ledger.covered(groupId, [...byHash.keys()]);
-  const open = [...byHash.keys()].filter((h) => !covered.has(h) && !inFlight.has(key(h)));
-  res.skipped += byHash.size - open.length;
+  const open = [...byHash.keys()].filter(
+    (h) => !tombs.has(h) && !covered.has(h) && !inFlight.has(key(h)),
+  );
+  res.skipped += byHash.size - open.length - tombs.size;
   if (open.length === 0) {
     return res;
   }
