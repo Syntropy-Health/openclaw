@@ -130,7 +130,7 @@ function runAgentAttempt(params: {
       runId: params.runId,
       extraSystemPrompt: params.opts.extraSystemPrompt,
       cliSessionId,
-      images: params.isFallbackRetry ? undefined : params.opts.images,
+      images: params.opts.images,
       streamParams: params.opts.streamParams,
     });
   }
@@ -163,7 +163,10 @@ function runAgentAttempt(params: {
     config: params.cfg,
     skillsSnapshot: params.skillsSnapshot,
     prompt: effectivePrompt,
-    images: params.isFallbackRetry ? undefined : params.opts.images,
+    // Caller images go to every attempt, fallback retries included. The transcript
+    // stores images as text placeholders (session-tool-result-guard), so the first
+    // attempt's copy cannot reach the fallback model and re-sending is not a duplicate.
+    images: params.opts.images,
     clientTools: params.opts.clientTools,
     provider: params.providerOverride,
     model: params.modelOverride,

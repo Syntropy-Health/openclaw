@@ -247,6 +247,23 @@ export function modelSupportsImages(model: { input?: string[] }): boolean {
   return model.input?.includes("image") ?? false;
 }
 
+/**
+ * Thrown when the caller supplied images but the selected model has no image input.
+ * The turn fails instead of silently running text-only as if no image was sent.
+ */
+export class ImageInputUnsupportedError extends Error {
+  readonly code = "image_input_unsupported";
+  readonly imageCount: number;
+
+  constructor(imageCount: number) {
+    super(
+      `model does not accept image input (${imageCount} image${imageCount === 1 ? "" : "s"} supplied)`,
+    );
+    this.name = "ImageInputUnsupportedError";
+    this.imageCount = imageCount;
+  }
+}
+
 function extractTextFromMessage(message: unknown): string {
   if (!message || typeof message !== "object") {
     return "";
@@ -364,8 +381,13 @@ export async function detectAndLoadPromptImages(params: {
   loadedCount: number;
   skippedCount: number;
 }> {
-  // If model doesn't support images, return empty results
+  // If model doesn't support images, return empty results. Caller-supplied images are
+  // never dropped silently: the turn fails with a typed error instead.
   if (!modelSupportsImages(params.model)) {
+    const suppliedCount = params.existingImages?.length ?? 0;
+    if (suppliedCount > 0) {
+      throw new ImageInputUnsupportedError(suppliedCount);
+    }
     return {
       images: [],
       historyImagesByIndex: new Map(),

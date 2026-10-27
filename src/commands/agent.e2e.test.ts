@@ -253,6 +253,44 @@ describe("agentCommand", () => {
     });
   });
 
+  it("passes caller images to the fallback retry, not only the first attempt", async () => {
+    await withTempHome(async (home) => {
+      const store = path.join(home, "sessions.json");
+      mockConfig(home, store, {
+        model: {
+          primary: "anthropic/claude-haiku-4-5",
+          fallbacks: ["openai/gpt-5.2"],
+        },
+        models: {
+          "anthropic/claude-haiku-4-5": {},
+          "openai/gpt-5.2": {},
+        },
+      });
+      vi.mocked(loadModelCatalog).mockResolvedValueOnce([
+        { id: "claude-haiku-4-5", name: "Haiku", provider: "anthropic" },
+        { id: "gpt-5.2", name: "GPT-5.2", provider: "openai" },
+      ]);
+      vi.mocked(runEmbeddedPiAgent)
+        .mockRejectedValueOnce(Object.assign(new Error("rate limited"), { status: 429 }))
+        .mockResolvedValueOnce({
+          payloads: [{ text: "ok" }],
+          meta: {
+            durationMs: 5,
+            agentMeta: { sessionId: "s", provider: "openai", model: "gpt-5.2" },
+          },
+        });
+      const images = [{ type: "image" as const, data: "aGVsbG8=", mimeType: "image/jpeg" }];
+
+      await agentCommand({ message: "what did I eat?", to: "+1555", images }, runtime);
+
+      const calls = vi.mocked(runEmbeddedPiAgent).mock.calls.map((call) => call[0]);
+      expect(calls).toHaveLength(2);
+      expect(calls[0]?.images).toEqual(images);
+      expect(calls[1]?.provider).toBe("openai");
+      expect(calls[1]?.images).toEqual(images);
+    });
+  });
+
   it("keeps explicit sessionKey even when sessionId exists elsewhere", async () => {
     await withTempHome(async (home) => {
       const store = path.join(home, "sessions.json");
