@@ -1,6 +1,7 @@
 import fs from "node:fs/promises";
 import path from "node:path";
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
+import { ImageInputUnsupportedError } from "../agents/pi-embedded-runner/run/images.js";
 import { agentCommand, getFreePort, installGatewayTestHooks } from "./test-helpers.js";
 
 installGatewayTestHooks({ scope: "suite" });
@@ -101,5 +102,41 @@ describe("OpenResponses input_image limits (e2e)", () => {
     expect(agentCommand).toHaveBeenCalledTimes(1);
     const [opts] = agentCommand.mock.calls[0] ?? [];
     expect((opts as { images?: unknown[] } | undefined)?.images).toHaveLength(1);
+  });
+});
+
+describe("OpenResponses: no image-capable model (e2e)", () => {
+  it("non-stream: ImageInputUnsupportedError maps to a 400 invalid_request_error", async () => {
+    agentCommand.mockReset();
+    agentCommand.mockRejectedValueOnce(new ImageInputUnsupportedError(1));
+    const res = await postImages([imagePart(1024)]);
+    expect(res.status).toBe(400);
+    const json = (await res.json()) as { error?: { type?: string; message?: string } };
+    expect(json.error?.type).toBe("invalid_request_error");
+    expect(json.error?.message).toMatch(/does not accept image input/);
+  });
+
+  it("stream: ImageInputUnsupportedError ends with response.failed invalid_request_error", async () => {
+    agentCommand.mockReset();
+    agentCommand.mockRejectedValueOnce(new ImageInputUnsupportedError(1));
+    const res = await fetch(`http://127.0.0.1:${port}/v1/responses`, {
+      method: "POST",
+      headers: { "content-type": "application/json", authorization: "Bearer secret" },
+      body: JSON.stringify({
+        model: "openclaw",
+        stream: true,
+        input: [
+          {
+            type: "message",
+            role: "user",
+            content: [{ type: "input_text", text: "what did I eat?" }, imagePart(1024)],
+          },
+        ],
+      }),
+    });
+    const text = await res.text();
+    expect(text).toContain("response.failed");
+    expect(text).toContain('"code":"invalid_request_error"');
+    expect(text).toMatch(/does not accept image input/);
   });
 });

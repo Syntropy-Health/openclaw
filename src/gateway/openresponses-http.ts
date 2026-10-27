@@ -8,6 +8,7 @@
 
 import { randomUUID } from "node:crypto";
 import type { IncomingMessage, ServerResponse } from "node:http";
+import { isImageInputUnsupportedError } from "../agents/image-input-error.js";
 import type { ClientToolDefinition } from "../agents/pi-embedded-runner/run/params.js";
 import { createDefaultDeps } from "../cli/deps.js";
 import { agentCommand } from "../commands/agent.js";
@@ -187,6 +188,10 @@ function resolveResponsesLimits(
       timeoutMs: images?.timeoutMs ?? DEFAULT_INPUT_TIMEOUT_MS,
     },
   };
+}
+
+function imageInputUnsupportedMessage(err: Error): string {
+  return `${err.message}; no configured model for this agent accepts image input`;
 }
 
 function countInputImageParts(input: CreateResponseBody["input"]): number {
@@ -883,6 +888,12 @@ export async function handleOpenResponsesHttpRequest(
       sendJson(res, 200, response);
     } catch (err) {
       logWarn(`openresponses: non-stream response failed: ${String(err)}`);
+      if (isImageInputUnsupportedError(err)) {
+        sendJson(res, 400, {
+          error: { message: imageInputUnsupportedMessage(err), type: "invalid_request_error" },
+        });
+        return true;
+      }
       const response = createResponseResource({
         id: responseId,
         model,
@@ -1279,7 +1290,9 @@ export async function handleOpenResponsesHttpRequest(
         model,
         status: "failed",
         output: [],
-        error: { code: "api_error", message: "internal error" },
+        error: isImageInputUnsupportedError(err)
+          ? { code: "invalid_request_error", message: imageInputUnsupportedMessage(err) }
+          : { code: "api_error", message: "internal error" },
         usage: finalUsage,
       });
 

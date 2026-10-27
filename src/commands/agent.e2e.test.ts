@@ -11,10 +11,15 @@ vi.mock("../agents/pi-embedded.js", () => ({
 vi.mock("../agents/model-catalog.js", () => ({
   loadModelCatalog: vi.fn(),
 }));
+vi.mock("../agents/cli-runner.js", () => ({
+  runCliAgent: vi.fn(),
+}));
 
 import { telegramPlugin } from "../../extensions/telegram/src/channel.js";
 import { setTelegramRuntime } from "../../extensions/telegram/src/runtime.js";
+import { runCliAgent } from "../agents/cli-runner.js";
 import { loadModelCatalog } from "../agents/model-catalog.js";
+import { ImageInputUnsupportedError } from "../agents/pi-embedded-runner/run/images.js";
 import { runEmbeddedPiAgent } from "../agents/pi-embedded.js";
 import type { OpenClawConfig } from "../config/config.js";
 import * as configModule from "../config/config.js";
@@ -288,6 +293,86 @@ describe("agentCommand", () => {
       expect(calls[0]?.images).toEqual(images);
       expect(calls[1]?.provider).toBe("openai");
       expect(calls[1]?.images).toEqual(images);
+    });
+  });
+
+  it("skips a text-only fallback and runs the next image-capable one with the images", async () => {
+    await withTempHome(async (home) => {
+      const store = path.join(home, "sessions.json");
+      mockConfig(home, store, {
+        model: {
+          primary: "anthropic/claude-haiku-4-5",
+          fallbacks: ["openai/gpt-text", "openai/gpt-5.2"],
+        },
+        models: {
+          "anthropic/claude-haiku-4-5": {},
+          "openai/gpt-text": {},
+          "openai/gpt-5.2": {},
+        },
+      });
+      vi.mocked(runEmbeddedPiAgent)
+        .mockRejectedValueOnce(Object.assign(new Error("rate limited"), { status: 429 }))
+        .mockRejectedValueOnce(new ImageInputUnsupportedError(1))
+        .mockResolvedValueOnce({
+          payloads: [{ text: "oatmeal" }],
+          meta: {
+            durationMs: 5,
+            agentMeta: { sessionId: "s", provider: "openai", model: "gpt-5.2" },
+          },
+        });
+      const images = [{ type: "image" as const, data: "aGVsbG8=", mimeType: "image/jpeg" }];
+
+      await agentCommand({ message: "what did I eat?", to: "+1555", images }, runtime);
+
+      const calls = vi.mocked(runEmbeddedPiAgent).mock.calls.map((call) => call[0]);
+      expect(calls.map((c) => c?.model)).toEqual(["claude-haiku-4-5", "gpt-text", "gpt-5.2"]);
+      expect(calls[2]?.images).toEqual(images);
+    });
+  });
+
+  it("fails with ImageInputUnsupportedError when no remaining fallback accepts images", async () => {
+    await withTempHome(async (home) => {
+      const store = path.join(home, "sessions.json");
+      mockConfig(home, store, {
+        model: { primary: "anthropic/claude-haiku-4-5", fallbacks: ["openai/gpt-text"] },
+        models: { "anthropic/claude-haiku-4-5": {}, "openai/gpt-text": {} },
+      });
+      vi.mocked(runEmbeddedPiAgent)
+        .mockRejectedValueOnce(Object.assign(new Error("rate limited"), { status: 429 }))
+        .mockRejectedValueOnce(new ImageInputUnsupportedError(1));
+      const images = [{ type: "image" as const, data: "aGVsbG8=", mimeType: "image/jpeg" }];
+
+      await expect(
+        agentCommand({ message: "what did I eat?", to: "+1555", images }, runtime),
+      ).rejects.toBeInstanceOf(ImageInputUnsupportedError);
+    });
+  });
+
+  it("CLI backends: a fallback retry does NOT re-send images (the CLI keeps its own transcript)", async () => {
+    await withTempHome(async (home) => {
+      const store = path.join(home, "sessions.json");
+      mockConfig(home, store, {
+        model: { primary: "claude-cli/opus", fallbacks: ["codex-cli/gpt-5"] },
+        models: { "claude-cli/opus": {}, "codex-cli/gpt-5": {} },
+      });
+      vi.mocked(runCliAgent)
+        .mockRejectedValueOnce(Object.assign(new Error("rate limited"), { status: 429 }))
+        .mockResolvedValueOnce({
+          payloads: [{ text: "ok" }],
+          meta: {
+            durationMs: 5,
+            agentMeta: { sessionId: "s", provider: "codex-cli", model: "gpt-5" },
+          },
+        });
+      const images = [{ type: "image" as const, data: "aGVsbG8=", mimeType: "image/jpeg" }];
+
+      await agentCommand({ message: "what did I eat?", to: "+1555", images }, runtime);
+
+      const calls = vi.mocked(runCliAgent).mock.calls.map((call) => call[0]);
+      expect(calls).toHaveLength(2);
+      expect(calls[0]?.images).toEqual(images);
+      expect(calls[1]?.images).toBeUndefined();
+      expect(runEmbeddedPiAgent).not.toHaveBeenCalled();
     });
   });
 

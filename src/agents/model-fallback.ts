@@ -13,6 +13,7 @@ import {
   isFailoverError,
   isTimeoutError,
 } from "./failover-error.js";
+import { isImageInputUnsupportedError } from "./image-input-error.js";
 import {
   buildConfiguredAllowlistKeys,
   buildModelAliasIndex,
@@ -424,6 +425,25 @@ export async function runWithModelFallback<T>(params: {
       if (isLikelyContextOverflowError(errMessage)) {
         throw err;
       }
+      // The caller supplied images and this candidate has no image input: skip it and
+      // try the next one. If no remaining candidate accepts images, this error ends the turn.
+      if (isImageInputUnsupportedError(err)) {
+        lastError = err;
+        attempts.push({
+          provider: candidate.provider,
+          model: candidate.model,
+          error: errMessage,
+          code: err.code,
+        });
+        await params.onError?.({
+          provider: candidate.provider,
+          model: candidate.model,
+          error: err,
+          attempt: i + 1,
+          total: candidates.length,
+        });
+        continue;
+      }
       const normalized =
         coerceToFailoverError(err, {
           provider: candidate.provider,
@@ -456,6 +476,11 @@ export async function runWithModelFallback<T>(params: {
   }
 
   if (attempts.length <= 1 && lastError) {
+    throw lastError;
+  }
+  // Every candidate after the last real failure was text-only: surface the typed error
+  // (a client error) rather than a generic "all models failed".
+  if (isImageInputUnsupportedError(lastError)) {
     throw lastError;
   }
   const summary =

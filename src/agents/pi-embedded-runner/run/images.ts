@@ -3,6 +3,7 @@ import { fileURLToPath } from "node:url";
 import type { ImageContent } from "@mariozechner/pi-ai";
 import { resolveUserPath } from "../../../utils.js";
 import { loadWebMedia } from "../../../web/media.js";
+import { ImageInputUnsupportedError } from "../../image-input-error.js";
 import type { SandboxFsBridge } from "../../sandbox/fs-bridge.js";
 import { sanitizeImageBlocks } from "../../tool-images.js";
 import { log } from "../logger.js";
@@ -10,6 +11,8 @@ import { log } from "../logger.js";
 /**
  * Common image file extensions for detection.
  */
+export { ImageInputUnsupportedError } from "../../image-input-error.js";
+
 const IMAGE_EXTENSIONS = new Set([
   ".png",
   ".jpg",
@@ -245,23 +248,6 @@ export async function loadImageFromRef(
  */
 export function modelSupportsImages(model: { input?: string[] }): boolean {
   return model.input?.includes("image") ?? false;
-}
-
-/**
- * Thrown when the caller supplied images but the selected model has no image input.
- * The turn fails instead of silently running text-only as if no image was sent.
- */
-export class ImageInputUnsupportedError extends Error {
-  readonly code = "image_input_unsupported";
-  readonly imageCount: number;
-
-  constructor(imageCount: number) {
-    super(
-      `model does not accept image input (${imageCount} image${imageCount === 1 ? "" : "s"} supplied)`,
-    );
-    this.name = "ImageInputUnsupportedError";
-    this.imageCount = imageCount;
-  }
 }
 
 function extractTextFromMessage(message: unknown): string {

@@ -130,7 +130,11 @@ function runAgentAttempt(params: {
       runId: params.runId,
       extraSystemPrompt: params.opts.extraSystemPrompt,
       cliSessionId,
-      images: params.opts.images,
+      // CLI backends keep their own transcript and resume per provider session, so the
+      // first attempt's images are already in that backend's history; re-sending them on
+      // a fallback retry would double-send. (Embedded runs below DO re-send: their
+      // transcript stores only an image placeholder.)
+      images: params.isFallbackRetry ? undefined : params.opts.images,
       streamParams: params.opts.streamParams,
     });
   }
