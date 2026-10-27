@@ -68,6 +68,32 @@ export async function findUserByChannelPeer(
   return (rows[0] as IdentityRow | undefined) ?? null;
 }
 
+/**
+ * Resolve a VERIFIED caller by external id (the server-verified Clerk `sub` on
+ * ctx.externalId), shaped like {@link findUserByChannelPeer}'s row for the
+ * turn's channel/peer. On a verified turn this REPLACES the (channel, peer)
+ * lookup: the session-derived peer is client-influenced, and keying on it either
+ * selects another user's row or (with reconcileVerifiedIdentity) gates a
+ * registered caller out. `channel_peer_id` is the turn's derived peer, used for
+ * logging/gate-keying only.
+ */
+export async function findUserByExternalId(
+  sql: postgres.Sql,
+  externalId: string,
+  channel: string,
+  channelPeerId: string,
+): Promise<IdentityRow | null> {
+  const rows = await sql`
+    SELECT u.id, u.external_id, u.first_name, u.last_name,
+           (u.external_id IS NOT NULL) AS verified
+    FROM lp_users u
+    WHERE u.external_id = ${externalId}
+    LIMIT 1
+  `;
+  const row = rows[0] as Omit<IdentityRow, "channel" | "channel_peer_id"> | undefined;
+  return row ? { ...row, channel, channel_peer_id: channelPeerId } : null;
+}
+
 // ---------------------------------------------------------------------------
 // Scope resolution
 // ---------------------------------------------------------------------------

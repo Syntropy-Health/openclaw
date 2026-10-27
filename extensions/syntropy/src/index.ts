@@ -80,7 +80,43 @@ export async function resolveUser(
       AND uc.channel_peer_id = ${peerId}
     LIMIT 1
   `;
-  const row = rows[0];
+  return finishResolve(sql, vault, rows[0], cipher, onTokenError, onMigrate);
+}
+
+/**
+ * Resolve a VERIFIED caller by their server-verified external id (the Clerk
+ * `sub` the gateway threads on `ctx.externalId`) — never by a peer derived from
+ * the session key, which a client can steer (e.g. a hint ending in
+ * `direct:<victim>`). Token read + lazy migration are identical to
+ * {@link resolveUser} (shared {@link finishResolve}).
+ */
+export async function resolveUserByExternalId(
+  sql: postgres.Sql,
+  vault: SyntropyVault | null,
+  externalId: string,
+  cipher: TokenCipher | null = null,
+  onTokenError?: (code: string) => void,
+  onMigrate?: (ok: boolean) => void,
+): Promise<ResolvedUser | null> {
+  const rows = await sql`
+    SELECT u.id, u.external_id, st.auth_token, st.vault_secret_name, st.token_ciphertext
+    FROM lp_users u
+    LEFT JOIN syntropy_tokens st ON st.user_id = u.id
+    WHERE u.external_id = ${externalId}
+    LIMIT 1
+  `;
+  return finishResolve(sql, vault, rows[0], cipher, onTokenError, onMigrate);
+}
+
+/** Shared token read + lazy cipher migration for a resolved lp_users row. */
+async function finishResolve(
+  sql: postgres.Sql,
+  vault: SyntropyVault | null,
+  row: postgres.Row | undefined,
+  cipher: TokenCipher | null,
+  onTokenError?: (code: string) => void,
+  onMigrate?: (ok: boolean) => void,
+): Promise<ResolvedUser | null> {
   if (!row?.external_id) return null;
 
   // Ciphertext first, then Vault, then legacy plaintext (db.ts readStoredToken).
@@ -150,6 +186,16 @@ If the user asks for something that needs their health data, say plainly that
 it is not available in this app yet. Do not give a date. Do not tell them to
 type any command or to pair a device; those steps do not work here.
 [/SYNTROPY_GATE]`;
+
+/**
+ * True for an HTTP chat session: an HTTP gate channel, or a gateway HTTP session
+ * key (`agent:<id>:openresponses-user:…` / `openai-user:…`) reported without one.
+ */
+export function isHttpSession(channel: string | null | undefined, sessionKey: string): boolean {
+  if (isHttpGateChannel(channel)) return true;
+  const keyChannel = deriveChannel(sessionKey);
+  return keyChannel === "openresponses-user" || keyChannel === "openai-user";
+}
 
 /** The data-gate block for `channel`: command-free copy on HTTP surfaces. */
 export function syntropyGateFor(channel: string | null | undefined): string {
@@ -482,6 +528,14 @@ const syntropyPlugin = {
       maxSize: USER_CACHE_MAX_SIZE,
     });
 
+    // sessionKey → cacheKey (`ext:<externalId>`) for VERIFIED turns, written by
+    // before_agent_start and read by the sync tool factory (whose ctx carries no
+    // externalId). Same TTL/bound as resolvedUsers.
+    const verifiedSessions = new TtlCache<string, string>({
+      ttlMs: USER_CACHE_TTL_MS,
+      maxSize: USER_CACHE_MAX_SIZE,
+    });
+
     // Single-flight: concurrent messages from one user that both miss the
     // profile cache share ONE get_health_profile fetch instead of racing two.
     const profileInFlight = new Map<string, Promise<string | null>>();
@@ -505,6 +559,50 @@ const syntropyPlugin = {
         try {
           const sessionKey = ctx?.sessionKey ?? "";
           const channel = ctx?.messageProvider ?? deriveChannel(sessionKey);
+          const onTokenError = (code: string) =>
+            api.logger.error(
+              `syntropy: stored token unreadable (${code}); user treated as unpaired`,
+            );
+          const onMigrate = (ok: boolean) =>
+            ok
+              ? api.logger.info("syntropy: migrated one stored token to ciphertext")
+              : api.logger.warn(
+                  "syntropy: could not migrate a stored token to ciphertext; kept as is",
+                );
+
+          // A VERIFIED turn (server-verified Clerk sub on ctx.externalId) resolves
+          // by external_id ONLY. The session-key-derived peer is never consulted:
+          // its tail is client-influenced, and a steered peer would load another
+          // user's identity and SJ token.
+          const externalId = ctx?.externalId?.trim();
+          if (externalId) {
+            const cacheKey = `ext:${externalId}`;
+            // Recorded BEFORE the lookup so the tool factory sees this session as
+            // verified even if the lookup fails (it then finds no cached user and
+            // returns no tools — fail closed).
+            if (sessionKey) verifiedSessions.set(sessionKey, cacheKey);
+            await ensureStorage();
+            const user = await resolveUserByExternalId(
+              sql,
+              vault,
+              externalId,
+              await currentCipher(),
+              onTokenError,
+              onMigrate,
+            );
+            return await decideProfileInjection({
+              user,
+              cacheKey,
+              channel,
+              resolvedUsers,
+              profileBlocks,
+              profileInFlight,
+              profileNegative,
+              fetchProfile: (authToken) =>
+                callSyntropyTool(syntropyBaseUrl, authToken, "get_health_profile", {}),
+            });
+          }
+
           const peerId = derivePeerId(sessionKey);
 
           if (!peerId || peerId === "main" || peerId === "unknown") return {};
@@ -517,16 +615,8 @@ const syntropyPlugin = {
             channel,
             peerId,
             await currentCipher(),
-            (code) =>
-              api.logger.error(
-                `syntropy: stored token unreadable (${code}); user treated as unpaired`,
-              ),
-            (ok) =>
-              ok
-                ? api.logger.info("syntropy: migrated one stored token to ciphertext")
-                : api.logger.warn(
-                    "syntropy: could not migrate a stored token to ciphertext; kept as is",
-                  ),
+            onTokenError,
+            onMigrate,
           );
 
           return await decideProfileInjection({
@@ -556,11 +646,21 @@ const syntropyPlugin = {
       try {
         const sessionKey = ctx.sessionKey ?? "";
         const channel = ctx.messageChannel ?? deriveChannel(sessionKey);
-        const peerId = derivePeerId(sessionKey);
 
-        if (!peerId || peerId === "main" || peerId === "unknown") return null;
-
-        const cacheKey = `${channel}:${peerId}`;
+        // The factory has no externalId on its ctx: a verified turn is recognised
+        // by the sessionKey → cacheKey record the hook wrote. An HTTP session
+        // WITHOUT such a record gets no tools (fail closed) — its derived peer is
+        // client-influenced and must never select a cached user.
+        const verifiedCacheKey = sessionKey ? verifiedSessions.get(sessionKey) : undefined;
+        let cacheKey: string;
+        if (verifiedCacheKey) {
+          cacheKey = verifiedCacheKey;
+        } else {
+          if (isHttpSession(channel, sessionKey)) return null;
+          const peerId = derivePeerId(sessionKey);
+          if (!peerId || peerId === "main" || peerId === "unknown") return null;
+          cacheKey = `${channel}:${peerId}`;
+        }
         const user = resolvedUsers.get(cacheKey);
         if (!user) return null;
 

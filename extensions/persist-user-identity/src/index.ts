@@ -22,6 +22,7 @@ import {
   autoBindVerifiedPeer,
   createPgClient,
   ensureUserSchema,
+  findIdentityByExternalId,
   findUserByChannelPeer,
   unlinkChannelPeerForUser,
 } from "./db.js";
@@ -130,6 +131,18 @@ const persistUserIdentityPlugin = {
                 `persist-user-identity: [G1] auto-bind failed: ${safeErr(err, [deviceId])}`,
               );
             }
+          }
+
+          // A VERIFIED turn resolves by external_id ONLY — never by the
+          // session/device-derived peer, which the client can steer (e.g. a
+          // session hint ending in `direct:<victim>`, or a victim's device id).
+          if (externalId) {
+            const verified = await findIdentityByExternalId(sql, externalId, channel);
+            return {
+              prependContext: verified
+                ? formatIdentityContext(verified, "new_session")
+                : formatUnknownUserContext(channel),
+            };
           }
 
           if (!peerId || peerId === "main" || peerId === "unknown") {

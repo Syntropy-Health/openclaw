@@ -1,0 +1,137 @@
+/**
+ * Cross-user isolation for VERIFIED HTTP turns (peer-steering fix).
+ *
+ * The identity block for a verified caller A (ctx.externalId = A's Clerk sub)
+ * must describe A — never the user found through a client-steerable peer (a
+ * session key ending in `direct:<B's peer>`, or B's device id). Channel turns
+ * keep the (channel, peer) lookup.
+ */
+import { beforeEach, describe, expect, test, vi } from "vitest";
+import type { OpenClawPluginApi } from "../../../src/plugins/types.js";
+import { queriedWith, type SqlCall } from "../../shared/identity-fixture-test-helpers.js";
+
+const state = vi.hoisted(() => ({ calls: [] as unknown[] }));
+
+vi.mock("./db.js", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("./db.js")>();
+  const { makeFixtureSql } = await import("../../shared/identity-fixture-test-helpers.js");
+  return {
+    ...actual,
+    createPgClient: vi.fn(() => {
+      const { sql, calls } = makeFixtureSql();
+      state.calls = calls;
+      return sql;
+    }),
+    ensureUserSchema: vi.fn(async () => {}),
+  };
+});
+
+vi.mock("../../syntropy/src/vault.js", () => ({
+  secretNameForUser: (userId: string) => `syntropy_user_${userId}`,
+  createSyntropyVault: vi.fn(() => ({ tag: "vault" })),
+  vaultRpcsInstalled: vi.fn(async () => true),
+}));
+
+function createMockApi() {
+  const hooks: Array<{ name: string; handler: (...a: unknown[]) => unknown }> = [];
+  const api = {
+    _hooks: hooks,
+    id: "persist-user-identity",
+    name: "Persist User Identity",
+    source: "test",
+    config: {} as OpenClawPluginApi["config"],
+    pluginConfig: { databaseUrl: "postgresql://mock/test" },
+    runtime: {} as OpenClawPluginApi["runtime"],
+    logger: { debug: vi.fn(), info: vi.fn(), warn: vi.fn(), error: vi.fn() },
+    on: vi.fn((name: string, handler: (...a: unknown[]) => unknown) => {
+      hooks.push({ name, handler });
+    }),
+    registerTool: vi.fn(),
+    registerHook: vi.fn(),
+    registerHttpHandler: vi.fn(),
+    registerHttpRoute: vi.fn(),
+    registerChannel: vi.fn(),
+    registerGatewayMethod: vi.fn(),
+    registerCli: vi.fn(),
+    registerService: vi.fn(),
+    registerProvider: vi.fn(),
+    registerCommand: vi.fn(),
+    resolvePath: vi.fn((p: string) => p),
+  };
+  return api as unknown as OpenClawPluginApi & typeof api;
+}
+
+async function boot() {
+  vi.resetModules();
+  const mod = await import("./index.js");
+  const api = createMockApi();
+  mod.default.register(api);
+  const hook = api._hooks.find((h) => h.name === "before_agent_start")!.handler;
+  return {
+    fire: async (ctx: Record<string, unknown>) =>
+      (await hook({ prompt: "hi" }, ctx)) as { prependContext?: string },
+    calls: () => state.calls as SqlCall[],
+  };
+}
+
+beforeEach(() => {
+  vi.clearAllMocks();
+});
+
+const isSelectLookup = (calls: SqlCall[], peer: string) =>
+  calls.some(
+    (c) =>
+      c.text.startsWith("SELECT") &&
+      c.text.includes("uc.channel_peer_id") &&
+      c.values.includes(peer),
+  );
+
+describe("persist-user-identity — verified turns resolve by external_id (RED arm)", () => {
+  test.each([
+    ["shrinemobile", "agent:main:openresponses-user:user_2A:direct:dev-B", undefined],
+    ["webchat", "agent:main:openresponses-user:user_2A:direct:user_2B", undefined],
+    ["shrinemobile", "agent:main:openresponses-user:user_2A", "dev-B"],
+  ])(
+    "caller A on %s (session %s, device %s) gets A's identity, never B's",
+    async (channel, sessionKey, deviceId) => {
+      const { fire, calls } = await boot();
+      const res = await fire({
+        sessionKey,
+        messageProvider: channel,
+        externalId: "user_2A",
+        ...(deviceId ? { deviceId } : {}),
+      });
+      expect(res.prependContext).toContain("user_id: uid-A");
+      expect(res.prependContext).toContain("external_id: user_2A");
+      expect(res.prependContext).not.toContain("uid-B");
+      expect(res.prependContext).not.toContain("user_2B");
+      // The steerable peer is never used as a lookup key on a verified turn.
+      expect(isSelectLookup(calls(), "dev-B")).toBe(false);
+      expect(isSelectLookup(calls(), "user_2B")).toBe(false);
+      expect(queriedWith(calls(), "user_2A")).toBe(true);
+    },
+  );
+
+  test("a verified external_id with no lp_users row gets the unknown-user block (no one else's)", async () => {
+    const { fire } = await boot();
+    const res = await fire({
+      sessionKey: "agent:main:openresponses-user:user_2nobody:direct:dev-B",
+      messageProvider: "webchat",
+      externalId: "user_2nobody",
+    });
+    expect(res.prependContext).toContain("user_id: none");
+    expect(res.prependContext).not.toContain("uid-B");
+  });
+});
+
+describe("persist-user-identity — channel turns keep the peer path (characterization)", () => {
+  test("whatsapp direct:+1… resolves the linked user by (channel, peer)", async () => {
+    const { fire, calls } = await boot();
+    const res = await fire({
+      sessionKey: "agent:main:whatsapp:direct:+15550001111",
+      messageProvider: "whatsapp",
+    });
+    expect(res.prependContext).toContain("user_id: uid-B");
+    expect(isSelectLookup(calls(), "+15550001111")).toBe(true);
+  });
+});

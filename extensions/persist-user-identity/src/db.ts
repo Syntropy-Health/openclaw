@@ -112,6 +112,26 @@ export async function findUserByExternalId(
 }
 
 /**
+ * Resolve the identity of a VERIFIED caller by external id (the server-verified
+ * Clerk `sub` on ctx.externalId), shaped like {@link findUserByChannelPeer}'s
+ * result for the turn's `channel`. Used instead of the (channel, peer) lookup on
+ * verified turns: the session-derived peer is client-influenced and must never
+ * select another user's row. `channel_peer_id` is empty — no consumer reads it
+ * from the identity block (mono #542).
+ */
+export async function findIdentityByExternalId(
+  sql: postgres.Sql,
+  externalId: string,
+  channel: string,
+): Promise<ResolvedIdentity | null> {
+  const user = await findUserByExternalId(sql, externalId);
+  if (!user) {
+    return null;
+  }
+  return { ...user, channel, channel_peer_id: "", verified: user.external_id !== null };
+}
+
+/**
  * Create a new user. `externalId` is null for channel-only (unverified) users.
  */
 export async function createUser(

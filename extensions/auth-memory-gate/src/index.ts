@@ -6,6 +6,7 @@ import {
   deriveChannel,
   deriveIdentityPeer,
   findUserByChannelPeer,
+  findUserByExternalId,
   reconcileVerifiedIdentity,
   resolveScope,
   formatScopeBlock,
@@ -159,9 +160,16 @@ const authMemoryGatePlugin = {
           // (fail-closed defense-in-depth): on a verified turn a stale/contested
           // row keyed by the client-supplied device id must NEVER key this turn
           // onto another user's scope — treat it as unidentified instead.
+          //
+          // A VERIFIED turn resolves by external_id ONLY: the session/device-
+          // derived peer is client-steerable, so it never selects the row (it
+          // stays the gate/log key). Channel turns keep the (channel, peer) path.
+          const verifiedSub = ctx?.externalId?.trim();
           let row: Awaited<ReturnType<typeof findUserByChannelPeer>>;
           try {
-            row = await findUserByChannelPeer(sql, channel, peerId);
+            row = verifiedSub
+              ? await findUserByExternalId(sql, verifiedSub, channel, peerId)
+              : await findUserByChannelPeer(sql, channel, peerId);
           } catch (err) {
             // A DB lost after a good init: enter the same backoff so the next
             // turns fail fast (gated) instead of each waiting on a dead pool.
