@@ -1,5 +1,6 @@
 import crypto from "node:crypto";
 import type { AgentMessage } from "@mariozechner/pi-agent-core";
+import type { SessionManager } from "@mariozechner/pi-coding-agent";
 
 /**
  * Session transcripts never store base64 image bytes. Each image block is replaced
@@ -52,23 +53,94 @@ export function formatImagePlaceholder(mimeType: string, bytes: Buffer): string 
 }
 
 /**
+ * Copy-on-write deep scrub: returns `value` itself when it holds no image blocks, else a
+ * copy where every image block (at any depth, e.g. a toolResult's content or `details`)
+ * is replaced by its text placeholder. Never mutates its input.
+ */
+export function scrubImageBlocksDeep<T>(value: T): T {
+  if (Array.isArray(value)) {
+    let changed = false;
+    const next = value.map((item: unknown) => {
+      const image = readImageBlock(item);
+      if (image) {
+        changed = true;
+        const bytes = Buffer.from(image.base64, "base64");
+        return { type: "text", text: formatImagePlaceholder(image.mimeType, bytes) };
+      }
+      const scrubbed = scrubImageBlocksDeep(item);
+      if (scrubbed !== item) {
+        changed = true;
+      }
+      return scrubbed;
+    });
+    return (changed ? next : value) as T;
+  }
+  if (value && typeof value === "object") {
+    let next: Record<string, unknown> | undefined;
+    for (const [key, item] of Object.entries(value as Record<string, unknown>)) {
+      const scrubbed = scrubImageBlocksDeep(item);
+      if (scrubbed !== item) {
+        next ??= { ...(value as Record<string, unknown>) };
+        next[key] = scrubbed;
+      }
+    }
+    return (next ?? value) as T;
+  }
+  return value;
+}
+
+/**
  * Returns a copy of `message` whose image blocks are replaced by text placeholders,
  * or the original object when it carries no image blocks. Never mutates its input.
  */
 export function replaceImageBlocksForPersistence(message: AgentMessage): AgentMessage {
-  const content = (message as { content?: unknown }).content;
-  if (!Array.isArray(content)) {
-    return message;
+  return scrubImageBlocksDeep(message);
+}
+
+const INSTALLED = Symbol.for("openclaw.sessionImagePlaceholder");
+
+type EntrySink = { _appendEntry?: (entry: unknown) => unknown; [INSTALLED]?: true };
+
+/**
+ * Makes `sessionManager` write image blocks to disk as placeholders while its in-memory
+ * entries keep the original image (pi-coding-agent rebuilds the agent's messages from
+ * those entries after a compaction, so they must stay intact).
+ *
+ * Every entry appended from now on gets a non-enumerable `toJSON` that serialises the
+ * scrubbed copy, so every disk write path (append, rewrite, branch) stores the placeholder.
+ * If the library internals are not what we expect, falls back to persisting a scrubbed
+ * copy at appendMessage (the image then leaves memory too, but never reaches disk).
+ */
+export function installSessionImagePlaceholderPersistence(sessionManager: SessionManager): void {
+  const sink = sessionManager as unknown as EntrySink;
+  if (sink[INSTALLED]) {
+    return;
   }
-  let changed = false;
-  const next = content.map((block: unknown) => {
-    const image = readImageBlock(block);
-    if (!image) {
-      return block;
-    }
-    changed = true;
-    const bytes = Buffer.from(image.base64, "base64");
-    return { type: "text", text: formatImagePlaceholder(image.mimeType, bytes) };
+  Object.defineProperty(sink, INSTALLED, { value: true });
+  const appendEntry = sink._appendEntry;
+  if (typeof appendEntry === "function") {
+    sink._appendEntry = (entry: unknown) => {
+      attachDiskSerializer(entry);
+      return appendEntry.call(sessionManager, entry);
+    };
+    return;
+  }
+  const appendMessage = sessionManager.appendMessage.bind(sessionManager);
+  sessionManager.appendMessage = ((message: AgentMessage) =>
+    appendMessage(
+      replaceImageBlocksForPersistence(message) as never,
+    )) as SessionManager["appendMessage"];
+}
+
+function attachDiskSerializer(entry: unknown): void {
+  if (!entry || typeof entry !== "object" || scrubImageBlocksDeep(entry) === entry) {
+    return;
+  }
+  Object.defineProperty(entry, "toJSON", {
+    configurable: true,
+    enumerable: false,
+    value(this: Record<string, unknown>) {
+      return scrubImageBlocksDeep({ ...this });
+    },
   });
-  return changed ? ({ ...message, content: next } as AgentMessage) : message;
 }

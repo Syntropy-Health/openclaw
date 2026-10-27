@@ -1,6 +1,7 @@
 import type { AgentMessage } from "@mariozechner/pi-agent-core";
 import type { TextContent } from "@mariozechner/pi-ai";
 import { SessionManager } from "@mariozechner/pi-coding-agent";
+import { installSessionImagePlaceholderPersistence } from "../session-image-placeholder.js";
 import { log } from "./logger.js";
 
 /**
@@ -146,6 +147,8 @@ export async function truncateOversizedToolResultsInSession(params: {
 
   try {
     const sessionManager = SessionManager.open(sessionFile);
+    // Re-appended entries reach disk with image placeholders, never base64.
+    installSessionImagePlaceholderPersistence(sessionManager);
     const branch = sessionManager.getBranch();
 
     if (branch.length === 0) {
