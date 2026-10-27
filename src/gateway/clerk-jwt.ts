@@ -219,7 +219,12 @@ function claimsPass(payload: JwtPayload, opts: VerifyClerkJwtOptions, now: numbe
       }
     } else if (
       typeof payload.azp !== "string" ||
-      !parties.map(normalizeAuthorizedParty).includes(normalizeAuthorizedParty(payload.azp))
+      !parties
+        .map(normalizeAuthorizedParty)
+        // An entry that normalises to "" (e.g. "/") names no party: drop it, so
+        // it can never match an empty azp.
+        .filter((party) => party.length > 0)
+        .includes(normalizeAuthorizedParty(payload.azp))
     ) {
       return false;
     }

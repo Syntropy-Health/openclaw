@@ -183,6 +183,16 @@ describe("resolveClerkAuth — authorizedParties / allowMissingAzp", () => {
 });
 
 describe("azp normalisation (trailing slash, scheme+host case)", () => {
+  it('list entries that normalise to empty are dropped: ["/"] never admits azp "" or a missing azp', async () => {
+    expect(await verifyClerkJwt(mint({ azp: "" }), opts({ authorizedParties: ["/"] }))).toBeNull();
+    expect(await verifyClerkJwt(mint({ azp: "/" }), opts({ authorizedParties: ["/"] }))).toBeNull();
+    expect(await verifyClerkJwt(mint(), opts({ authorizedParties: ["/"] }))).toBeNull();
+    expect(
+      (await verifyClerkJwt(mint(), opts({ authorizedParties: ["/"], allowMissingAzp: true })))
+        ?.sub,
+    ).toBe("user_abc");
+  });
+
   it("a list entry with a trailing slash matches an azp without one", async () => {
     const token = mint({ azp: GOOD });
     expect((await verifyClerkJwt(token, opts({ authorizedParties: [`${GOOD}/`] })))?.sub).toBe(

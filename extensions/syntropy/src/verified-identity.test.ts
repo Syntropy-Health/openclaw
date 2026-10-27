@@ -297,3 +297,38 @@ describe("syntropy — a verified-session record cannot be replayed (RED arm)", 
     expect(factory({ sessionKey: K, messageChannel: "shrinemobile" })).toBeNull();
   });
 });
+
+describe("syntropy — a verified record binds to the session's own sub (RED arm)", () => {
+  test("a record for A on a key whose scope segment is B's sub gives no tools", async () => {
+    const { fire, factory } = await boot();
+    // The record for this key is written for sub A, but the key's user scope is B's.
+    const keyOfB = "agent:main:openresponses-user:user_2b:h0123456789abcdef";
+    await fire({ sessionKey: keyOfB, messageProvider: "shrinemobile", externalId: "user_2A" });
+    expect(factory({ sessionKey: keyOfB, messageChannel: "shrinemobile" })).toBeNull();
+    expect(state.tokensUsed).not.toContain("sj_tok_B");
+  });
+
+  test("a record on a key with no parseable user scope gives no tools", async () => {
+    const { fire, factory } = await boot();
+    const odd = "agent:main:shrinemobile:direct:x";
+    await fire({ sessionKey: odd, messageProvider: "shrinemobile", externalId: "user_2A" });
+    expect(factory({ sessionKey: odd, messageChannel: "shrinemobile" })).toBeNull();
+  });
+
+  test("the openai prefix and case differences still match (control)", async () => {
+    const { fire, factory } = await boot();
+    const k = "agent:main:openai-user:user_2a";
+    await fire({ sessionKey: k, messageProvider: "webchat", externalId: "user_2A" });
+    expect(factory({ sessionKey: k, messageChannel: "webchat" })!.map((t) => t.token)).toEqual([
+      "sj_tok_A",
+    ]);
+  });
+});
+
+describe("syntropy — Control UI `main` session keeps its previous behaviour", () => {
+  test("a webchat turn on agent:main:main with no externalId injects nothing", async () => {
+    const { fire } = await boot();
+    const res = await fire({ sessionKey: "agent:main:main", messageProvider: "webchat" });
+    expect(res.prependContext).toBeUndefined();
+  });
+});
