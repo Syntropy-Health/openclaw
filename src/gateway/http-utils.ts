@@ -1,4 +1,4 @@
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import type { IncomingMessage } from "node:http";
 import { buildAgentMainSessionKey, normalizeAgentId } from "../routing/session-key.js";
 
@@ -110,6 +110,11 @@ export function resolveAgentIdForRequest(params: {
   return fromModel ?? "main";
 }
 
+/** One opaque, structure-free session-key segment for a client-supplied hint. */
+function hashSessionHint(hint: string): string {
+  return `h${createHash("sha256").update(hint).digest("hex").slice(0, 16)}`;
+}
+
 export function resolveSessionKey(params: {
   req: IncomingMessage;
   agentId: string;
@@ -132,7 +137,13 @@ export function resolveSessionKey(params: {
     // L1 user_scope is authoritative. Thread the L3 session hint (if any) as a
     // suffix so turns within one conversation share a key but stay inside the
     // user's partition; the client-supplied `user` field is ignored (§5).
-    const sessionHint = explicit ? `:${explicit}` : "";
+    //
+    // The hint is CLIENT-CONTROLLED, so it is neutralised into ONE opaque
+    // segment (`h` + 16 hex of sha256). Threaded raw, a hint such as
+    // `direct:<victim>` made derivePeerId return `<victim>`, and the identity
+    // hooks then resolved the victim's identity/token for a verified caller.
+    // Same hint → same segment, so conversation continuity is preserved.
+    const sessionHint = explicit ? `:${hashSessionHint(explicit)}` : "";
     const mainKey = `${params.prefix}-user:${scope}${sessionHint}`;
     return buildAgentMainSessionKey({ agentId: params.agentId, mainKey });
   }

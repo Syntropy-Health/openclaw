@@ -10,13 +10,20 @@
 //     only as an L3 conversation suffix WITHIN that partition (never identity).
 //   - When no user_scope is present, the legacy path is unchanged.
 
+import { createHash } from "node:crypto";
 import type { IncomingMessage } from "node:http";
 import { describe, expect, it } from "vitest";
+import { derivePeerId } from "../../extensions/shared/session-key.js";
 import {
   deriveUserScopeFromSub,
   resolveChannelFromHeader,
   resolveSessionKey,
 } from "./http-utils.js";
+
+/** The opaque per-hint segment resolveSessionKey threads for a verified scope. */
+function hintSegment(hint: string): string {
+  return `h${createHash("sha256").update(hint).digest("hex").slice(0, 16)}`;
+}
 
 function reqWith(headers: Record<string, string> = {}): IncomingMessage {
   return { headers } as unknown as IncomingMessage;
@@ -106,7 +113,7 @@ describe("channel header is presentation-only (A&D §S10 invariant)", () => {
       prefix: "openresponses",
     });
     expect(webchat).toBe(shrinemobile);
-    expect(webchat).toBe("agent:main:openresponses-user:user_2abc:thread-42");
+    expect(webchat).toBe(`agent:main:openresponses-user:user_2abc:${hintSegment("thread-42")}`);
   });
 
   it("deriveUserScopeFromSub does not take the channel header as an input", () => {
@@ -140,14 +147,15 @@ describe("resolveSessionKey — user_scope partitioning", () => {
     expect(key).not.toContain("attacker-claimed-identity");
   });
 
-  it("an X-OpenClaw-Session-Key is threaded as an L3 suffix INSIDE the user partition, not as identity", () => {
+  it("an X-OpenClaw-Session-Key is threaded as an opaque hashed L3 suffix INSIDE the user partition, not as identity", () => {
     const key = resolveSessionKey({
       req: reqWith({ "x-openclaw-session-key": "thread-42" }),
       agentId: "main",
       userScope: "user_2abc",
       prefix: "openresponses",
     });
-    expect(key).toBe("agent:main:openresponses-user:user_2abc:thread-42");
+    expect(key).toBe(`agent:main:openresponses-user:user_2abc:${hintSegment("thread-42")}`);
+    expect(key).not.toContain("thread-42");
   });
 
   it("two requests with the SAME scope but DIFFERENT session keys share the user partition prefix", () => {
@@ -193,6 +201,47 @@ describe("resolveSessionKey — user_scope partitioning", () => {
       prefix: "openai",
     });
     expect(key).toBe("agent:main:openai-user:user_2abc");
+  });
+});
+
+describe("resolveSessionKey — client session hint cannot steer the derived peer (RED arm)", () => {
+  const verified = (hint?: string) =>
+    resolveSessionKey({
+      req: reqWith(hint === undefined ? {} : { "x-openclaw-session-key": hint }),
+      agentId: "main",
+      userScope: "user_2caller",
+      prefix: "openresponses",
+    });
+
+  it("a `direct:<victim>` hint does NOT make derivePeerId return the victim", () => {
+    const key = verified("direct:user_2victim");
+    expect(derivePeerId(key)).not.toBe("user_2victim");
+    expect(derivePeerId(key)).not.toContain("user_2victim");
+    expect(derivePeerId(key).startsWith("user_2caller")).toBe(true);
+    expect(key).not.toContain("direct");
+    expect(key).not.toContain("victim");
+  });
+
+  it("structural tokens in the hint (`:`, `main`, `direct`) collapse into ONE opaque segment", () => {
+    for (const hint of ["a:b:c", "main", "direct:+15551234567", ":::", "x:direct:y"]) {
+      const key = verified(hint);
+      const suffix = key.slice("agent:main:openresponses-user:user_2caller:".length);
+      expect(suffix).toMatch(/^h[0-9a-f]{16}$/);
+      expect(key.split(":")).toHaveLength(5);
+    }
+  });
+
+  it("the same hint twice yields the identical key (conversation continuity)", () => {
+    expect(verified("thread-42")).toBe(verified("thread-42"));
+    expect(verified("direct:user_2victim")).toBe(verified("direct:user_2victim"));
+  });
+
+  it("different hints yield different keys", () => {
+    expect(verified("thread-a")).not.toBe(verified("thread-b"));
+  });
+
+  it("no header → unchanged `openresponses-user:<sub>`", () => {
+    expect(verified()).toBe("agent:main:openresponses-user:user_2caller");
   });
 });
 
