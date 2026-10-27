@@ -11,7 +11,7 @@ import crypto from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const SCRIPT = path.join(__dirname, "scrub-transcript-images.mjs");
@@ -161,8 +161,140 @@ function test_applyRewritesOnlyTheImageFile() {
   fs.rmSync(dir, { recursive: true, force: true });
 }
 
+function test_applyKeepsModeAndOwnershipAndReleasesLock() {
+  process.stdout.write("test_applyKeepsModeAndOwnershipAndReleasesLock\n");
+  const { dir, files } = setupFixtures();
+  fs.chmodSync(files.image, 0o600);
+  const before = fs.statSync(files.image);
+  const { report } = run(dir, ["--apply"]);
+  const after = fs.statSync(files.image);
+  assert(report.image_blocks === 2, "image file rewritten");
+  assert(
+    (after.mode & 0o7777) === 0o600,
+    `mode 0600 kept (got ${(after.mode & 0o7777).toString(8)})`,
+  );
+  assert(after.uid === before.uid && after.gid === before.gid, "uid/gid kept");
+  assert(after.ino !== before.ino, "rewritten via rename (new inode)");
+  assert(!fs.existsSync(`${files.image}.lock`), "session lock released after apply");
+  fs.rmSync(dir, { recursive: true, force: true });
+}
+
+function test_existingLockIsSkippedInApply() {
+  process.stdout.write("test_existingLockIsSkippedInApply\n");
+  const { dir, files } = setupFixtures();
+  const lockBody = JSON.stringify({ pid: process.pid, createdAt: new Date().toISOString() });
+  fs.writeFileSync(`${files.locked}.lock`, lockBody);
+  const before = fs.readFileSync(files.locked, "utf8");
+  const { report } = run(dir, ["--apply"]);
+  assert(report.locked_skipped === 1, "locked file counted as locked_skipped");
+  assert(fs.readFileSync(files.locked, "utf8") === before, "locked file untouched");
+  assert(fs.readFileSync(`${files.locked}.lock`, "utf8") === lockBody, "foreign lock not removed");
+  fs.rmSync(dir, { recursive: true, force: true });
+}
+
+async function test_concurrentChangeAbortsTheFile() {
+  process.stdout.write("test_concurrentChangeAbortsTheFile\n");
+  const { scrubDirectory } = await import(pathToFileURL(SCRIPT).href);
+  const { dir, files } = setupFixtures();
+  const appended = `${JSON.stringify({ type: "message", id: "m9", message: { role: "user", content: "late" } })}\n`;
+  const report = await scrubDirectory(
+    { dir, apply: true },
+    {
+      beforeRename: (file) => {
+        if (file === files.image) {
+          fs.appendFileSync(file, appended); // a gateway append lands mid-scrub
+        }
+      },
+    },
+  );
+  const content = fs.readFileSync(files.image, "utf8");
+  assert(report.changed_skipped === 1, `changed_skipped=1 (got ${report.changed_skipped})`);
+  assert(content.endsWith(appended), "the concurrent append is kept (nothing lost)");
+  assert(content.includes(IMAGE_B64), "aborted file left as it was (not rewritten)");
+  assert(
+    fs.readdirSync(dir).every((n) => !n.endsWith(".tmp")),
+    "temp file removed after abort",
+  );
+  assert(!fs.existsSync(`${files.image}.lock`), "lock released after abort");
+  fs.rmSync(dir, { recursive: true, force: true });
+}
+
+async function test_chownRefusalSkipsTheFile() {
+  process.stdout.write("test_chownRefusalSkipsTheFile\n");
+  const { scrubDirectory } = await import(pathToFileURL(SCRIPT).href);
+  const { dir, files } = setupFixtures();
+  const before = fs.readFileSync(files.image, "utf8");
+  const report = await scrubDirectory(
+    { dir, apply: true },
+    {
+      fchown: () => {
+        throw Object.assign(new Error("not permitted"), { code: "EPERM" });
+      },
+    },
+  );
+  assert(report.ownership_skipped === 1, `ownership_skipped=1 (got ${report.ownership_skipped})`);
+  assert(fs.readFileSync(files.image, "utf8") === before, "file untouched when chown refused");
+  assert(
+    fs.readdirSync(dir).every((n) => !n.endsWith(".tmp")),
+    "temp file removed after refusal",
+  );
+  fs.rmSync(dir, { recursive: true, force: true });
+}
+
+function test_symlinkIsUntouched() {
+  process.stdout.write("test_symlinkIsUntouched\n");
+  const { dir, files } = setupFixtures();
+  const outside = fs.mkdtempSync(path.join(os.tmpdir(), "scrub-target-"));
+  const target = path.join(outside, "target.jsonl");
+  fs.writeFileSync(target, [header, userWithImage, ""].join("\n"));
+  const link = path.join(dir, "ddd-link.jsonl");
+  fs.symlinkSync(target, link);
+  const before = fs.readFileSync(target, "utf8");
+  fs.rmSync(files.image); // leave only the symlink as an image-bearing candidate
+  const { report } = run(dir, ["--apply"]);
+  assert(fs.lstatSync(link).isSymbolicLink(), "symlink still a symlink");
+  assert(fs.readFileSync(target, "utf8") === before, "symlink target untouched");
+  assert(report.image_blocks === 0, "symlink not scanned");
+  fs.rmSync(dir, { recursive: true, force: true });
+  fs.rmSync(outside, { recursive: true, force: true });
+}
+
+function test_streamsLinesAcrossChunkBoundaries() {
+  process.stdout.write("test_streamsLinesAcrossChunkBoundaries\n");
+  // A 1.5 MiB image line spans the 1 MiB read chunk; text lines around it stay byte-identical.
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "scrub-transcript-images-big-"));
+  const big = Buffer.alloc(1536 * 1024, 3);
+  const bigSha = crypto.createHash("sha256").update(big).digest("hex").slice(0, 12);
+  const bigLine = JSON.stringify({
+    type: "message",
+    id: "b1",
+    message: {
+      role: "user",
+      content: [{ type: "image", data: big.toString("base64"), mimeType: "image/png" }],
+    },
+  });
+  const file = path.join(dir, "big.jsonl");
+  fs.writeFileSync(file, [header, bigLine, assistantText].join("\r\n")); // CRLF, no final newline
+  const { report } = run(dir, ["--apply"]);
+  const out = fs.readFileSync(file, "utf8");
+  assert(report.image_blocks === 1, "big image counted once");
+  assert(out.includes(`[image: image/png, 1536.0 KB, sha256:${bigSha}]`), "big image placeholder");
+  const lines = out.split("\r\n");
+  assert(
+    lines.length === 3 && lines[0] === header && lines[2] === assistantText,
+    "CRLF + other lines kept",
+  );
+  fs.rmSync(dir, { recursive: true, force: true });
+}
+
 test_dryRunChangesNothingAndCounts();
 test_applyRewritesOnlyTheImageFile();
+test_applyKeepsModeAndOwnershipAndReleasesLock();
+test_existingLockIsSkippedInApply();
+await test_concurrentChangeAbortsTheFile();
+await test_chownRefusalSkipsTheFile();
+test_symlinkIsUntouched();
+test_streamsLinesAcrossChunkBoundaries();
 
 process.stdout.write(`\nresult: ${pass} passed, ${fail} failed\n`);
 process.exit(fail === 0 ? 0 : 1);
