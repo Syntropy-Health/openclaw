@@ -6,7 +6,7 @@
 // the `clerk: observed azp=…` info line and only then enforce.
 
 import { generateKeyPairSync, sign as cryptoSign, type KeyObject } from "node:crypto";
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const logs = vi.hoisted(() => ({ info: [] as string[], warn: [] as string[] }));
 
@@ -154,24 +154,66 @@ describe("resolveClerkAuth — authorizedParties / allowMissingAzp", () => {
     ).toBeUndefined();
   });
 
-  it("config takes precedence over env", () => {
-    const clerk = resolveClerkAuth(
-      { authorizedParties: [" https://cfg.test ", ""], allowMissingAzp: true },
+  it("the two azp knobs are env-only: config keys of the same name are IGNORED", () => {
+    // Trust anchors must not be writable through config.patch (agent-reachable).
+    const injected = {
+      authorizedParties: [EVIL],
+      allowMissingAzp: true,
+    } as unknown as Parameters<typeof resolveClerkAuth>[0];
+    const fromEnvOnly = resolveClerkAuth(
+      injected,
       env({ OPENCLAW_CLERK_AUTHORIZED_PARTIES: GOOD, OPENCLAW_CLERK_ALLOW_MISSING_AZP: "0" }),
     );
-    expect(clerk?.authorizedParties).toEqual(["https://cfg.test"]);
-    expect(clerk?.allowMissingAzp).toBe(true);
+    expect(fromEnvOnly?.authorizedParties).toEqual([GOOD]);
+    expect(fromEnvOnly?.allowMissingAzp).toBe(false);
+    expect(resolveClerkAuth(injected, env())?.authorizedParties).toBeUndefined();
   });
 
-  it("OPENCLAW_CLERK_ALLOW_MISSING_AZP accepts 1 / true only", () => {
+  it("OPENCLAW_CLERK_ALLOW_MISSING_AZP accepts 1 / true / yes / on, case-insensitive", () => {
     const allow = (v: string) =>
       resolveClerkAuth(undefined, env({ OPENCLAW_CLERK_ALLOW_MISSING_AZP: v }))?.allowMissingAzp;
-    expect(allow("1")).toBe(true);
-    expect(allow("true")).toBe(true);
-    expect(allow(" TRUE ")).toBe(true);
-    expect(allow("0")).toBe(false);
-    expect(allow("yes")).toBe(false);
+    for (const v of ["1", "true", " TRUE ", "yes", "YES", "on", "On"]) {
+      expect(allow(v)).toBe(true);
+    }
+    for (const v of ["0", "false", "no", "off", "", "2", "y"]) {
+      expect(allow(v)).toBe(false);
+    }
     expect(resolveClerkAuth(undefined, env())?.allowMissingAzp).toBe(false);
+  });
+});
+
+describe("azp normalisation (trailing slash, scheme+host case)", () => {
+  it("a list entry with a trailing slash matches an azp without one", async () => {
+    const token = mint({ azp: GOOD });
+    expect((await verifyClerkJwt(token, opts({ authorizedParties: [`${GOOD}/`] })))?.sub).toBe(
+      "user_abc",
+    );
+  });
+
+  it("an azp with a trailing slash matches a list entry without one", async () => {
+    const token = mint({ azp: `${GOOD}/` });
+    expect((await verifyClerkJwt(token, opts({ authorizedParties: [GOOD] })))?.sub).toBe(
+      "user_abc",
+    );
+  });
+
+  it("scheme and host compare case-insensitively on both sides", async () => {
+    const token = mint({ azp: "HTTPS://ShrineLongevity.COM" });
+    expect(
+      (await verifyClerkJwt(token, opts({ authorizedParties: ["https://SHRINELONGEVITY.com/"] })))
+        ?.sub,
+    ).toBe("user_abc");
+  });
+
+  it("normalisation does not widen: a different host or a path still fails", async () => {
+    for (const azp of [
+      "https://shrinelongevity.com.evil.example",
+      "https://shrinelongevity.com/x",
+      "http://shrinelongevity.com",
+    ]) {
+      const token = mint({ azp });
+      expect(await verifyClerkJwt(token, opts({ authorizedParties: [GOOD] }))).toBeNull();
+    }
   });
 });
 
@@ -264,34 +306,42 @@ const CLERK_NO_LIST: ResolvedClerkAuth = {
   audience: AUDIENCE,
 };
 
-describe("boot — WARN when Clerk is configured but azp is not enforced", () => {
+describe("boot — azp enforcement status is logged once", () => {
   const base = { bind: "loopback" as const, auth: { mode: "token" as const, token: "t-123" } };
   const clerk = { jwksUrl: "https://x/jwks.json", issuer: "clerk.example.test", audience: "oc" };
   const WARN = "clerk: azp not enforced (set OPENCLAW_CLERK_AUTHORIZED_PARTIES)";
 
+  afterEach(() => {
+    vi.unstubAllEnvs();
+  });
+
   it("warns once when no authorizedParties are configured", async () => {
+    vi.stubEnv("OPENCLAW_CLERK_AUTHORIZED_PARTIES", "");
     await resolveGatewayRuntimeConfig({
       cfg: { gateway: { ...base, auth: { ...base.auth, clerk } } },
       port: 18791,
     });
     expect(logs.warn.filter((m) => m.includes("azp not enforced"))).toEqual([WARN]);
+    expect(logs.info.filter((m) => m.startsWith("clerk: azp"))).toEqual([
+      "clerk: azp allow-list count=0 allowMissingAzp=false",
+    ]);
   });
 
-  it("does not warn when authorizedParties are configured", async () => {
+  it("with env parties set: no WARN; logs the COUNT and the boolean, never the values", async () => {
+    vi.stubEnv("OPENCLAW_CLERK_AUTHORIZED_PARTIES", `${GOOD},https://app.test`);
+    vi.stubEnv("OPENCLAW_CLERK_ALLOW_MISSING_AZP", "yes");
     await resolveGatewayRuntimeConfig({
-      cfg: {
-        gateway: {
-          ...base,
-          auth: { ...base.auth, clerk: { ...clerk, authorizedParties: [GOOD] } },
-        },
-      },
+      cfg: { gateway: { ...base, auth: { ...base.auth, clerk } } },
       port: 18792,
     });
     expect(logs.warn.some((m) => m.includes("azp not enforced"))).toBe(false);
+    const azpLines = logs.info.filter((m) => m.startsWith("clerk: azp"));
+    expect(azpLines).toEqual(["clerk: azp allow-list count=2 allowMissingAzp=true"]);
+    expect([...logs.info, ...logs.warn].join("\n")).not.toContain("app.test");
   });
 
-  it("does not warn when Clerk is not configured", async () => {
+  it("does not log azp status when Clerk is not configured", async () => {
     await resolveGatewayRuntimeConfig({ cfg: { gateway: base }, port: 18793 });
-    expect(logs.warn.some((m) => m.includes("azp"))).toBe(false);
+    expect([...logs.warn, ...logs.info].some((m) => m.includes("azp"))).toBe(false);
   });
 });

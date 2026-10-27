@@ -433,19 +433,6 @@ export const OpenClawSchema = z
               })
               .strict()
               .optional(),
-            clerk: z
-              .object({
-                jwksUrl: z.string().optional(),
-                issuer: z.string().optional(),
-                audience: z.string().optional(),
-                secretKey: z.string().optional().register(sensitive),
-                backendApiUrl: z.string().optional(),
-                sessionCacheTtlMs: z.number().int().nonnegative().optional(),
-                authorizedParties: z.array(z.string()).optional(),
-                allowMissingAzp: z.boolean().optional(),
-              })
-              .strict()
-              .optional(),
           })
           .strict()
           .optional(),

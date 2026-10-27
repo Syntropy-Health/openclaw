@@ -166,6 +166,18 @@ function decodeJsonSegment<T>(segment: string): T {
 // Claim checks
 // ---------------------------------------------------------------------------
 
+/**
+ * Canonical form of an `azp` / allow-list entry: trimmed, scheme and host
+ * lowercased (path case is kept), trailing "/" removed. A value that is not
+ * `scheme://…` is only trimmed and stripped of trailing "/".
+ */
+export function normalizeAuthorizedParty(value: string): string {
+  const trimmed = value.trim();
+  const m = /^([a-z][a-z0-9+.-]*:\/\/)([^/?#]*)(.*)$/i.exec(trimmed);
+  const canonical = m ? `${m[1].toLowerCase()}${m[2].toLowerCase()}${m[3]}` : trimmed;
+  return canonical.replace(/\/+$/, "");
+}
+
 function claimsPass(payload: JwtPayload, opts: VerifyClerkJwtOptions, now: number): boolean {
   // Issuer must match exactly.
   if (payload.iss !== opts.issuer) {
@@ -196,14 +208,19 @@ function claimsPass(payload: JwtPayload, opts: VerifyClerkJwtOptions, now: numbe
     return false;
   }
 
-  // Authorized party, when an allow-list is configured.
+  // Authorized party, when an allow-list is configured. Both sides are
+  // normalised (trailing "/" stripped, scheme+host lowercased) so
+  // "https://x.com/" and "https://X.com" are the same party.
   const parties = opts.authorizedParties;
   if (Array.isArray(parties) && parties.length > 0) {
     if (payload.azp === undefined) {
       if (opts.allowMissingAzp !== true) {
         return false;
       }
-    } else if (typeof payload.azp !== "string" || !parties.includes(payload.azp)) {
+    } else if (
+      typeof payload.azp !== "string" ||
+      !parties.map(normalizeAuthorizedParty).includes(normalizeAuthorizedParty(payload.azp))
+    ) {
       return false;
     }
   }

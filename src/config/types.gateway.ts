@@ -156,19 +156,6 @@ export type GatewayClerkAuthConfig = {
   backendApiUrl?: string;
   /** Positive session-validation cache TTL (ms). Config knob; default 30000. */
   sessionCacheTtlMs?: number;
-  /**
-   * Allowed `azp` (authorized party) claim values, e.g. the app origins that mint
-   * the session token. Unset/empty → azp is not checked (observe first: the
-   * gateway logs each distinct azp it sees). Falls back to the comma-separated
-   * OPENCLAW_CLERK_AUTHORIZED_PARTIES env.
-   */
-  authorizedParties?: string[];
-  /**
-   * With `authorizedParties` set, accept a token that carries NO azp (e.g. a
-   * native client). Default false. Falls back to OPENCLAW_CLERK_ALLOW_MISSING_AZP
-   * (`1`/`true`).
-   */
-  allowMissingAzp?: boolean;
 };
 
 export type GatewayTauConfig = {

@@ -352,13 +352,17 @@ export function resolveClerkAuth(
     env,
   );
 
-  const partiesSource =
-    clerkConfig?.authorizedParties ?? (env.OPENCLAW_CLERK_AUTHORIZED_PARTIES ?? "").split(",");
-  const parties = partiesSource.map((p) => p.trim()).filter(Boolean);
+  // azp allow-list: ENV ONLY. Like the trust anchors it guards, it must not be
+  // writable through config (config.patch is reachable by the agent's gateway
+  // tool), so there is deliberately no gateway.auth.clerk.* source for it.
+  const parties = (env.OPENCLAW_CLERK_AUTHORIZED_PARTIES ?? "")
+    .split(",")
+    .map((p) => p.trim())
+    .filter(Boolean);
   const authorizedParties = parties.length > 0 ? parties : undefined;
-  const allowMissingAzp =
-    clerkConfig?.allowMissingAzp ??
-    ["1", "true"].includes((env.OPENCLAW_CLERK_ALLOW_MISSING_AZP ?? "").trim().toLowerCase());
+  const allowMissingAzp = ["1", "true", "yes", "on"].includes(
+    (env.OPENCLAW_CLERK_ALLOW_MISSING_AZP ?? "").trim().toLowerCase(),
+  );
 
   return {
     jwksUrl,

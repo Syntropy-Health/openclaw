@@ -111,7 +111,12 @@ export async function resolveGatewayRuntimeConfig(params: {
         : "[gateway] clerk session validation: INACTIVE (no backend secret) — JWT-verify only, NO revocation",
     );
     // azp is opt-in (behaviour-preserving); say so once at boot until it is set.
-    if (!resolvedAuth.clerk.authorizedParties?.length) {
+    // The list COUNT is logged, never its values.
+    const azpCount = resolvedAuth.clerk.authorizedParties?.length ?? 0;
+    logInfo(
+      `clerk: azp allow-list count=${azpCount} allowMissingAzp=${resolvedAuth.clerk.allowMissingAzp === true}`,
+    );
+    if (azpCount === 0) {
       logWarn("clerk: azp not enforced (set OPENCLAW_CLERK_AUTHORIZED_PARTIES)");
     }
   }
