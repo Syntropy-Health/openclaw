@@ -259,3 +259,70 @@ describe("forgetByExternalId + tombstones (end to end, real files)", () => {
     expect(forgetOutcome(r2).status).toBe("SUCCEEDED");
   });
 });
+
+describe("security review round (77865605b)", () => {
+  it("401 when the Clerk session is revoked/signed-out (or the check throws) — nothing erased", async () => {
+    for (const validateSession of [
+      async () => false,
+      async () => {
+        throw new Error("clerk down");
+      },
+    ]) {
+      const { d, forget } = deps({ validateSession });
+      expect((await call(createForgetHandler(d))).status).toBe(401);
+      expect(forget).not.toHaveBeenCalled();
+    }
+  });
+
+  it("passes the session-id header (a lookup key) to the session check, with the token's sub", async () => {
+    const validateSession = vi.fn(async () => true);
+    const { d } = deps({ validateSession });
+    await call(createForgetHandler(d), {
+      headers: { authorization: "Bearer good", "x-openclaw-clerk-session-id": "sess_1" },
+    });
+    expect(validateSession).toHaveBeenCalledWith(SUB, "sess_1");
+  });
+
+  it("one erase per user at a time, and a short cooldown after (abuse guard)", async () => {
+    let t = 1_000;
+    let releaseFirst!: () => void;
+    const gate = new Promise<void>((r) => (releaseFirst = r));
+    const forget = vi.fn(async () => (await gate, ok()));
+    const { d } = deps({ forget, now: () => t, cooldownMs: 5_000 });
+    const h = createForgetHandler(d);
+    const first = call(h);
+    await new Promise((r) => setTimeout(r, 0));
+    expect((await call(h)).json).toMatchObject({ status: "FAILED", reasons: ["in_progress"] });
+    releaseFirst();
+    expect((await first).json.status).toBe("SUCCEEDED");
+    t += 1_000;
+    expect((await call(h)).json).toMatchObject({ status: "FAILED", reasons: ["rate_limited"] });
+    t += 5_000;
+    expect((await call(h)).json.status).toBe("SUCCEEDED");
+    expect(forget).toHaveBeenCalledTimes(2);
+  });
+
+  it("no sessions directory = FAILED misconfigured (an empty scan must never read as 'cleared')", async () => {
+    const empty = fs.mkdtempSync(path.join(os.tmpdir(), "oc-forget-nodir-"));
+    try {
+      const { d } = deps({
+        forget: (ext) =>
+          forgetByExternalId({
+            sql: (async () => []) as unknown as Parameters<typeof forgetByExternalId>[0]["sql"],
+            client: { forget: async () => true },
+            ledger: createMemoryReceiptLedger(),
+            opaque: (r) => r,
+            externalId: ext,
+            stateDir: empty,
+          }),
+      });
+      expect((await call(createForgetHandler(d))).json).toMatchObject({
+        status: "FAILED",
+        retryable: false,
+        reasons: ["misconfigured"],
+      });
+    } finally {
+      fs.rmSync(empty, { recursive: true, force: true });
+    }
+  });
+});

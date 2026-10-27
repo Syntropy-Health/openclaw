@@ -54,6 +54,46 @@ const IDENTITY_LINE = /^\s*(?:external_id|user_id|scope_key|clerk_id)\s*:.*$/gim
 export const REDACTED_ID = "[id]";
 
 /**
+ * The verified external_id in the SYSTEM-injected `[USER_IDENTITY]` block of a user
+ * turn, or null. A user turn is `${prependContext}\n\n${prompt}`: system blocks
+ * first, the person's own text after. Only the LEADING run of known context blocks
+ * is read, so a block a user TYPES (which can only appear after that run) never
+ * counts. Returns "none" as null.
+ */
+export function leadingIdentityExternalId(text: string): string | null {
+  let rest = text.replace(/^\s+/, "");
+  for (let i = 0; i < 20 && rest.length > 0; i++) {
+    const tag = rest.match(/^\[([A-Z][A-Z_]{3,})\]/)?.[1];
+    const facts = rest.startsWith("<graphiti-facts>");
+    if (!facts && (!tag || !KNOWN_TAGS.includes(tag))) {
+      return null; // first non-system content: the person's own text begins
+    }
+    let end: number;
+    if (facts) {
+      const close = rest.indexOf("</graphiti-facts>");
+      end = close < 0 ? -1 : close + "</graphiti-facts>".length;
+    } else {
+      const close = rest.indexOf(`[/${tag}]`);
+      const para = rest.indexOf("\n\n");
+      end =
+        close >= 0 && (para < 0 || close < para || UNPAIRED_OPENERS.indexOf(tag!) < 0)
+          ? close + tag!.length + 3
+          : para;
+    }
+    const block = end < 0 ? rest : rest.slice(0, end);
+    if (tag === "USER_IDENTITY") {
+      const id = block.match(/external_id:\s*(\S+)/)?.[1];
+      return id && id !== "none" ? id : null;
+    }
+    if (end < 0) {
+      return null;
+    }
+    rest = rest.slice(end).replace(/^\s+/, "");
+  }
+  return null;
+}
+
+/**
  * The memory-safe text for one message, or `null` when it must not be ingested
  * (empty after minimisation, or an unrecognised context block survived).
  */

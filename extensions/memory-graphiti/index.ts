@@ -9,12 +9,12 @@
  * Provides auto-capture on agent_end and auto-recall on before_agent_start.
  */
 
-import os from "node:os";
-import path from "node:path";
 import { Type } from "@sinclair/typebox";
 import { openPluginPool, type OpenClawPluginApi } from "openclaw/plugin-sdk";
 import postgres from "postgres";
+import { resolveStateDir } from "../../src/config/paths.js";
 import { authorizeClerkJwt, resolveClerkAuth } from "../../src/gateway/auth.js";
+import { validateClerkSession } from "../../src/gateway/clerk-session-validation.js";
 import { captureWithReceipts } from "./capture.js";
 import {
   GraphitiRestClient,
@@ -29,12 +29,13 @@ import {
   type GroupIdContext,
 } from "./config.js";
 import { createForgetHandler, FORGET_ROUTE_PATH } from "./forget-route.js";
-import { forgetByExternalId, forgetUser } from "./forget.js";
+import { forgetByExternalId, forgetUser, type GroupLock } from "./forget.js";
 import {
   externalIdScopeKey,
   resolveIdentityScopeKey,
   resolveVerifiedExternalId,
 } from "./identity.js";
+import { createGroupLock } from "./lock.js";
 import { extractMessages } from "./messages.js";
 import { minimiseForMemory } from "./minimise.js";
 import {
@@ -42,6 +43,7 @@ import {
   createPgReceiptLedger,
   ensureReceiptSchema,
   opaqueGroupId,
+  tombstoneKey,
   type ReceiptLedger,
 } from "./receipts.js";
 import { computeIsQaOnly, senderZepAllowed, type TripwireBreach } from "./tripwire.js";
@@ -271,8 +273,20 @@ const memoryPlugin = {
         covered: async (g, h) => (await ready(), pg.covered(g, h)),
         record: async (r) => (await ready(), pg.record(r)),
         pending: async (g, h) => (await ready(), pg.pending(g, h)),
-        tombstoned: async (g, h) => (await ready(), pg.tombstoned(g, h)),
-        addTombstones: async (g, h) => (await ready(), pg.addTombstones(g, h)),
+        // Tombstones are stored KEYED; map entry hashes to keys and back.
+        tombstoned: async (g, h) => {
+          await ready();
+          const byKey = new Map(h.map((x) => [tombstoneKey(x, pepper), x]));
+          const hit = await pg.tombstoned(g, [...byKey.keys()]);
+          return new Set([...hit].map((k) => byKey.get(k)!));
+        },
+        addTombstones: async (g, h) => (
+          await ready(),
+          pg.addTombstones(
+            g,
+            h.map((x) => tombstoneKey(x, pepper)),
+          )
+        ),
         addPending: async (g, h, ref, store) => (await ready(), pg.addPending(g, h, ref, store)),
         clearPending: async (g, h) => (await ready(), pg.clearPending(g, h)),
         deleteGroup: async (g) => (await ready(), pg.deleteGroup(g)),
@@ -284,6 +298,9 @@ const memoryPlugin = {
       ledger = createMemoryReceiptLedger();
     }
     const inFlight = new Set<string>();
+
+    // One lock per memory group, shared by capture and forget (see lock.ts).
+    const withGroups: GroupLock = createGroupLock();
 
     /**
      * The memory group for a turn: identity-resolved where possible, ALWAYS
@@ -632,15 +649,32 @@ const memoryPlugin = {
     // ========================================================================
 
     // Self-service "Clear chat memory" (CTO #17002): the verified Clerk user only.
-    const gatewayStateDir = () =>
-      process.env.OPENCLAW_STATE_DIR?.trim() ||
-      process.env.CLAWDBOT_STATE_DIR?.trim() ||
-      path.join(os.homedir(), ".openclaw");
+    // The gateway's OWN state-dir resolution (env overrides, ~ expansion, legacy dirs).
+    const gatewayStateDir = () => resolveStateDir(process.env);
     api.registerHttpRoute({
       path: FORGET_ROUTE_PATH,
       handler: createForgetHandler({
         resolveClerk: () => resolveClerkAuth(api.config.gateway?.auth?.clerk, process.env),
         verifyJwt: (token, clerk) => authorizeClerkJwt(token, clerk),
+        // Mirror the chat path: with a session resolver, a revoked/signed-out
+        // session's token is refused (Clerk unreachable → fail-open, as chat).
+        validateSession: (() => {
+          const clerk = resolveClerkAuth(api.config.gateway?.auth?.clerk, process.env);
+          const resolve = clerk?.sessionResolver;
+          return resolve
+            ? async (sub: string, sessionId: string | undefined) =>
+                (
+                  await validateClerkSession({
+                    sub,
+                    sessionId,
+                    resolve,
+                    cacheTtlMs: clerk?.sessionCacheTtlMs,
+                    now: Date.now(),
+                    logger: api.logger,
+                  })
+                ).ok
+            : undefined;
+        })(),
         forget:
           identitySql && !memoryRefused
             ? (externalId) =>
@@ -651,6 +685,7 @@ const memoryPlugin = {
                   opaque,
                   externalId,
                   stateDir: gatewayStateDir(),
+                  lock: withGroups,
                 })
             : null,
         logger: api.logger,
@@ -688,19 +723,24 @@ const memoryPlugin = {
               process.exitCode = 2;
               return;
             }
-            const stateDir =
-              opts.stateDir ??
-              (process.env.OPENCLAW_STATE_DIR?.trim() ||
-                process.env.CLAWDBOT_STATE_DIR?.trim() ||
-                path.join(os.homedir(), ".openclaw"));
-            const r = await forgetUser({
-              sql: identitySql as unknown as Parameters<typeof forgetUser>[0]["sql"],
-              client,
-              ledger,
-              opaque,
-              userId: opts.user,
-              stateDir,
-            });
+            const stateDir = opts.stateDir ?? resolveStateDir(process.env);
+            let r: Awaited<ReturnType<typeof forgetUser>>;
+            try {
+              r = await forgetUser({
+                sql: identitySql as unknown as Parameters<typeof forgetUser>[0]["sql"],
+                client,
+                ledger,
+                opaque,
+                userId: opts.user,
+                stateDir,
+              });
+            } catch (err) {
+              console.error(
+                `graphiti forget: FAILED (${(err as { code?: string }).code ?? "error"})`,
+              );
+              process.exitCode = 2;
+              return;
+            }
             console.log(
               `graphiti forget: userFound=${r.userFound} storeGroupsDeleted=${r.storeGroupsDeleted} storeGroupsAbsent=${r.storeGroupsAbsent} receipts=${r.receipts} transcripts=${r.transcripts} sharedSkipped=${r.sharedSkipped} lockedSkipped=${r.lockedSkipped} vanished=${r.vanished}`,
             );
@@ -808,7 +848,9 @@ const memoryPlugin = {
 
           // Minimise → skip receipted → ingest with read-back → record receipt.
           // Not awaited: a chat turn never waits on memory. Counts only in logs.
-          void captureWithReceipts({ client, ledger, groupId, messages: extracted, inFlight })
+          void withGroups([groupId], () =>
+            captureWithReceipts({ client, ledger, groupId, messages: extracted, inFlight }),
+          )
             .then((r) =>
               api.logger.info?.(
                 `memory-graphiti: capture confirmed=${r.confirmed} sent=${r.sent} skipped=${r.skipped} dropped=${r.dropped} tooLong=${r.tooLong} mismatched=${r.mismatched}`,

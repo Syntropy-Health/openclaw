@@ -26,7 +26,7 @@ import fs from "node:fs";
 import path from "node:path";
 import type { MemoryClient } from "./client.js";
 import { extractMessages } from "./messages.js";
-import { minimiseForMemory } from "./minimise.js";
+import { leadingIdentityExternalId, minimiseForMemory } from "./minimise.js";
 import { entryHash, type ReceiptLedger } from "./receipts.js";
 
 type Sql = <T = Record<string, unknown>>(
@@ -52,9 +52,6 @@ export type ForgetResult = {
 
 /** Live + archived transcript files (never locks, never sessions.json). */
 const TRANSCRIPT = /\.jsonl(\.(deleted|reset|bak)\.[^/\\]+)?$/;
-/** external_id inside a [USER_IDENTITY] block (JSON-escaped "\\n" on disk, or a real newline). */
-const EXTERNAL_ID =
-  /\[USER_IDENTITY\](?:\\n|\n)(?:(?!\[\/USER_IDENTITY\])[\s\S]){0,400}?external_id:\s*([^\s"\\]+)/g;
 /** HTTP session keys: agent:<agent>:<prefix>-user:<lowercased verified sub>[:hint]. */
 const HTTP_USER_PREFIX = /^(openresponses|openai)-user$/;
 /** Channels whose "peer" is a client-supplied device id: never a deletion selector. */
@@ -113,18 +110,48 @@ function basesForPeers(
   return bases;
 }
 
-/** The external_ids an identity block in this file names. */
-function externalIdsIn(file: string): Set<string> | null {
-  const ids = new Set<string>();
+/** User/assistant messages of a transcript file (null if it vanished). */
+function messagesIn(file: string): unknown[] | null {
   let text: string;
   try {
     text = fs.readFileSync(file, "utf8");
   } catch {
     return null; // renamed/removed concurrently (archive, retention sweep)
   }
-  for (const m of text.matchAll(EXTERNAL_ID)) {
-    if (m[1] && m[1] !== "none") {
-      ids.add(m[1]);
+  const out: unknown[] = [];
+  for (const line of text.split("\n")) {
+    if (!line.trim()) {
+      continue;
+    }
+    try {
+      const e = JSON.parse(line) as { message?: unknown };
+      if (e && typeof e === "object" && e.message) {
+        out.push(e.message);
+      }
+    } catch {
+      // not a JSON entry
+    }
+  }
+  return out;
+}
+
+/**
+ * The external_ids named by SYSTEM-injected identity blocks in this file (the
+ * leading block region of user turns only — never text a person typed).
+ */
+function externalIdsIn(file: string): Set<string> | null {
+  const msgs = messagesIn(file);
+  if (msgs === null) {
+    return null;
+  }
+  const ids = new Set<string>();
+  for (const m of extractMessages(msgs)) {
+    if (m.roleType !== "user") {
+      continue;
+    }
+    const id = leadingIdentityExternalId(m.content);
+    if (id) {
+      ids.add(id);
     }
   }
   return ids;
@@ -172,27 +199,7 @@ export function userTranscriptFiles(
 export function tombstonesFor(files: string[]): string[] {
   const hashes = new Set<string>();
   for (const file of files) {
-    let text: string;
-    try {
-      text = fs.readFileSync(file, "utf8");
-    } catch {
-      continue;
-    }
-    const messages: unknown[] = [];
-    for (const line of text.split("\n")) {
-      if (!line.trim()) {
-        continue;
-      }
-      try {
-        const e = JSON.parse(line) as { message?: unknown };
-        if (e && typeof e === "object" && e.message) {
-          messages.push(e.message);
-        }
-      } catch {
-        // not a JSON entry
-      }
-    }
-    for (const m of extractMessages(messages)) {
+    for (const m of extractMessages(messagesIn(file) ?? [])) {
       const t = minimiseForMemory(m.content);
       if (t !== null) {
         hashes.add(entryHash({ role: m.roleType, text: t }));
@@ -202,7 +209,12 @@ export function tombstonesFor(files: string[]): string[] {
   return [...hashes];
 }
 
+/** Serialises work on a set of memory groups (shared with capture, in-process). */
+export type GroupLock = <T>(groups: string[], fn: () => Promise<T>) => Promise<T>;
+
 type ForgetDeps = {
+  /** Wait for in-flight captures of these groups before erasing (else a late upload survives). */
+  lock?: GroupLock;
   sql: Sql;
   client: Pick<MemoryClient, "forget">;
   ledger: Pick<ReceiptLedger, "deleteGroup" | "addTombstones">;
@@ -232,7 +244,7 @@ async function forgetIdentity(
   },
   res: ForgetResult,
 ): Promise<ForgetResult> {
-  const { client, ledger, opaque, stateDir } = deps;
+  const { opaque } = deps;
   // Every scope this user's memory can be keyed under: the verified external id
   // (the approval path), the internal id(s) and channel:peer (identity fallbacks).
   const groups = [
@@ -240,16 +252,39 @@ async function forgetIdentity(
       [
         identity.externalId,
         ...identity.internalIds,
-        ...identity.channels.map((c) => `${c.channel}:${c.channel_peer_id}`),
+        ...identity.channels
+          .filter((c) => !CLIENT_SUPPLIED_PEER_CHANNELS.has(c.channel.toLowerCase()))
+          .map((c) => `${c.channel}:${c.channel_peer_id}`),
       ]
         .filter((s): s is string => Boolean(s))
         .map(opaque),
     ),
   ];
 
+  const lock: GroupLock = deps.lock ?? ((_g, fn) => fn());
+  return lock(groups, () => eraseLocked(deps, identity, groups, res));
+}
+
+async function eraseLocked(
+  deps: ForgetDeps,
+  identity: {
+    internalIds: string[];
+    externalId: string | null;
+    channels: Array<{ channel: string; channel_peer_id: string }>;
+  },
+  groups: string[],
+  res: ForgetResult,
+): Promise<ForgetResult> {
+  const { client, ledger, stateDir } = deps;
   // 1. Find the user's transcripts and TOMBSTONE their entries FIRST, so a capture
   //    that runs from here on (the live session still replays them) never re-sends.
-  const perDir = sessionsDirs(stateDir).map((dir) => ({
+  const dirs = sessionsDirs(stateDir);
+  if (dirs.length === 0) {
+    throw Object.assign(new Error("no sessions directory under the state dir"), {
+      code: "misconfigured",
+    });
+  }
+  const perDir = dirs.map((dir) => ({
     dir,
     ...userTranscriptFiles(dir, {
       externalId: identity.externalId,

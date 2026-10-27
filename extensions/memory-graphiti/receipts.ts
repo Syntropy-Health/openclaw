@@ -194,16 +194,22 @@ export function createPgReceiptLedger(sql: Sql): ReceiptLedger {
       }
       const rows = await sql<{ entry_hash: string }>`
         SELECT entry_hash FROM lp_memory_tombstones
-        WHERE group_id = ${groupId} AND entry_hash = ANY(${hashes})`;
+        WHERE group_id = ${groupId} AND entry_hash = ANY(${hashes})
+          AND created_at > now() - make_interval(days => ${TOMBSTONE_TTL_DAYS})`;
       return new Set(rows.map((r) => r.entry_hash));
     },
     async addTombstones(groupId, hashes) {
-      for (const h of hashes) {
-        await sql`
-          INSERT INTO lp_memory_tombstones (group_id, entry_hash)
-          VALUES (${groupId}, ${h})
-          ON CONFLICT (group_id, entry_hash) DO NOTHING`;
+      if (hashes.length === 0) {
+        return;
       }
+      // One statement for the batch; expired tombstones are pruned on the way.
+      await sql`
+        DELETE FROM lp_memory_tombstones
+        WHERE created_at <= now() - make_interval(days => ${TOMBSTONE_TTL_DAYS})`;
+      await sql`
+        INSERT INTO lp_memory_tombstones (group_id, entry_hash)
+        SELECT ${groupId}, h FROM unnest(${hashes}::text[]) AS h
+        ON CONFLICT (group_id, entry_hash) DO UPDATE SET created_at = now()`;
     },
     async deleteGroup(groupId) {
       await sql`DELETE FROM lp_memory_pending WHERE group_id = ${groupId}`;
@@ -212,6 +218,25 @@ export function createPgReceiptLedger(sql: Sql): ReceiptLedger {
       return rows.length;
     },
   };
+}
+
+/**
+ * How long a "Clear chat memory" tombstone blocks re-capture. It only has to
+ * outlive the gateway's live session that may replay the cleared turns; after
+ * that it is dropped (so identical text said much later can be remembered again).
+ */
+export const TOMBSTONE_TTL_DAYS = 30;
+
+/**
+ * Tombstone values are KEYED (HMAC with the group pepper, distinct label), so a
+ * party with database read access cannot confirm "did this user say X?" by
+ * hashing candidate phrases. Without a pepper the label still separates them
+ * from entry hashes (not a secret — the approval path always has a pepper).
+ */
+export function tombstoneKey(entryHashHex: string, pepper?: string): string {
+  return createHmac("sha256", pepper ?? "openclaw-tombstone-unkeyed")
+    .update(`openclaw-tombstone:v1:${entryHashHex}`)
+    .digest("hex");
 }
 
 /** In-memory ledger for tests and for a plugin with no database. */

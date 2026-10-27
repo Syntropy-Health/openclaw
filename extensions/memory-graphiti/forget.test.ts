@@ -135,6 +135,9 @@ describe("forgetUser", () => {
       lockedSkipped: 1,
     });
     expect(existing.has(opaque(B_SUB))).toBe(true);
+    // A client-supplied device id never becomes a memory group to erase (security review F7).
+    expect(forget).not.toHaveBeenCalledWith(opaque("shrinemobile:agent"));
+    expect(forget).toHaveBeenCalledWith(opaque("whatsapp:+15550000001"));
     expect((await ledger.covered(opaque(B_SUB), ["h1", "h2"])).size).toBe(2);
     expect(fs.readdirSync(sessions).sort()).toEqual([
       "sB1.jsonl",
