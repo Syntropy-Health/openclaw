@@ -240,6 +240,36 @@ describe("installSessionToolResultGuard image persistence", () => {
     expect(after).toContain(EXPECTED_PLACEHOLDER);
   });
 
+  it("history re-scan after conversion: the text path is re-detected, the placeholder is not", async () => {
+    const sm = diskSession();
+    installSessionToolResultGuard(sm);
+    sm.appendMessage(
+      asAppendMessage({
+        role: "user",
+        content: [
+          { type: "text", text: "see /tmp/x/photo.png" },
+          { type: "image", data: IMAGE_B64, mimeType: "image/jpeg" },
+        ],
+        timestamp: 1,
+      }),
+    );
+    sm.appendMessage(asAppendMessage(ASSISTANT));
+    const reopened = SessionManager.open(sm.getSessionFile() as string);
+    const result = await detectAndLoadPromptImages({
+      prompt: "and now?",
+      workspaceDir: os.tmpdir(),
+      model: { input: ["text", "image"] },
+      historyMessages: reopened.buildSessionContext().messages,
+    });
+    // Before conversion the message carried an image block, so history scanning skipped it.
+    // After conversion it carries only text, so the literal path in the user's text is
+    // detected again (exactly one ref). The file does not exist here, so nothing is loaded;
+    // the placeholder itself never counts as a ref.
+    expect(result.detectedRefs).toHaveLength(1);
+    expect(result.detectedRefs[0]?.resolved).toBe("/tmp/x/photo.png");
+    expect(result.historyImagesByIndex.size).toBe(0);
+  });
+
   it("reloads a placeholder session from disk without crashing the history pipeline", async () => {
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), "openclaw-image-placeholder-"));
     tmpDirs.push(dir);

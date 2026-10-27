@@ -13,9 +13,13 @@ import type { SessionManager } from "@mariozechner/pi-coding-agent";
 
 type ImageLike = { mimeType: string; base64: string };
 
-function stripDataUrlPrefix(data: string): string {
-  const match = /^data:[^;,]*;base64,/i.exec(data);
-  return match ? data.slice(match[0].length) : data;
+/** Splits `data:<mime>[;param=value]*;base64,<payload>`; plain base64 passes through. */
+function parseDataUrl(data: string): { mimeType?: string; base64: string } {
+  const match = /^data:([^;,]*)((?:;[^;,]*)*);base64,/i.exec(data);
+  if (!match) {
+    return { base64: data };
+  }
+  return { mimeType: match[1] || undefined, base64: data.slice(match[0].length) };
 }
 
 /** Recognises the image block shapes the agent libraries emit. */
@@ -27,23 +31,25 @@ function readImageBlock(block: unknown): ImageLike | null {
   if (rec.type !== "image") {
     return null;
   }
-  // pi-ai ImageContent: { type: "image", data, mimeType }
-  if (typeof rec.data === "string") {
-    return {
-      mimeType: typeof rec.mimeType === "string" ? rec.mimeType : "application/octet-stream",
-      base64: stripDataUrlPrefix(rec.data),
-    };
-  }
-  // Anthropic-style: { type: "image", source: { type: "base64", media_type, data } }
+  let declared: string | undefined;
+  let data: string;
   const source = rec.source as Record<string, unknown> | undefined;
-  if (source && source.type === "base64" && typeof source.data === "string") {
-    return {
-      mimeType:
-        typeof source.media_type === "string" ? source.media_type : "application/octet-stream",
-      base64: stripDataUrlPrefix(source.data),
-    };
+  if (typeof rec.data === "string") {
+    // pi-ai ImageContent: { type: "image", data, mimeType }
+    declared = typeof rec.mimeType === "string" ? rec.mimeType : undefined;
+    data = rec.data;
+  } else if (source && source.type === "base64" && typeof source.data === "string") {
+    // Anthropic-style: { type: "image", source: { type: "base64", media_type, data } }
+    declared = typeof source.media_type === "string" ? source.media_type : undefined;
+    data = source.data;
+  } else {
+    return null;
   }
-  return null;
+  const parsed = parseDataUrl(data);
+  return {
+    mimeType: declared ?? parsed.mimeType ?? "application/octet-stream",
+    base64: parsed.base64,
+  };
 }
 
 export function formatImagePlaceholder(mimeType: string, bytes: Buffer): string {

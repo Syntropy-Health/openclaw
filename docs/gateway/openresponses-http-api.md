@@ -255,7 +255,7 @@ Defaults when omitted:
 - `files.pdf.maxPixels`: 4,000,000
 - `files.pdf.minTextChars`: 200
 - `images.maxBytes`: 10MB
-- `images.maxCount`: unlimited (more `input_image` parts than the cap is a 400, never truncated)
+- `images.maxCount`: unlimited when unset. It counts `input_image` parts plus PDF pages rendered to images; more than the cap is a 400, never a truncation. It must be a positive integer: `0` is rejected by the config schema.
 - `images.maxRedirects`: 3
 - `images.timeoutMs`: 10s
 
