@@ -89,8 +89,20 @@ export function makeFixtureSql(): {
     if (/^SELECT 1\b/.test(text)) {
       return Promise.resolve([{ "?column?": 1 }]);
     }
+    if (text.startsWith("INSERT INTO lp_user_channels")) {
+      // Reads stay stateless; the upsert reports ownership: a guarded upsert
+      // (`WHERE lp_user_channels.user_id = EXCLUDED.user_id`) onto a link owned
+      // by someone else returns no row.
+      const [userId, channel, peer] = values as [string, string, string];
+      const owner = LINKS.find((l) => l.channel === channel && l.peer === peer)?.userId;
+      const guarded = text.includes("WHERE lp_user_channels.user_id = EXCLUDED.user_id");
+      if (owner && owner !== userId && guarded) {
+        return Promise.resolve([]);
+      }
+      return Promise.resolve([{ id: "link", user_id: userId, channel, channel_peer_id: peer }]);
+    }
     if (!/^SELECT/.test(text)) {
-      return Promise.resolve([]); // DDL / inserts / upserts
+      return Promise.resolve([]); // DDL / other inserts
     }
     if (text.includes("uc.channel = $") && text.includes("uc.channel_peer_id = $")) {
       const [channel, peer] = values as [string, string];

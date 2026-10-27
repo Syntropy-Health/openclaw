@@ -68,6 +68,7 @@ async function boot() {
   mod.default.register(api);
   const hook = api._hooks.find((h) => h.name === "before_agent_start")!.handler;
   return {
+    api,
     fire: async (ctx: Record<string, unknown>) =>
       (await hook({ prompt: "hi" }, ctx)) as { prependContext?: string },
     calls: () => state.calls as SqlCall[],
@@ -133,5 +134,37 @@ describe("persist-user-identity — channel turns keep the peer path (characteri
     });
     expect(res.prependContext).toContain("user_id: uid-B");
     expect(isSelectLookup(calls(), "+15550001111")).toBe(true);
+  });
+});
+
+describe("persist-user-identity — [G1] auto-bind refusal is logged at WARN without ids", () => {
+  test("A sending B's device id: binding refused, WARN logged, no identifier in any log", async () => {
+    const { fire, api, calls } = await boot();
+    const res = await fire({
+      sessionKey: "agent:main:openresponses-user:user_2A",
+      messageProvider: "shrinemobile",
+      externalId: "user_2A",
+      deviceId: "dev-B",
+    });
+    expect(api.logger.warn).toHaveBeenCalledWith(
+      "persist-user-identity: [G1] auto-bind refused: device bound to another account",
+    );
+    expect(api.logger.error).not.toHaveBeenCalled();
+    const logged = [api.logger.warn, api.logger.error, api.logger.info]
+      .flatMap((fn) => (fn as ReturnType<typeof vi.fn>).mock.calls.flat())
+      .join("\n");
+    for (const id of ["dev-B", "user_2A", "user_2B", "uid-A", "uid-B"]) {
+      expect(logged).not.toContain(id);
+    }
+    // The upsert was attempted with the ownership guard.
+    expect(
+      calls().some(
+        (c) =>
+          c.text.startsWith("INSERT INTO lp_user_channels") &&
+          c.text.includes("WHERE lp_user_channels.user_id = EXCLUDED.user_id"),
+      ),
+    ).toBe(true);
+    // The turn still proceeds with the caller's own identity.
+    expect(res.prependContext).toContain("user_id: uid-A");
   });
 });

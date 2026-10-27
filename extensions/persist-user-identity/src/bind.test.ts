@@ -1,7 +1,12 @@
 import type postgres from "postgres";
 import { describe, expect, it } from "vitest";
 import { deriveIdentityPeer } from "../../shared/session-key.js";
-import { autoBindVerifiedPeer, unlinkChannelPeerForUser, type UserRow } from "./db.js";
+import {
+  AutoBindRefusedError,
+  autoBindVerifiedPeer,
+  unlinkChannelPeerForUser,
+  type UserRow,
+} from "./db.js";
 
 // ---------------------------------------------------------------------------
 // Fake tagged-template `sql` — dispatches on query text, records calls.
@@ -201,5 +206,89 @@ describe("autoBindVerifiedPeer — concurrent first-turn race (unique external_i
         channelPeerId: "d1",
       }),
     ).rejects.toThrow(/pg down/);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// [G1] auto-bind must never REASSIGN a device owned by another account.
+// A STATEFUL fake models lp_user_channels' UNIQUE(channel, channel_peer_id) and
+// the ON CONFLICT DO UPDATE upsert — including an optional
+// `WHERE lp_user_channels.user_id = EXCLUDED.user_id` guard, under which a
+// conflicting row owned by someone else is left untouched and no row returns.
+// ---------------------------------------------------------------------------
+
+function statefulBindSql(users: UserRow[], links: Map<string, string>) {
+  return fakeSql((text, values) => {
+    if (text.includes("SELECT * FROM lp_users WHERE external_id")) {
+      return users.filter((u) => u.external_id === values[0]);
+    }
+    if (text.includes("INSERT INTO lp_user_channels")) {
+      const [userId, channel, peer] = values as [string, string, string];
+      const key = `${channel}|${peer}`;
+      const owner = links.get(key);
+      const guarded = /WHERE lp_user_channels\.user_id = EXCLUDED\.user_id/.test(text);
+      if (owner !== undefined && owner !== userId && guarded) {
+        return []; // conflict, guard false → DO NOTHING, no RETURNING row
+      }
+      links.set(key, userId);
+      return [{ id: `link-${key}`, user_id: userId, channel, channel_peer_id: peer }];
+    }
+    throw new Error(`unexpected query: ${text}`);
+  });
+}
+
+const USER_A: UserRow = { ...USER, id: "uuid-A", external_id: "user_2A" };
+const USER_B: UserRow = { ...USER, id: "uuid-B", external_id: "user_2B" };
+
+describe("autoBindVerifiedPeer — never reassigns another account's device (RED arm)", () => {
+  it("★ A auto-binding with B's device id leaves the binding B's and refuses", async () => {
+    const links = new Map([["shrinemobile|dev-B", USER_B.id]]);
+    const { sql } = statefulBindSql([USER_A, USER_B], links);
+    await expect(
+      autoBindVerifiedPeer(sql, {
+        externalId: "user_2A",
+        channel: "shrinemobile",
+        channelPeerId: "dev-B",
+      }),
+    ).rejects.toBeInstanceOf(AutoBindRefusedError);
+    expect(links.get("shrinemobile|dev-B")).toBe(USER_B.id);
+  });
+
+  it("the refusal carries no identifiers in its message", async () => {
+    const links = new Map([["shrinemobile|dev-B", USER_B.id]]);
+    const { sql } = statefulBindSql([USER_A, USER_B], links);
+    const err = await autoBindVerifiedPeer(sql, {
+      externalId: "user_2A",
+      channel: "shrinemobile",
+      channelPeerId: "dev-B",
+    }).catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(AutoBindRefusedError);
+    const msg = (err as Error).message;
+    for (const id of ["dev-B", "user_2A", "user_2B", USER_A.id, USER_B.id]) {
+      expect(msg).not.toContain(id);
+    }
+  });
+
+  it("same-user re-bind stays idempotent", async () => {
+    const links = new Map([["shrinemobile|dev-A", USER_A.id]]);
+    const { sql } = statefulBindSql([USER_A, USER_B], links);
+    const user = await autoBindVerifiedPeer(sql, {
+      externalId: "user_2A",
+      channel: "shrinemobile",
+      channelPeerId: "dev-A",
+    });
+    expect(user.id).toBe(USER_A.id);
+    expect(links.get("shrinemobile|dev-A")).toBe(USER_A.id);
+  });
+
+  it("a fresh device binds to the caller", async () => {
+    const links = new Map<string, string>();
+    const { sql } = statefulBindSql([USER_A, USER_B], links);
+    await autoBindVerifiedPeer(sql, {
+      externalId: "user_2A",
+      channel: "shrinemobile",
+      channelPeerId: "dev-new",
+    });
+    expect(links.get("shrinemobile|dev-new")).toBe(USER_A.id);
   });
 });

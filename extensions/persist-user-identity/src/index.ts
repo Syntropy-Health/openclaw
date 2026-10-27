@@ -19,6 +19,7 @@ import {
 import { registerIdentityCommands } from "./commands.js";
 import { formatIdentityContext, formatUnknownUserContext } from "./context.js";
 import {
+  AutoBindRefusedError,
   autoBindVerifiedPeer,
   createPgClient,
   ensureUserSchema,
@@ -127,9 +128,17 @@ const persistUserIdentityPlugin = {
                 channelPeerId: deviceId,
               });
             } catch (err) {
-              api.logger.error(
-                `persist-user-identity: [G1] auto-bind failed: ${safeErr(err, [deviceId])}`,
-              );
+              if (err instanceof AutoBindRefusedError) {
+                // Not a failure: a client sent a device id another account owns.
+                // No ids in the line (device id / sub are identifiers).
+                api.logger.warn(
+                  "persist-user-identity: [G1] auto-bind refused: device bound to another account",
+                );
+              } else {
+                api.logger.error(
+                  `persist-user-identity: [G1] auto-bind failed: ${safeErr(err, [deviceId])}`,
+                );
+              }
             }
           }
 
