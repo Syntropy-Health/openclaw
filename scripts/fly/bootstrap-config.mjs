@@ -113,8 +113,9 @@ function main() {
   }
 
   // The /v1/responses image caps (maxBytes, maxCount, ...) are image-owned too: ONLY
-  // gateway.http.endpoints.responses.images is synced, so the rest of /data's gateway
-  // block (auth, mode, other endpoints, other responses keys) stays operator-owned.
+  // gateway.http.endpoints.responses.images is synced, and it is MERGED per key, so an
+  // operator's /data allowUrl/urlAllowlist survive and the rest of /data's gateway block
+  // (auth, mode, other endpoints, other responses keys) stays operator-owned.
   const responsesImages = appConfig.gateway?.http?.endpoints?.responses?.images;
   if (responsesImages) {
     const gateway = dataConfig.gateway ?? {};
@@ -126,7 +127,10 @@ function main() {
         ...http,
         endpoints: {
           ...endpoints,
-          responses: { ...endpoints.responses, images: responsesImages },
+          responses: {
+            ...endpoints.responses,
+            images: { ...endpoints.responses?.images, ...responsesImages },
+          },
         },
       },
     };

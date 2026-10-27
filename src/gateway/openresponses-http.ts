@@ -585,6 +585,7 @@ export async function handleOpenResponsesHttpRequest(
   const user = payload.user;
 
   // Image count cap: reject before decoding anything, with the cap named in the error.
+  // (Checked again below, once PDF pages rendered to images are counted too.)
   const imageCountError = checkInputImageCount(
     countInputImageParts(payload.input),
     limits.images,
@@ -685,6 +686,20 @@ export async function handleOpenResponsesHttpRequest(
     logWarn(`openresponses: request parsing failed: ${String(err)}`);
     sendJson(res, 400, {
       error: { message: "invalid request", type: "invalid_request_error" },
+    });
+    return true;
+  }
+
+  // Re-check after input_file PDFs were rendered to page images: maxCount bounds the
+  // TOTAL number of images that would reach the model.
+  const totalImageCountError = checkInputImageCount(
+    images.length,
+    limits.images,
+    "gateway.http.endpoints.responses.images.maxCount",
+  );
+  if (totalImageCountError) {
+    sendJson(res, 400, {
+      error: { message: totalImageCountError, type: "invalid_request_error" },
     });
     return true;
   }
