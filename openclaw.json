@@ -18,7 +18,7 @@
   "gateway": {
     "http": {
       "endpoints": {
-        "responses": { "enabled": true },
+        "responses": { "enabled": true, "images": { "maxBytes": 2097152, "maxCount": 1 } },
         "chatCompletions": { "enabled": true }
       }
     }

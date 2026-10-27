@@ -232,6 +232,7 @@ Defaults can be tuned under `gateway.http.endpoints.responses`:
             urlAllowlist: ["images.example.com"],
             allowedMimes: ["image/jpeg", "image/png", "image/gif", "image/webp"],
             maxBytes: 10485760,
+            maxCount: 4,
             maxRedirects: 3,
             timeoutMs: 10000,
           },
@@ -254,6 +255,7 @@ Defaults when omitted:
 - `files.pdf.maxPixels`: 4,000,000
 - `files.pdf.minTextChars`: 200
 - `images.maxBytes`: 10MB
+- `images.maxCount`: unlimited (more `input_image` parts than the cap is a 400, never truncated)
 - `images.maxRedirects`: 3
 - `images.timeoutMs`: 10s
 

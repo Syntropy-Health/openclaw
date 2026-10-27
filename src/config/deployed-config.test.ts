@@ -25,4 +25,12 @@ describe("committed deploy config (openclaw.json)", () => {
     expect(result.ok ? [] : result.issues).toEqual([]);
     expect(result.ok).toBe(true);
   });
+
+  test("caps /v1/responses images at one image of at most 2 MiB", () => {
+    const raw = JSON.parse(readFileSync(new URL("../../openclaw.json", import.meta.url), "utf8"));
+    expect(raw.gateway?.http?.endpoints?.responses?.images).toEqual({
+      maxBytes: 2 * 1024 * 1024,
+      maxCount: 1,
+    });
+  });
 });

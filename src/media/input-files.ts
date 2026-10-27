@@ -83,6 +83,8 @@ export type InputImageLimits = {
   urlAllowlist?: string[];
   allowedMimes: Set<string>;
   maxBytes: number;
+  /** Max images per request; undefined means unlimited. */
+  maxCount?: number;
   maxRedirects: number;
   timeoutMs: number;
 };
@@ -137,6 +139,22 @@ function rejectOversizedBase64Payload(params: {
       `${params.label} too large: ${estimated} bytes (limit: ${params.maxBytes} bytes)`,
     );
   }
+}
+
+/**
+ * Returns an error message when `count` images exceed `limits.maxCount`, else null.
+ * Over the cap is a rejection, never a silent truncation.
+ */
+export function checkInputImageCount(
+  count: number,
+  limits: Pick<InputImageLimits, "maxCount">,
+  capLabel = "images.maxCount",
+): string | null {
+  const max = limits.maxCount;
+  if (typeof max !== "number" || !Number.isFinite(max) || count <= max) {
+    return null;
+  }
+  return `Too many input images: ${count} (limit: ${max}, ${capLabel})`;
 }
 
 export function normalizeMimeType(value: string | undefined): string | undefined {

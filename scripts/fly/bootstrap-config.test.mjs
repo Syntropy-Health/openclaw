@@ -266,12 +266,69 @@ function test_syncsAgentIdentityKeysOnly() {
   );
 }
 
+function test_syncsResponsesImageLimitsOnly() {
+  process.stdout.write("test_syncsResponsesImageLimitsOnly\n");
+  // gateway.http.endpoints.responses.images is image-owned (per-turn image caps); the rest
+  // of /data's gateway block (auth, mode, other endpoints, other responses keys) stays put.
+  const tmp = setupTmp();
+  const app = path.join(tmp, "app.json");
+  const data = path.join(tmp, "data.json");
+  const images = { maxBytes: 2097152, maxCount: 1 };
+  fs.writeFileSync(
+    app,
+    JSON.stringify({
+      plugins: { allow: [] },
+      gateway: {
+        mode: "image-mode",
+        http: { endpoints: { responses: { enabled: true, images }, chatCompletions: {} } },
+      },
+    }),
+  );
+  const dataGateway = {
+    mode: "local",
+    auth: { mode: "token" },
+    http: {
+      endpoints: {
+        responses: {
+          enabled: false,
+          maxBodyBytes: 1000,
+          images: { maxBytes: 99, allowUrl: false },
+        },
+        chatCompletions: { enabled: true },
+      },
+    },
+  };
+  fs.writeFileSync(data, JSON.stringify({ plugins: { allow: [] }, gateway: dataGateway }));
+  const env = { ...process.env, OPENCLAW_APP_CONFIG_PATH: app, OPENCLAW_CONFIG_PATH: data };
+  execSync(`node ${SCRIPT}`, { env, stdio: "ignore" });
+  const after = JSON.parse(fs.readFileSync(data, "utf8"));
+  assert(
+    JSON.stringify(after.gateway?.http?.endpoints?.responses?.images) === JSON.stringify(images),
+    "responses.images replaced with the image value",
+  );
+  const expectedRest = structuredClone(dataGateway);
+  delete expectedRest.http.endpoints.responses.images;
+  const actualRest = structuredClone(after.gateway);
+  delete actualRest.http.endpoints.responses.images;
+  assert(
+    JSON.stringify(actualRest) === JSON.stringify(expectedRest),
+    "rest of /data gateway untouched",
+  );
+  const past = new Date(Date.now() - 60_000);
+  fs.utimesSync(data, past, past);
+  const mtimeBefore = fs.statSync(data).mtimeMs;
+  execSync(`node ${SCRIPT}`, { env, stdio: "ignore" });
+  assert(fs.statSync(data).mtimeMs === mtimeBefore, "second boot with image limits: not rewritten");
+  fs.rmSync(tmp, { recursive: true, force: true });
+}
+
 test_secondBootLeavesDataConfigUntouched();
 test_seedsOnFirstBoot();
 test_mergeLogicPreservesRuntimeKeys();
 test_corruptDataConfigFallsBackToSeed();
 test_syncsSessionMaintenanceOnly();
 test_syncsAgentIdentityKeysOnly();
+test_syncsResponsesImageLimitsOnly();
 test_scriptIsExecutable();
 
 process.stdout.write(`\nresult: ${pass} passed, ${fail} failed\n`);

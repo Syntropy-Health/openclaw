@@ -2,6 +2,20 @@ import { describe, expect, it } from "vitest";
 import { validateConfigObject } from "./config.js";
 
 describe("config schema regressions", () => {
+  it("accepts gateway.http.endpoints.responses.images.maxCount and rejects bad values", () => {
+    const withCount = (maxCount: unknown) =>
+      validateConfigObject({
+        gateway: {
+          http: { endpoints: { responses: { images: { maxBytes: 2097152, maxCount } } } },
+        },
+      });
+
+    expect(withCount(1).ok).toBe(true);
+    expect(withCount(0).ok).toBe(false);
+    expect(withCount(1.5).ok).toBe(false);
+    expect(withCount("1").ok).toBe(false);
+  });
+
   it("accepts nested telegram groupPolicy overrides", () => {
     const res = validateConfigObject({
       channels: {
