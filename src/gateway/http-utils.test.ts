@@ -10,13 +10,21 @@
 //     only as an L3 conversation suffix WITHIN that partition (never identity).
 //   - When no user_scope is present, the legacy path is unchanged.
 
+import { createHash } from "node:crypto";
 import type { IncomingMessage } from "node:http";
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import { derivePeerId } from "../../extensions/shared/session-key.js";
 import {
+  createStructuralHintReporter,
   deriveUserScopeFromSub,
   resolveChannelFromHeader,
   resolveSessionKey,
 } from "./http-utils.js";
+
+/** The opaque per-hint segment resolveSessionKey threads for a verified scope. */
+function hintSegment(hint: string): string {
+  return `h${createHash("sha256").update(hint).digest("hex").slice(0, 16)}`;
+}
 
 function reqWith(headers: Record<string, string> = {}): IncomingMessage {
   return { headers } as unknown as IncomingMessage;
@@ -106,7 +114,7 @@ describe("channel header is presentation-only (A&D §S10 invariant)", () => {
       prefix: "openresponses",
     });
     expect(webchat).toBe(shrinemobile);
-    expect(webchat).toBe("agent:main:openresponses-user:user_2abc:thread-42");
+    expect(webchat).toBe(`agent:main:openresponses-user:user_2abc:${hintSegment("thread-42")}`);
   });
 
   it("deriveUserScopeFromSub does not take the channel header as an input", () => {
@@ -140,14 +148,15 @@ describe("resolveSessionKey — user_scope partitioning", () => {
     expect(key).not.toContain("attacker-claimed-identity");
   });
 
-  it("an X-OpenClaw-Session-Key is threaded as an L3 suffix INSIDE the user partition, not as identity", () => {
+  it("an X-OpenClaw-Session-Key is threaded as an opaque hashed L3 suffix INSIDE the user partition, not as identity", () => {
     const key = resolveSessionKey({
       req: reqWith({ "x-openclaw-session-key": "thread-42" }),
       agentId: "main",
       userScope: "user_2abc",
       prefix: "openresponses",
     });
-    expect(key).toBe("agent:main:openresponses-user:user_2abc:thread-42");
+    expect(key).toBe(`agent:main:openresponses-user:user_2abc:${hintSegment("thread-42")}`);
+    expect(key).not.toContain("thread-42");
   });
 
   it("two requests with the SAME scope but DIFFERENT session keys share the user partition prefix", () => {
@@ -196,6 +205,47 @@ describe("resolveSessionKey — user_scope partitioning", () => {
   });
 });
 
+describe("resolveSessionKey — client session hint cannot steer the derived peer (RED arm)", () => {
+  const verified = (hint?: string) =>
+    resolveSessionKey({
+      req: reqWith(hint === undefined ? {} : { "x-openclaw-session-key": hint }),
+      agentId: "main",
+      userScope: "user_2caller",
+      prefix: "openresponses",
+    });
+
+  it("a `direct:<victim>` hint does NOT make derivePeerId return the victim", () => {
+    const key = verified("direct:user_2victim");
+    expect(derivePeerId(key)).not.toBe("user_2victim");
+    expect(derivePeerId(key)).not.toContain("user_2victim");
+    expect(derivePeerId(key).startsWith("user_2caller")).toBe(true);
+    expect(key).not.toContain("direct");
+    expect(key).not.toContain("victim");
+  });
+
+  it("structural tokens in the hint (`:`, `main`, `direct`) collapse into ONE opaque segment", () => {
+    for (const hint of ["a:b:c", "main", "direct:+15551234567", ":::", "x:direct:y"]) {
+      const key = verified(hint);
+      const suffix = key.slice("agent:main:openresponses-user:user_2caller:".length);
+      expect(suffix).toMatch(/^h[0-9a-f]{16}$/);
+      expect(key.split(":")).toHaveLength(5);
+    }
+  });
+
+  it("the same hint twice yields the identical key (conversation continuity)", () => {
+    expect(verified("thread-42")).toBe(verified("thread-42"));
+    expect(verified("direct:user_2victim")).toBe(verified("direct:user_2victim"));
+  });
+
+  it("different hints yield different keys", () => {
+    expect(verified("thread-a")).not.toBe(verified("thread-b"));
+  });
+
+  it("no header → unchanged `openresponses-user:<sub>`", () => {
+    expect(verified()).toBe("agent:main:openresponses-user:user_2caller");
+  });
+});
+
 describe("resolveSessionKey — legacy (no scope) path unchanged", () => {
   it("honors an explicit X-OpenClaw-Session-Key verbatim when no scope", () => {
     const key = resolveSessionKey({
@@ -221,5 +271,110 @@ describe("resolveSessionKey — legacy (no scope) path unchanged", () => {
     const b = resolveSessionKey({ req: reqWith(), agentId: "main", prefix: "openresponses" });
     expect(a).not.toBe(b); // randomUUID per request
     expect(a.startsWith("agent:main:openresponses:")).toBe(true);
+  });
+});
+
+describe("resolveSessionKey — hint is case-insensitive", () => {
+  it("`Thread-42` and `thread-42` stay ONE session", () => {
+    const key = (hint: string) =>
+      resolveSessionKey({
+        req: reqWith({ "x-openclaw-session-key": hint }),
+        agentId: "main",
+        userScope: "user_2abc",
+        prefix: "openresponses",
+      });
+    expect(key("Thread-42")).toBe(key("thread-42"));
+    expect(key("THREAD-42")).toBe(
+      `agent:main:openresponses-user:user_2abc:${hintSegment("thread-42")}`,
+    );
+  });
+});
+
+describe("resolveSessionKey — structural-hint attempt detection", () => {
+  const run = (
+    hint: string | undefined,
+    onStructuralHint: (f: unknown) => void,
+    scope = "user_2caller",
+  ) =>
+    resolveSessionKey({
+      req: reqWith(hint === undefined ? {} : { "x-openclaw-session-key": hint }),
+      agentId: "main",
+      userScope: scope,
+      prefix: "openresponses",
+      onStructuralHint,
+    });
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it("`direct:x` reports direct=true colon=true main=false", () => {
+    const seen: unknown[] = [];
+    run("direct:x", (f) => seen.push(f));
+    expect(seen).toEqual([{ direct: true, colon: true, main: false }]);
+  });
+
+  it("segment match is case-insensitive; `main` alone is structural", () => {
+    const seen: unknown[] = [];
+    run("x:DIRECT:y", (f) => seen.push(f));
+    run("Main", (f) => seen.push(f));
+    expect(seen).toEqual([
+      { direct: true, colon: true, main: false },
+      { direct: false, colon: false, main: true },
+    ]);
+  });
+
+  it("a plain hint, no hint, or a substring (directory / mainline) reports nothing", () => {
+    const seen: unknown[] = [];
+    for (const h of ["thread-42", undefined, "directory", "mainline"]) {
+      run(h, (f) => seen.push(f));
+    }
+    expect(seen).toEqual([]);
+  });
+
+  it("the legacy (no scope) path does not report", () => {
+    const seen: unknown[] = [];
+    resolveSessionKey({
+      req: reqWith({ "x-openclaw-session-key": "agent:main:webchat:direct:x" }),
+      agentId: "main",
+      prefix: "openresponses",
+      onStructuralHint: (f) => seen.push(f),
+    });
+    expect(seen).toEqual([]);
+  });
+
+  it("the warn line has the flags only — never the hint text or the sub", () => {
+    const lines: string[] = [];
+    run(
+      "direct:user_2victim",
+      createStructuralHintReporter((m) => lines.push(m)),
+    );
+    expect(lines).toEqual([
+      "openresponses: session hint carried structural tokens (direct=true colon=true main=false)",
+    ]);
+    const all = lines.join("\n");
+    for (const s of ["user_2victim", "user_2caller", "direct:"]) {
+      expect(all).not.toContain(s);
+    }
+  });
+
+  it("rate-limits to one line per 10 s, then reports how many were suppressed", () => {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    vi.setSystemTime(new Date("2026-10-27T00:00:00Z"));
+    const lines: string[] = [];
+    const report = createStructuralHintReporter((m) => lines.push(m));
+    run("direct:a", report);
+    run("a:b", report);
+    run("main", report);
+    expect(lines).toHaveLength(1);
+    vi.setSystemTime(new Date("2026-10-27T00:00:09.999Z"));
+    run("direct:b", report);
+    expect(lines).toHaveLength(1);
+    vi.setSystemTime(new Date("2026-10-27T00:00:10.000Z"));
+    run("main:x", report);
+    expect(lines).toEqual([
+      "openresponses: session hint carried structural tokens (direct=true colon=true main=false)",
+      "openresponses: session hint carried structural tokens (direct=false colon=true main=true) suppressed=3",
+    ]);
   });
 });

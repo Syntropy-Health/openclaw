@@ -36,6 +36,7 @@ type JwtPayload = {
   aud?: unknown;
   exp?: unknown;
   nbf?: unknown;
+  azp?: unknown;
   [key: string]: unknown;
 };
 
@@ -50,6 +51,17 @@ export type VerifyClerkJwtOptions = {
   now?: number;
   /** Injectable JWKS fetcher; used INSTEAD of network fetch when provided. */
   fetchJwks?: (url: string) => Promise<Jwks>;
+  /**
+   * Allowed `azp` (authorized party) values. When a NON-EMPTY list is given the
+   * token's `azp` must be a string in it; unset/empty → no azp check
+   * (behaviour-preserving, so operators can observe real values first).
+   */
+  authorizedParties?: string[];
+  /**
+   * With an allow-list set, a token WITHOUT `azp` passes only when this is
+   * `true`. Never admits a present-but-unlisted azp.
+   */
+  allowMissingAzp?: boolean;
 };
 
 export type VerifiedClerkJwt = {
@@ -154,6 +166,18 @@ function decodeJsonSegment<T>(segment: string): T {
 // Claim checks
 // ---------------------------------------------------------------------------
 
+/**
+ * Canonical form of an `azp` / allow-list entry: trimmed, scheme and host
+ * lowercased (path case is kept), trailing "/" removed. A value that is not
+ * `scheme://…` is only trimmed and stripped of trailing "/".
+ */
+export function normalizeAuthorizedParty(value: string): string {
+  const trimmed = value.trim();
+  const m = /^([a-z][a-z0-9+.-]*:\/\/)([^/?#]*)(.*)$/i.exec(trimmed);
+  const canonical = m ? `${m[1].toLowerCase()}${m[2].toLowerCase()}${m[3]}` : trimmed;
+  return canonical.replace(/\/+$/, "");
+}
+
 function claimsPass(payload: JwtPayload, opts: VerifyClerkJwtOptions, now: number): boolean {
   // Issuer must match exactly.
   if (payload.iss !== opts.issuer) {
@@ -182,6 +206,28 @@ function claimsPass(payload: JwtPayload, opts: VerifyClerkJwtOptions, now: numbe
   // Subject must be a non-empty string.
   if (typeof payload.sub !== "string" || payload.sub.length === 0) {
     return false;
+  }
+
+  // Authorized party, when an allow-list is configured. Both sides are
+  // normalised (trailing "/" stripped, scheme+host lowercased) so
+  // "https://x.com/" and "https://X.com" are the same party.
+  const parties = opts.authorizedParties;
+  if (Array.isArray(parties) && parties.length > 0) {
+    if (payload.azp === undefined) {
+      if (opts.allowMissingAzp !== true) {
+        return false;
+      }
+    } else if (
+      typeof payload.azp !== "string" ||
+      !parties
+        .map(normalizeAuthorizedParty)
+        // An entry that normalises to "" (e.g. "/") names no party: drop it, so
+        // it can never match an empty azp.
+        .filter((party) => party.length > 0)
+        .includes(normalizeAuthorizedParty(payload.azp))
+    ) {
+      return false;
+    }
   }
 
   return true;

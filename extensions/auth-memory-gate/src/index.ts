@@ -1,11 +1,14 @@
+import { createHash } from "node:crypto";
 import { openPluginPool, type OpenClawPluginApi } from "openclaw/plugin-sdk";
 import postgres from "postgres";
+import { isHttpShapedSession } from "../../shared/http-channels.js";
 import { logToken, redactPeer, safeErr } from "../../shared/log-redact.js";
 import { isConversationalSession } from "../../shared/session-key.js";
 import {
   deriveChannel,
   deriveIdentityPeer,
   findUserByChannelPeer,
+  findUserByExternalId,
   reconcileVerifiedIdentity,
   resolveScope,
   formatScopeBlock,
@@ -140,6 +143,14 @@ const authMemoryGatePlugin = {
         // session-key-derived) — MUST match persist-user-identity's [G1] bind
         // key, or the gate would miss the just-bound mobile row (A&D §7).
         const peerId = deriveIdentityPeer(ctx);
+        const verifiedSub = ctx?.externalId?.trim();
+
+        // An UNVERIFIED HTTP-shaped session is unidentified: its session-key
+        // tail / device id is client-chosen, so it never selects a row. Under
+        // hardGate it is gated (fail closed); no client-chosen key is recorded.
+        if (!verifiedSub && isHttpShapedSession(channel, sessionKey)) {
+          return hardGate ? gatedResult(channel, sessionKey) : {};
+        }
 
         if (!peerId || peerId === "main" || peerId === "unknown") {
           // No usable peer. On an HTTP surface under hardGate that is a client
@@ -152,16 +163,27 @@ const authMemoryGatePlugin = {
           return {};
         }
 
-        const gateKey = `${channel}:${peerId}`;
+        // On a VERIFIED turn the gate is keyed by the sub (hashed), never by the
+        // client-supplied device id: a caller sending a victim's device id must
+        // not mark the victim's device as gated for the message_sending net.
+        const gateKey = verifiedSub
+          ? `ext:${createHash("sha256").update(verifiedSub).digest("hex").slice(0, 16)}`
+          : `${channel}:${peerId}`;
         try {
           await ensureReady();
           // Cross-check the peer row against the turn's VERIFIED identity
           // (fail-closed defense-in-depth): on a verified turn a stale/contested
           // row keyed by the client-supplied device id must NEVER key this turn
           // onto another user's scope — treat it as unidentified instead.
+          //
+          // A VERIFIED turn resolves by external_id ONLY: the session/device-
+          // derived peer is client-steerable, so it never selects the row (it
+          // stays the gate/log key). Channel turns keep the (channel, peer) path.
           let row: Awaited<ReturnType<typeof findUserByChannelPeer>>;
           try {
-            row = await findUserByChannelPeer(sql, channel, peerId);
+            row = verifiedSub
+              ? await findUserByExternalId(sql, verifiedSub, channel, peerId)
+              : await findUserByChannelPeer(sql, channel, peerId);
           } catch (err) {
             // A DB lost after a good init: enter the same backoff so the next
             // turns fail fast (gated) instead of each waiting on a dead pool.

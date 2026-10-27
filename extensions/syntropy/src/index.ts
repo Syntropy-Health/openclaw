@@ -23,7 +23,7 @@
 
 import { createRetryingInit, openPluginPool, type OpenClawPluginApi } from "openclaw/plugin-sdk";
 import postgres from "postgres";
-import { isHttpGateChannel } from "../../shared/http-channels.js";
+import { isHttpGateChannel, isHttpShapedSession } from "../../shared/http-channels.js";
 import { TtlCache } from "./cache.js";
 import { callSyntropyTool, type SyntropyToolResult } from "./client.js";
 import { parseSyntropyConfig } from "./config.js";
@@ -49,6 +49,24 @@ import { createSyntropyVault, vaultRpcsInstalled, type SyntropyVault } from "./v
 // active-user count per gateway instance.
 const USER_CACHE_TTL_MS = 10 * 60 * 1000;
 const USER_CACHE_MAX_SIZE = 10_000;
+/** A verified turn's record: the user cache key plus its sub (lowercased). */
+type VerifiedSessionRecord = { cacheKey: string; sub: string };
+
+/**
+ * The user-scope segment of a gateway HTTP session key
+ * (`agent:<id>:openresponses-user:<sub>[:h…]` / `openai-user:<sub>…`),
+ * lowercased as stored; undefined when the key has no such segment.
+ */
+export function sessionScopeSub(sessionKey: string): string | undefined {
+  const parts = sessionKey.split(":");
+  if (parts.length < 4 || parts[0] !== "agent") return undefined;
+  if (parts[2] !== "openresponses-user" && parts[2] !== "openai-user") return undefined;
+  const sub = parts[3]?.trim().toLowerCase();
+  return sub || undefined;
+}
+
+// sessionKey → verified record (see verifiedSessions in register()).
+const VERIFIED_SESSION_TTL_MS = 2 * 60 * 1000;
 
 // Session-key parsing moved to ./session-key.ts for testability.
 
@@ -80,7 +98,43 @@ export async function resolveUser(
       AND uc.channel_peer_id = ${peerId}
     LIMIT 1
   `;
-  const row = rows[0];
+  return finishResolve(sql, vault, rows[0], cipher, onTokenError, onMigrate);
+}
+
+/**
+ * Resolve a VERIFIED caller by their server-verified external id (the Clerk
+ * `sub` the gateway threads on `ctx.externalId`) — never by a peer derived from
+ * the session key, which a client can steer (e.g. a hint ending in
+ * `direct:<victim>`). Token read + lazy migration are identical to
+ * {@link resolveUser} (shared {@link finishResolve}).
+ */
+export async function resolveUserByExternalId(
+  sql: postgres.Sql,
+  vault: SyntropyVault | null,
+  externalId: string,
+  cipher: TokenCipher | null = null,
+  onTokenError?: (code: string) => void,
+  onMigrate?: (ok: boolean) => void,
+): Promise<ResolvedUser | null> {
+  const rows = await sql`
+    SELECT u.id, u.external_id, st.auth_token, st.vault_secret_name, st.token_ciphertext
+    FROM lp_users u
+    LEFT JOIN syntropy_tokens st ON st.user_id = u.id
+    WHERE u.external_id = ${externalId}
+    LIMIT 1
+  `;
+  return finishResolve(sql, vault, rows[0], cipher, onTokenError, onMigrate);
+}
+
+/** Shared token read + lazy cipher migration for a resolved lp_users row. */
+async function finishResolve(
+  sql: postgres.Sql,
+  vault: SyntropyVault | null,
+  row: postgres.Row | undefined,
+  cipher: TokenCipher | null,
+  onTokenError?: (code: string) => void,
+  onMigrate?: (ok: boolean) => void,
+): Promise<ResolvedUser | null> {
   if (!row?.external_id) return null;
 
   // Ciphertext first, then Vault, then legacy plaintext (db.ts readStoredToken).
@@ -482,6 +536,17 @@ const syntropyPlugin = {
       maxSize: USER_CACHE_MAX_SIZE,
     });
 
+    // sessionKey → cacheKey (`ext:<externalId>`) for VERIFIED turns, written by
+    // before_agent_start and read by the sync tool factory (whose ctx carries no
+    // externalId). Rewritten (set OR deleted) as the FIRST statement of every
+    // hook run, so a later unverified run on the same key cannot reuse it. Short
+    // TTL: the factory runs right after the hook (run.ts early hook → attempt.ts
+    // createOpenClawCodingTools), so a record only needs to outlive one run.
+    const verifiedSessions = new TtlCache<string, VerifiedSessionRecord>({
+      ttlMs: VERIFIED_SESSION_TTL_MS,
+      maxSize: USER_CACHE_MAX_SIZE,
+    });
+
     // Single-flight: concurrent messages from one user that both miss the
     // profile cache share ONE get_health_profile fetch instead of racing two.
     const profileInFlight = new Map<string, Promise<string | null>>();
@@ -502,12 +567,89 @@ const syntropyPlugin = {
     api.on(
       "before_agent_start",
       async (_event, ctx) => {
+        // FIRST statement, before any await or anything that can throw: this
+        // run's verified-session record for the key is either (re)written or
+        // removed, so a record from an earlier VERIFIED run on the same session
+        // key can never serve a later unverified run's tool factory.
+        //
+        // Runner isolation (src/plugins/hooks.ts runModifyingHook, global runner
+        // catchErrors: true): each handler's throw is caught and the loop goes on,
+        // so another plugin failing does not skip this handler. But if the runner
+        // call ITSELF rejects in run.ts (early call, caught there), attempt.ts
+        // builds the tools (createOpenClawCodingTools) BEFORE its late rerun of
+        // before_agent_start — so the factory CAN run for a run in which this hook
+        // has not executed. It then sees only a record ≤ VERIFIED_SESSION_TTL_MS
+        // old from an earlier run on the same key; the short TTL bounds that.
+        const recordKey = typeof ctx?.sessionKey === "string" ? ctx.sessionKey : "";
+        const recordSub = typeof ctx?.externalId === "string" ? ctx.externalId.trim() : "";
+        if (recordKey) {
+          if (recordSub) {
+            verifiedSessions.set(recordKey, {
+              cacheKey: `ext:${recordSub}`,
+              sub: recordSub.toLowerCase(),
+            });
+          } else {
+            verifiedSessions.delete(recordKey);
+          }
+        }
         try {
           const sessionKey = ctx?.sessionKey ?? "";
           const channel = ctx?.messageProvider ?? deriveChannel(sessionKey);
+          const onTokenError = (code: string) =>
+            api.logger.error(
+              `syntropy: stored token unreadable (${code}); user treated as unpaired`,
+            );
+          const onMigrate = (ok: boolean) =>
+            ok
+              ? api.logger.info("syntropy: migrated one stored token to ciphertext")
+              : api.logger.warn(
+                  "syntropy: could not migrate a stored token to ciphertext; kept as is",
+                );
+
+          // A VERIFIED turn (server-verified Clerk sub on ctx.externalId) resolves
+          // by external_id ONLY. The session-key-derived peer is never consulted:
+          // its tail is client-influenced, and a steered peer would load another
+          // user's identity and SJ token.
+          const externalId = ctx?.externalId?.trim();
+          if (externalId) {
+            // The session record was written at the top of the handler, so the
+            // factory sees this session as verified even if the lookup fails (it
+            // then finds no cached user and returns no tools — fail closed).
+            const cacheKey = `ext:${externalId}`;
+            await ensureStorage();
+            const user = await resolveUserByExternalId(
+              sql,
+              vault,
+              externalId,
+              await currentCipher(),
+              onTokenError,
+              onMigrate,
+            );
+            return await decideProfileInjection({
+              user,
+              cacheKey,
+              channel,
+              resolvedUsers,
+              profileBlocks,
+              profileInFlight,
+              profileNegative,
+              fetchProfile: (authToken) =>
+                callSyntropyTool(syntropyBaseUrl, authToken, "get_health_profile", {}),
+            });
+          }
+
           const peerId = derivePeerId(sessionKey);
 
+          // No peer (e.g. the operator Control UI on `agent:main:main`): nothing
+          // to gate or resolve — unchanged behaviour, no copy injected.
           if (!peerId || peerId === "main" || peerId === "unknown") return {};
+
+          // An UNVERIFIED HTTP-shaped session is unidentified: its session-key
+          // tail (body `user`, a raw session-key header) is client-chosen, so it
+          // must never select a (channel, peer) row.
+          if (isHttpShapedSession(channel, sessionKey)) {
+            return { prependContext: SYNTROPY_GATE_HTTP };
+          }
 
           const cacheKey = `${channel}:${peerId}`;
           await ensureStorage();
@@ -517,16 +659,8 @@ const syntropyPlugin = {
             channel,
             peerId,
             await currentCipher(),
-            (code) =>
-              api.logger.error(
-                `syntropy: stored token unreadable (${code}); user treated as unpaired`,
-              ),
-            (ok) =>
-              ok
-                ? api.logger.info("syntropy: migrated one stored token to ciphertext")
-                : api.logger.warn(
-                    "syntropy: could not migrate a stored token to ciphertext; kept as is",
-                  ),
+            onTokenError,
+            onMigrate,
           );
 
           return await decideProfileInjection({
@@ -556,11 +690,27 @@ const syntropyPlugin = {
       try {
         const sessionKey = ctx.sessionKey ?? "";
         const channel = ctx.messageChannel ?? deriveChannel(sessionKey);
-        const peerId = derivePeerId(sessionKey);
 
-        if (!peerId || peerId === "main" || peerId === "unknown") return null;
-
-        const cacheKey = `${channel}:${peerId}`;
+        // The factory has no externalId on its ctx: a verified turn is recognised
+        // by the sessionKey → cacheKey record the hook wrote. An HTTP session
+        // WITHOUT such a record gets no tools (fail closed) — its derived peer is
+        // client-influenced and must never select a cached user.
+        const verified = sessionKey ? verifiedSessions.get(sessionKey) : undefined;
+        let cacheKey: string;
+        if (verified) {
+          // Bind the record to the session's OWN user scope: the key minted for a
+          // verified turn is `…:openresponses-user:<sub>[:h…]` (lowercased). If the
+          // key's scope is another sub, or the key has no scope, no tools. This
+          // covers the window where the hook did not run for this run (see the
+          // runner note in before_agent_start).
+          if (sessionScopeSub(sessionKey) !== verified.sub) return null;
+          cacheKey = verified.cacheKey;
+        } else {
+          if (isHttpShapedSession(channel, sessionKey)) return null;
+          const peerId = derivePeerId(sessionKey);
+          if (!peerId || peerId === "main" || peerId === "unknown") return null;
+          cacheKey = `${channel}:${peerId}`;
+        }
         const user = resolvedUsers.get(cacheKey);
         if (!user) return null;
 

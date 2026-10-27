@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { createRetryingInit, type OpenClawPluginApi } from "openclaw/plugin-sdk";
 // Gateway Clerk-verify + session deny-list — extension→src deep import per the
 // established convention (kapso precedent); src never imports extensions.
@@ -5,6 +6,7 @@ import { authorizeClerkJwt, resolveClerkAuth } from "../../../src/gateway/auth.j
 import { evictClerkSessionCache } from "../../../src/gateway/clerk-session-validation.js";
 // Session-key parsing is shared with auth-memory-gate + syntropy so the
 // convention can't drift across the three identity hooks (oc-hygiene #7).
+import { isHttpShapedSession } from "../../shared/http-channels.js";
 import { safeErr } from "../../shared/log-redact.js";
 import { deriveChannel, deriveIdentityPeer } from "../../shared/session-key.js";
 import { tokenCipherFromEnv } from "../../syntropy/src/token-cipher.js";
@@ -19,9 +21,11 @@ import {
 import { registerIdentityCommands } from "./commands.js";
 import { formatIdentityContext, formatUnknownUserContext } from "./context.js";
 import {
+  AutoBindRefusedError,
   autoBindVerifiedPeer,
   createPgClient,
   ensureUserSchema,
+  findIdentityByExternalId,
   findUserByChannelPeer,
   unlinkChannelPeerForUser,
 } from "./db.js";
@@ -126,10 +130,38 @@ const persistUserIdentityPlugin = {
                 channelPeerId: deviceId,
               });
             } catch (err) {
-              api.logger.error(
-                `persist-user-identity: [G1] auto-bind failed: ${safeErr(err, [deviceId])}`,
-              );
+              if (err instanceof AutoBindRefusedError) {
+                // Not a failure: a client sent a device id another account owns.
+                // No raw ids in the line; a sha256 prefix of the device id lets ops
+                // find a stuck row without logging the identifier itself.
+                const deviceHash = createHash("sha256").update(deviceId).digest("hex").slice(0, 12);
+                api.logger.warn(
+                  `persist-user-identity: [G1] auto-bind refused: device bound to another account device=${deviceHash}`,
+                );
+              } else {
+                api.logger.error(
+                  `persist-user-identity: [G1] auto-bind failed: ${safeErr(err, [deviceId])}`,
+                );
+              }
             }
+          }
+
+          // A VERIFIED turn resolves by external_id ONLY — never by the
+          // session/device-derived peer, which the client can steer (e.g. a
+          // session hint ending in `direct:<victim>`, or a victim's device id).
+          if (externalId) {
+            const verified = await findIdentityByExternalId(sql, externalId, channel);
+            return {
+              prependContext: verified
+                ? formatIdentityContext(verified, "new_session")
+                : formatUnknownUserContext(channel),
+            };
+          }
+
+          // An UNVERIFIED HTTP-shaped session is unidentified: its session-key
+          // tail / device id is client-chosen and must never select a row.
+          if (isHttpShapedSession(channel, sessionKey)) {
+            return { prependContext: formatUnknownUserContext(channel) };
           }
 
           if (!peerId || peerId === "main" || peerId === "unknown") {

@@ -112,6 +112,26 @@ export async function findUserByExternalId(
 }
 
 /**
+ * Resolve the identity of a VERIFIED caller by external id (the server-verified
+ * Clerk `sub` on ctx.externalId), shaped like {@link findUserByChannelPeer}'s
+ * result for the turn's `channel`. Used instead of the (channel, peer) lookup on
+ * verified turns: the session-derived peer is client-influenced and must never
+ * select another user's row. `channel_peer_id` is empty — no consumer reads it
+ * from the identity block (mono #542).
+ */
+export async function findIdentityByExternalId(
+  sql: postgres.Sql,
+  externalId: string,
+  channel: string,
+): Promise<ResolvedIdentity | null> {
+  const user = await findUserByExternalId(sql, externalId);
+  if (!user) {
+    return null;
+  }
+  return { ...user, channel, channel_peer_id: "", verified: user.external_id !== null };
+}
+
+/**
  * Create a new user. `externalId` is null for channel-only (unverified) users.
  */
 export async function createUser(
@@ -202,11 +222,15 @@ export async function linkExternalId(
  *   gateway only threads it after JWT verification). The user row is found by
  *   external_id or created carrying it; the channel leg NEVER writes
  *   external_id onto some other user (spine pin R1f — no forked writer).
- * - The link upsert rides `linkChannelToUser`'s `ON CONFLICT (channel,
- *   channel_peer_id)` — re-binding the same device is idempotent; a device that
- *   changes owners (user B signs in on user A's phone) re-points to B, which is
- *   the correct device-session semantics.
- * Idempotent per turn; throws only on DB failure (caller logs, never fails the turn).
+ * - The link upsert is GUARDED: re-binding the caller's own device is idempotent
+ *   and a fresh device binds, but a `(channel, channel_peer_id)` link owned by a
+ *   DIFFERENT user is never reassigned — the device id is client-supplied, so an
+ *   unguarded upsert let any verified caller take over a victim's binding by
+ *   sending the victim's device id. Such a call throws
+ *   {@link AutoBindRefusedError}; a genuine owner change goes through the owner's
+ *   sign-out unbind ([G2]) first. `linkChannelToUser` (used by the commands) is
+ *   unchanged.
+ * Idempotent per turn; throws on DB failure or refusal (caller logs, never fails the turn).
  */
 export async function autoBindVerifiedPeer(
   sql: postgres.Sql,
@@ -227,8 +251,32 @@ export async function autoBindVerifiedPeer(
       }
     }
   }
-  await linkChannelToUser(sql, user.id, params.channel, params.channelPeerId);
+  // Atomic ownership guard: on conflict, update ONLY when the existing link is
+  // already the caller's; otherwise the row is untouched and nothing returns.
+  const linked = await sql`
+    INSERT INTO lp_user_channels (user_id, channel, channel_peer_id)
+    VALUES (${user.id}, ${params.channel}, ${params.channelPeerId})
+    ON CONFLICT (channel, channel_peer_id) DO UPDATE SET
+      linked_at = now()
+    WHERE lp_user_channels.user_id = EXCLUDED.user_id
+    RETURNING *
+  `;
+  if (linked.length === 0) {
+    throw new AutoBindRefusedError();
+  }
   return user;
+}
+
+/**
+ * [G1] auto-bind refused: the `(channel, channel_peer_id)` link belongs to
+ * another account. The message carries NO identifiers (safe to log as is).
+ */
+export class AutoBindRefusedError extends Error {
+  readonly code = "device_bound_to_another_account";
+  constructor() {
+    super("auto-bind refused: device bound to another account");
+    this.name = "AutoBindRefusedError";
+  }
 }
 
 /**

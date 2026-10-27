@@ -37,6 +37,24 @@ describe("config schema regressions", () => {
     expect(res.ok).toBe(true);
   });
 
+  it("REJECTS gateway.auth.clerk: Clerk trust anchors are env-only (not config.patch-writable)", () => {
+    // gateway.auth is .strict(). Keeping clerk OUT of the schema means the JWKS
+    // URL / issuer / audience / azp allow-list cannot be changed through
+    // config.patch, which the agent's own gateway tool can call (prompt-injection
+    // path to swapping the JWKS). Operators set OPENCLAW_CLERK_* env instead.
+    for (const clerk of [
+      {
+        jwksUrl: "https://clerk.example.test/.well-known/jwks.json",
+        issuer: "https://clerk.example.test",
+        audience: "openclaw",
+      },
+      { authorizedParties: ["https://shrinelongevity.com"], allowMissingAzp: true },
+    ]) {
+      const res = validateConfigObject({ gateway: { auth: { clerk } } });
+      expect(res.ok).toBe(false);
+    }
+  });
+
   it("accepts gateway.channelHealthCheckMinutes (strict-schema gap regression)", () => {
     // The field exists on GatewayConfig (types.gateway.ts) and is honored at
     // runtime, but was missing from the .strict() gateway zod object — so any
