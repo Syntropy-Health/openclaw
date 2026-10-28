@@ -1,4 +1,5 @@
 import type { OpenClawConfig } from "../config/config.js";
+import { createSubsystemLogger } from "../logging/subsystem.js";
 import {
   ensureAuthProfileStore,
   getSoonestCooldownExpiry,
@@ -29,6 +30,8 @@ type ModelCandidate = {
   provider: string;
   model: string;
 };
+
+const log = createSubsystemLogger("model-fallback");
 
 type FallbackAttempt = {
   provider: string;
@@ -356,9 +359,13 @@ export async function runWithModelFallback<T>(params: {
   });
   const imageInput = params.imageInput;
   const candidates = imageInput
-    ? resolvedCandidates.filter(
-        (candidate) => imageInput.supported(candidate.provider, candidate.model) !== false,
-      )
+    ? resolvedCandidates.filter((candidate) => {
+        if (imageInput.supported(candidate.provider, candidate.model) !== false) {
+          return true;
+        }
+        log.info(`skipped ${candidate.provider}/${candidate.model} (no image input)`);
+        return false;
+      })
     : resolvedCandidates;
   if (candidates.length === 0 && resolvedCandidates.length > 0) {
     throw new ImageInputUnsupportedError(imageInput?.imageCount ?? 1);
@@ -369,7 +376,10 @@ export async function runWithModelFallback<T>(params: {
   const attempts: FallbackAttempt[] = [];
   let lastError: unknown;
 
-  const hasFallbackCandidates = candidates.length > 1;
+  // Positions come from the ORIGINAL list: a filtered-out primary must not make the
+  // first fallback count as the primary (e.g. for cooldown probing).
+  const primaryCandidate = resolvedCandidates[0];
+  const hasFallbackCandidates = resolvedCandidates.length > 1;
 
   for (let i = 0; i < candidates.length; i += 1) {
     const candidate = candidates[i];
@@ -389,7 +399,7 @@ export async function runWithModelFallback<T>(params: {
         const now = Date.now();
         const probeThrottleKey = resolveProbeThrottleKey(candidate.provider, params.agentDir);
         const shouldProbe = shouldProbePrimaryDuringCooldown({
-          isPrimary: i === 0,
+          isPrimary: candidate === primaryCandidate,
           hasFallbackCandidates,
           now,
           throttleKey: probeThrottleKey,

@@ -359,6 +359,32 @@ describe("agentCommand", () => {
       });
     });
 
+    it("a vision model missing from the provider's inline list is KEPT (capability unknown)", async () => {
+      await withTempHome(async (home) => {
+        // acme is configured but does not list this model: resolveModel synthesises a
+        // generic text-only entry for it. That is not evidence of text-only: keep it.
+        mockImageConfig(home, "acme/vision-unlisted", []);
+        vi.mocked(runEmbeddedPiAgent).mockResolvedValueOnce(ok("vision-unlisted"));
+
+        await agentCommand({ message: BODY, to: "+1555", images: IMAGES }, runtime);
+
+        const calls = embeddedCalls();
+        expect(calls.map((c) => c?.model)).toEqual(["vision-unlisted"]);
+        expect(calls[0]?.images).toEqual(IMAGES);
+      });
+    });
+
+    it('a model listed with input ["text"] is filtered (known text-only)', async () => {
+      await withTempHome(async (home) => {
+        mockImageConfig(home, "acme/text-only", ["acme/vision-unlisted"]);
+        vi.mocked(runEmbeddedPiAgent).mockResolvedValueOnce(ok("vision-unlisted"));
+
+        await agentCommand({ message: BODY, to: "+1555", images: IMAGES }, runtime);
+
+        expect(embeddedCalls().map((c) => c?.model)).toEqual(["vision-unlisted"]);
+      });
+    });
+
     it("all candidates text-only: ImageInputUnsupportedError with 0 runner calls", async () => {
       await withTempHome(async (home) => {
         mockImageConfig(home, "acme/text-only", ["acme/text-only-2"]);

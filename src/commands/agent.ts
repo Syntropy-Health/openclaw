@@ -22,6 +22,7 @@ import {
   resolveConfiguredModelRef,
   resolveThinkingDefault,
 } from "../agents/model-selection.js";
+import { ensureOpenClawModelsJson } from "../agents/models-config.js";
 import { resolveModel } from "../agents/pi-embedded-runner/model.js";
 import { modelSupportsImages } from "../agents/pi-embedded-runner/run/images.js";
 import { runEmbeddedPiAgent } from "../agents/pi-embedded.js";
@@ -101,8 +102,19 @@ function resolveCandidateImageSupport(params: {
     return undefined;
   }
   try {
-    const { model } = resolveModel(params.provider, params.model, params.agentDir, params.cfg);
-    return model ? modelSupportsImages(model) : undefined;
+    const { model, source } = resolveModel(
+      params.provider,
+      params.model,
+      params.agentDir,
+      params.cfg,
+    );
+    // Only a model actually found (registry, catalog/inline config, forward-compat) with a
+    // declared input list is evidence. The generic stand-in resolveModel builds for an
+    // unlisted model of a configured provider says input: ["text"] by default: unknown.
+    if (!model || source === "synthesized" || !Array.isArray(model.input)) {
+      return undefined;
+    }
+    return modelSupportsImages(model);
   } catch {
     return undefined;
   }
@@ -572,6 +584,15 @@ export async function agentCommand(
       // (positive tunes, explicit 0 disables). Chat-path only; other
       // runWithModelFallback callers pass nothing and are unaffected.
       const perCandidateTimeoutMs = resolveModelCandidateTimeoutMs(process.env);
+      if (opts.images?.length) {
+        // Same model registry the embedded runner resolves against (run.ts writes models.json
+        // before resolveModel); the capability filter below must see the same models.
+        try {
+          await ensureOpenClawModelsJson(cfg, agentDir);
+        } catch {
+          // Resolution still falls back to the inline config; unknown models are kept.
+        }
+      }
       const fallbackResult = await runWithModelFallback({
         cfg,
         provider,

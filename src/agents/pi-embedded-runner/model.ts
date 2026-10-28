@@ -47,6 +47,12 @@ export function resolveModel(
   cfg?: OpenClawConfig,
 ): {
   model?: Model<Api>;
+  /**
+   * Where `model` came from. "synthesized" is a generic stand-in built for a configured
+   * provider whose model is not listed anywhere: its fields (e.g. input: ["text"]) are
+   * defaults, not facts about the model.
+   */
+  source?: "registry" | "inline" | "forward-compat" | "synthesized";
   error?: string;
   authStorage: AuthStorage;
   modelRegistry: ModelRegistry;
@@ -66,6 +72,7 @@ export function resolveModel(
       const normalized = normalizeModelCompat(inlineMatch as Model<Api>);
       return {
         model: normalized,
+        source: "inline",
         authStorage,
         modelRegistry,
       };
@@ -74,7 +81,7 @@ export function resolveModel(
     // Otherwise, configured providers can default to a generic API and break specific transports.
     const forwardCompat = resolveForwardCompatModel(provider, modelId, modelRegistry);
     if (forwardCompat) {
-      return { model: forwardCompat, authStorage, modelRegistry };
+      return { model: forwardCompat, source: "forward-compat", authStorage, modelRegistry };
     }
     const providerCfg = providers[provider];
     if (providerCfg || modelId.startsWith("mock-")) {
@@ -90,7 +97,7 @@ export function resolveModel(
         contextWindow: providerCfg?.models?.[0]?.contextWindow ?? DEFAULT_CONTEXT_TOKENS,
         maxTokens: providerCfg?.models?.[0]?.maxTokens ?? DEFAULT_CONTEXT_TOKENS,
       } as Model<Api>);
-      return { model: fallbackModel, authStorage, modelRegistry };
+      return { model: fallbackModel, source: "synthesized", authStorage, modelRegistry };
     }
     return {
       error: buildUnknownModelError(provider, modelId),
@@ -98,7 +105,7 @@ export function resolveModel(
       modelRegistry,
     };
   }
-  return { model: normalizeModelCompat(model), authStorage, modelRegistry };
+  return { model: normalizeModelCompat(model), source: "registry", authStorage, modelRegistry };
 }
 
 /**
