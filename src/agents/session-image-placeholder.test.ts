@@ -3,6 +3,7 @@ import crypto from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { fileURLToPath } from "node:url";
 import { afterEach, describe, expect, it } from "vitest";
 import { detectImageReferences } from "./pi-embedded-runner/run/images.js";
 import {
@@ -10,9 +11,8 @@ import {
   scrubImageBlocksDeep,
 } from "./session-image-placeholder.js";
 
-const SCRUB_SCRIPT = path.resolve(
-  path.dirname(new URL(import.meta.url).pathname),
-  "../../scripts/maintenance/scrub-transcript-images.mjs",
+const SCRUB_SCRIPT = fileURLToPath(
+  new URL("../../scripts/maintenance/scrub-transcript-images.mjs", import.meta.url),
 );
 
 const BYTES = Buffer.from(Array.from({ length: 5000 }, (_, i) => (i * 7) % 256));
