@@ -116,6 +116,8 @@ function main() {
   // gateway.http.endpoints.responses.images is synced, and it is MERGED per key, so an
   // operator's /data allowUrl/urlAllowlist survive and the rest of /data's gateway block
   // (auth, mode, other endpoints, other responses keys) stays operator-owned.
+  // Note: being a merge, a key REMOVED from /app's responses.images stays on /data until
+  // it is removed there too.
   const responsesImages = appConfig.gateway?.http?.endpoints?.responses?.images;
   if (responsesImages) {
     const gateway = dataConfig.gateway ?? {};

@@ -2,13 +2,15 @@
 /**
  * One-off scrub: replace base64 image blocks in session transcripts with a text placeholder.
  *
- *   node scrub-transcript-images.mjs [--dir /data/agents/main/sessions] [--apply]
+ *   node scrub-transcript-images.mjs [--dir /data/agents/main/sessions] [--apply --gateway-stopped]
  *
  * Standalone (no repo imports) so it can be copied to and run on a gateway host.
  *
- * RECOMMENDED: run with the gateway STOPPED, or at least idle. The script takes the same
- * per-transcript session lock the gateway's writer uses and aborts a file that changes
- * under it, but a stopped gateway removes the race entirely.
+ * PRECONDITION for --apply: the gateway is STOPPED. --apply is refused (exit 2) unless
+ * --gateway-stopped is also passed, as the operator's explicit statement of that. The
+ * script still takes the per-transcript session lock the gateway's writer uses and aborts
+ * a file that changes under it, but only a stopped gateway removes the race entirely.
+ * A dry run needs no flag.
  *
  * - Default is a DRY RUN: nothing is written; the counts say what --apply would change.
  * - Scans `*.jsonl` and archived `*.jsonl.*` transcripts in --dir (not recursive).
@@ -44,22 +46,31 @@ const NEWLINE = 0x0a;
 class UsageError extends Error {}
 
 function parseArgs(argv) {
-  const opts = { dir: DEFAULT_DIR, apply: false };
+  const opts = { dir: DEFAULT_DIR, apply: false, gatewayStopped: false };
   for (let i = 0; i < argv.length; i += 1) {
     const arg = argv[i];
     if (arg === "--apply") {
       opts.apply = true;
+    } else if (arg === "--gateway-stopped") {
+      opts.gatewayStopped = true;
     } else if (arg === "--dir") {
       opts.dir = argv[i + 1];
       i += 1;
     } else if (arg.startsWith("--dir=")) {
       opts.dir = arg.slice("--dir=".length);
     } else {
-      throw new UsageError("usage: scrub-transcript-images.mjs [--dir <sessions dir>] [--apply]");
+      throw new UsageError(
+        "usage: scrub-transcript-images.mjs [--dir <sessions dir>] [--apply --gateway-stopped]",
+      );
     }
   }
   if (!opts.dir) {
     throw new UsageError("--dir needs a value");
+  }
+  if (opts.apply && !opts.gatewayStopped) {
+    throw new UsageError(
+      "refusing --apply: stop the gateway first, then pass --gateway-stopped (a dry run needs no flag)",
+    );
   }
   return opts;
 }
@@ -215,8 +226,12 @@ function acquireSessionLock(file) {
     }
     throw err;
   }
+  // One write on the O_EXCL fd, right after open, so the lock is empty only for that
+  // instant. Residual gap: a reader that opens it in between sees an empty payload, which
+  // the gateway's writer treats as "missing pid" (stale) and may remove; that race is why
+  // --apply requires the gateway to be stopped.
   try {
-    fs.writeSync(
+    fs.writeFileSync(
       fd,
       JSON.stringify({ pid: process.pid, createdAt: new Date().toISOString() }, null, 2),
     );

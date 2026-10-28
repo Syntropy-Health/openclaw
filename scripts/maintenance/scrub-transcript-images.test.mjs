@@ -121,7 +121,7 @@ function test_applyRewritesOnlyTheImageFile() {
   const past = new Date(Date.now() - 3 * 24 * 60 * 60_000);
   fs.utimesSync(files.image, past, past);
   const mtimeBefore = fs.statSync(files.image).mtimeMs;
-  const { report } = run(dir, ["--apply"]);
+  const { report } = run(dir, ["--apply", "--gateway-stopped"]);
   const after = snapshot(dir);
 
   assert(report.applied === true, "applied=true");
@@ -156,7 +156,7 @@ function test_applyRewritesOnlyTheImageFile() {
     JSON.stringify(Object.keys(after)) === JSON.stringify(Object.keys(before)),
     "no temp files left behind",
   );
-  const again = run(dir, ["--apply"]).report;
+  const again = run(dir, ["--apply", "--gateway-stopped"]).report;
   assert(again.image_blocks === 0 && again.files_with_images === 0, "second apply: idempotent");
   fs.rmSync(dir, { recursive: true, force: true });
 }
@@ -166,7 +166,7 @@ function test_applyKeepsModeAndOwnershipAndReleasesLock() {
   const { dir, files } = setupFixtures();
   fs.chmodSync(files.image, 0o600);
   const before = fs.statSync(files.image);
-  const { report } = run(dir, ["--apply"]);
+  const { report } = run(dir, ["--apply", "--gateway-stopped"]);
   const after = fs.statSync(files.image);
   assert(report.image_blocks === 2, "image file rewritten");
   assert(
@@ -185,7 +185,7 @@ function test_existingLockIsSkippedInApply() {
   const lockBody = JSON.stringify({ pid: process.pid, createdAt: new Date().toISOString() });
   fs.writeFileSync(`${files.locked}.lock`, lockBody);
   const before = fs.readFileSync(files.locked, "utf8");
-  const { report } = run(dir, ["--apply"]);
+  const { report } = run(dir, ["--apply", "--gateway-stopped"]);
   assert(report.locked_skipped === 1, "locked file counted as locked_skipped");
   assert(fs.readFileSync(files.locked, "utf8") === before, "locked file untouched");
   assert(fs.readFileSync(`${files.locked}.lock`, "utf8") === lockBody, "foreign lock not removed");
@@ -251,7 +251,7 @@ function test_symlinkIsUntouched() {
   fs.symlinkSync(target, link);
   const before = fs.readFileSync(target, "utf8");
   fs.rmSync(files.image); // leave only the symlink as an image-bearing candidate
-  const { report } = run(dir, ["--apply"]);
+  const { report } = run(dir, ["--apply", "--gateway-stopped"]);
   assert(fs.lstatSync(link).isSymbolicLink(), "symlink still a symlink");
   assert(fs.readFileSync(target, "utf8") === before, "symlink target untouched");
   assert(report.image_blocks === 0, "symlink not scanned");
@@ -275,7 +275,7 @@ function test_streamsLinesAcrossChunkBoundaries() {
   });
   const file = path.join(dir, "big.jsonl");
   fs.writeFileSync(file, [header, bigLine, assistantText].join("\r\n")); // CRLF, no final newline
-  const { report } = run(dir, ["--apply"]);
+  const { report } = run(dir, ["--apply", "--gateway-stopped"]);
   const out = fs.readFileSync(file, "utf8");
   assert(report.image_blocks === 1, "big image counted once");
   assert(out.includes(`[image: image/png, 1536.0 KB, sha256:${bigSha}]`), "big image placeholder");
@@ -287,6 +287,28 @@ function test_streamsLinesAcrossChunkBoundaries() {
   fs.rmSync(dir, { recursive: true, force: true });
 }
 
+function test_applyRequiresGatewayStoppedFlag() {
+  process.stdout.write("test_applyRequiresGatewayStoppedFlag\n");
+  const { dir } = setupFixtures();
+  const before = snapshot(dir);
+  let status = 0;
+  let stderr = "";
+  try {
+    execFileSync("node", [SCRIPT, "--dir", dir, "--apply"], { encoding: "utf8", stdio: "pipe" });
+  } catch (err) {
+    status = err.status;
+    stderr = String(err.stderr);
+  }
+  assert(status === 2, `--apply without --gateway-stopped exits 2 (got ${status})`);
+  assert(
+    /--gateway-stopped/.test(stderr) && stderr.trim().split("\n").length === 1,
+    "one-line reason",
+  );
+  assert(!stderr.includes(dir), "reason does not print the dir");
+  assert(JSON.stringify(snapshot(dir)) === JSON.stringify(before), "nothing written");
+  fs.rmSync(dir, { recursive: true, force: true });
+}
+
 test_dryRunChangesNothingAndCounts();
 test_applyRewritesOnlyTheImageFile();
 test_applyKeepsModeAndOwnershipAndReleasesLock();
@@ -294,6 +316,7 @@ test_existingLockIsSkippedInApply();
 await test_concurrentChangeAbortsTheFile();
 await test_chownRefusalSkipsTheFile();
 test_symlinkIsUntouched();
+test_applyRequiresGatewayStoppedFlag();
 test_streamsLinesAcrossChunkBoundaries();
 
 process.stdout.write(`\nresult: ${pass} passed, ${fail} failed\n`);

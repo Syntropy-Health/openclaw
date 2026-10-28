@@ -62,7 +62,9 @@ describe("image placeholder", () => {
     );
     const file = path.join(dir, "s.jsonl");
     fs.writeFileSync(file, `${lines.join("\n")}\n`);
-    execFileSync("node", [SCRUB_SCRIPT, "--dir", dir, "--apply"], { encoding: "utf8" });
+    execFileSync("node", [SCRUB_SCRIPT, "--dir", dir, "--apply", "--gateway-stopped"], {
+      encoding: "utf8",
+    });
     const out = fs.readFileSync(file, "utf8");
     expect(out).not.toContain(B64);
     expect(out.split(PLACEHOLDER).length - 1).toBe(lines.length);

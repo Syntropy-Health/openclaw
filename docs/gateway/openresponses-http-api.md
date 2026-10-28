@@ -255,7 +255,7 @@ Defaults when omitted:
 - `files.pdf.maxPixels`: 4,000,000
 - `files.pdf.minTextChars`: 200
 - `images.maxBytes`: 10MB
-- `images.maxCount`: unlimited when unset. It counts `input_image` parts plus PDF pages rendered to images; more than the cap is a 400, never a truncation. It must be a positive integer: `0` is rejected by the config schema.
+- `images.maxCount`: unlimited when unset. It counts `input_image` parts plus PDF pages rendered to images; more than the cap is a 400, never a truncation. It must be a positive integer: `0` is rejected by the config schema. On Fly, the boot bootstrap merges the image's `responses.images` into `/data/openclaw.json` key by key: a key removed from the image's config stays on `/data` until it is removed there too.
 - `images.maxRedirects`: 3
 - `images.timeoutMs`: 10s
 

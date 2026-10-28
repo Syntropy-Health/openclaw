@@ -138,8 +138,19 @@ export function installSessionImagePlaceholderPersistence(sessionManager: Sessio
     )) as SessionManager["appendMessage"];
 }
 
+/** Cheap structural walk: no decoding or hashing (that happens only when serialising). */
+function containsImageBlock(value: unknown): boolean {
+  if (Array.isArray(value)) {
+    return value.some((item) => readImageBlock(item) !== null || containsImageBlock(item));
+  }
+  if (value && typeof value === "object") {
+    return Object.values(value as Record<string, unknown>).some(containsImageBlock);
+  }
+  return false;
+}
+
 function attachDiskSerializer(entry: unknown): void {
-  if (!entry || typeof entry !== "object" || scrubImageBlocksDeep(entry) === entry) {
+  if (!entry || typeof entry !== "object" || !containsImageBlock(entry)) {
     return;
   }
   Object.defineProperty(entry, "toJSON", {
