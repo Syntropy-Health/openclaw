@@ -1,4 +1,5 @@
 import type { OpenClawConfig } from "../config/config.js";
+import { createSubsystemLogger } from "../logging/subsystem.js";
 import {
   ensureAuthProfileStore,
   getSoonestCooldownExpiry,
@@ -13,6 +14,7 @@ import {
   isFailoverError,
   isTimeoutError,
 } from "./failover-error.js";
+import { ImageInputUnsupportedError } from "./image-input-error.js";
 import {
   buildConfiguredAllowlistKeys,
   buildModelAliasIndex,
@@ -28,6 +30,8 @@ type ModelCandidate = {
   provider: string;
   model: string;
 };
+
+const log = createSubsystemLogger("model-fallback");
 
 type FallbackAttempt = {
   provider: string;
@@ -335,20 +339,47 @@ export async function runWithModelFallback<T>(params: {
    * are NOT abandoned). The abandoned run is orphaned (it finishes in the bg).
    */
   perCandidateTimeoutMs?: number;
+  /**
+   * Set when the caller supplied images. Candidates whose model is known NOT to accept
+   * image input are removed BEFORE anything runs, so they never start, never write a
+   * prompt and never count as attempts. `supported` returns undefined when a candidate's
+   * capability cannot be resolved: such a candidate is kept (the filter fails open) and
+   * the in-runner guard stops it if it really is text-only.
+   */
+  imageInput?: {
+    imageCount?: number;
+    supported: (provider: string, model: string) => boolean | undefined;
+  };
 }): Promise<ModelFallbackRunResult<T>> {
-  const candidates = resolveFallbackCandidates({
+  const resolvedCandidates = resolveFallbackCandidates({
     cfg: params.cfg,
     provider: params.provider,
     model: params.model,
     fallbacksOverride: params.fallbacksOverride,
   });
+  const imageInput = params.imageInput;
+  const candidates = imageInput
+    ? resolvedCandidates.filter((candidate) => {
+        if (imageInput.supported(candidate.provider, candidate.model) !== false) {
+          return true;
+        }
+        log.info(`skipped ${candidate.provider}/${candidate.model} (no image input)`);
+        return false;
+      })
+    : resolvedCandidates;
+  if (candidates.length === 0 && resolvedCandidates.length > 0) {
+    throw new ImageInputUnsupportedError(imageInput?.imageCount ?? 1);
+  }
   const authStore = params.cfg
     ? ensureAuthProfileStore(params.agentDir, { allowKeychainPrompt: false })
     : null;
   const attempts: FallbackAttempt[] = [];
   let lastError: unknown;
 
-  const hasFallbackCandidates = candidates.length > 1;
+  // Positions come from the ORIGINAL list: a filtered-out primary must not make the
+  // first fallback count as the primary (e.g. for cooldown probing).
+  const primaryCandidate = resolvedCandidates[0];
+  const hasFallbackCandidates = resolvedCandidates.length > 1;
 
   for (let i = 0; i < candidates.length; i += 1) {
     const candidate = candidates[i];
@@ -368,7 +399,7 @@ export async function runWithModelFallback<T>(params: {
         const now = Date.now();
         const probeThrottleKey = resolveProbeThrottleKey(candidate.provider, params.agentDir);
         const shouldProbe = shouldProbePrimaryDuringCooldown({
-          isPrimary: i === 0,
+          isPrimary: candidate === primaryCandidate,
           hasFallbackCandidates,
           now,
           throttleKey: probeThrottleKey,

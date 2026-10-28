@@ -3,6 +3,7 @@ import { fileURLToPath } from "node:url";
 import type { ImageContent } from "@mariozechner/pi-ai";
 import { resolveUserPath } from "../../../utils.js";
 import { loadWebMedia } from "../../../web/media.js";
+import { ImageInputUnsupportedError } from "../../image-input-error.js";
 import type { SandboxFsBridge } from "../../sandbox/fs-bridge.js";
 import { sanitizeImageBlocks } from "../../tool-images.js";
 import { log } from "../logger.js";
@@ -10,6 +11,8 @@ import { log } from "../logger.js";
 /**
  * Common image file extensions for detection.
  */
+export { ImageInputUnsupportedError } from "../../image-input-error.js";
+
 const IMAGE_EXTENSIONS = new Set([
   ".png",
   ".jpg",
@@ -364,8 +367,13 @@ export async function detectAndLoadPromptImages(params: {
   loadedCount: number;
   skippedCount: number;
 }> {
-  // If model doesn't support images, return empty results
+  // If model doesn't support images, return empty results. Caller-supplied images are
+  // never dropped silently: the turn fails with a typed error instead.
   if (!modelSupportsImages(params.model)) {
+    const suppliedCount = params.existingImages?.length ?? 0;
+    if (suppliedCount > 0) {
+      throw new ImageInputUnsupportedError(suppliedCount);
+    }
     return {
       images: [],
       historyImagesByIndex: new Map(),

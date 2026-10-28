@@ -7,6 +7,7 @@ import type {
 } from "../plugins/types.js";
 import { emitSessionTranscriptUpdate } from "../sessions/transcript-events.js";
 import { HARD_MAX_TOOL_RESULT_CHARS } from "./pi-embedded-runner/tool-result-truncation.js";
+import { installSessionImagePlaceholderPersistence } from "./session-image-placeholder.js";
 import { makeMissingToolResult, sanitizeToolCallInputs } from "./session-transcript-repair.js";
 import { extractToolCallsFromAssistant, extractToolResultId } from "./tool-call-id.js";
 
@@ -109,6 +110,9 @@ export function installSessionToolResultGuard(
   flushPendingToolResults: () => void;
   getPendingIds: () => string[];
 } {
+  // Image blocks reach disk only as text placeholders (never base64); the in-memory
+  // entries and the message the model sees keep the image.
+  installSessionImagePlaceholderPersistence(sessionManager);
   const originalAppend = sessionManager.appendMessage.bind(sessionManager);
   const pending = new Map<string, string | undefined>();
   const persistMessage = (message: AgentMessage) => {

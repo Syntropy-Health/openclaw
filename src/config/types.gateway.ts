@@ -306,6 +306,8 @@ export type GatewayHttpResponsesImagesConfig = {
   allowedMimes?: string[];
   /** Max bytes per image. Default: 10MB. */
   maxBytes?: number;
+  /** Max input_image parts per request; more is a 400. Default: unlimited. */
+  maxCount?: number;
   /** Max redirects when fetching a URL. Default: 3. */
   maxRedirects?: number;
   /** Fetch timeout in ms. Default: 10s. */

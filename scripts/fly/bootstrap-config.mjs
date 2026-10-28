@@ -20,7 +20,8 @@
  * (see merge-attempt incident 2026-05-13). Channels stay in /data; only
  * `plugins` is source-of-truth in /app, plus
  * `session.maintenance.transcriptRetention` (mono #544) and
- * `agents.defaults.{workspace,skipBootstrap}` (openclaw-shrineai-identity).
+ * `agents.defaults.{workspace,skipBootstrap}` (openclaw-shrineai-identity), plus
+ * `gateway.http.endpoints.responses.images` (per-request image caps).
  */
 
 import fs from "node:fs";
@@ -109,6 +110,32 @@ function main() {
       };
     }
     dataConfig.agents = { ...dataConfig.agents, defaults };
+  }
+
+  // The /v1/responses image caps (maxBytes, maxCount, ...) are image-owned too: ONLY
+  // gateway.http.endpoints.responses.images is synced, and it is MERGED per key, so an
+  // operator's /data allowUrl/urlAllowlist survive and the rest of /data's gateway block
+  // (auth, mode, other endpoints, other responses keys) stays operator-owned.
+  // Note: being a merge, a key REMOVED from /app's responses.images stays on /data until
+  // it is removed there too.
+  const responsesImages = appConfig.gateway?.http?.endpoints?.responses?.images;
+  if (responsesImages) {
+    const gateway = dataConfig.gateway ?? {};
+    const http = gateway.http ?? {};
+    const endpoints = http.endpoints ?? {};
+    dataConfig.gateway = {
+      ...gateway,
+      http: {
+        ...http,
+        endpoints: {
+          ...endpoints,
+          responses: {
+            ...endpoints.responses,
+            images: { ...endpoints.responses?.images, ...responsesImages },
+          },
+        },
+      },
+    };
   }
 
   // Write only when the content changes: an unchanged config keeps its bytes and

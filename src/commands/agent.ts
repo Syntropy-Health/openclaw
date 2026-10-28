@@ -22,6 +22,9 @@ import {
   resolveConfiguredModelRef,
   resolveThinkingDefault,
 } from "../agents/model-selection.js";
+import { ensureOpenClawModelsJson } from "../agents/models-config.js";
+import { resolveModel } from "../agents/pi-embedded-runner/model.js";
+import { modelSupportsImages } from "../agents/pi-embedded-runner/run/images.js";
 import { runEmbeddedPiAgent } from "../agents/pi-embedded.js";
 import { buildWorkspaceSkillSnapshot } from "../agents/skills.js";
 import { getSkillsSnapshotVersion } from "../agents/skills/refresh.js";
@@ -84,6 +87,39 @@ function resolveFallbackRetryPrompt(params: { body: string; isFallbackRetry: boo
   return "Continue where you left off. The previous model attempt failed or timed out.";
 }
 
+/**
+ * Whether a fallback candidate accepts image input, resolved the same way the embedded
+ * runner resolves its model (resolveModel + modelSupportsImages). undefined when it cannot
+ * be resolved (CLI backends, unknown models): the fallback filter then keeps the candidate.
+ */
+function resolveCandidateImageSupport(params: {
+  provider: string;
+  model: string;
+  agentDir: string;
+  cfg: ReturnType<typeof loadConfig>;
+}): boolean | undefined {
+  if (isCliProvider(params.provider, params.cfg)) {
+    return undefined;
+  }
+  try {
+    const { model, source } = resolveModel(
+      params.provider,
+      params.model,
+      params.agentDir,
+      params.cfg,
+    );
+    // Only a model actually found (registry, catalog/inline config, forward-compat) with a
+    // declared input list is evidence. The generic stand-in resolveModel builds for an
+    // unlisted model of a configured provider says input: ["text"] by default: unknown.
+    if (!model || source === "synthesized" || !Array.isArray(model.input)) {
+      return undefined;
+    }
+    return modelSupportsImages(model);
+  } catch {
+    return undefined;
+  }
+}
+
 function runAgentAttempt(params: {
   providerOverride: string;
   modelOverride: string;
@@ -130,6 +166,9 @@ function runAgentAttempt(params: {
       runId: params.runId,
       extraSystemPrompt: params.opts.extraSystemPrompt,
       cliSessionId,
+      // Known limitation (base behaviour): a CLI fallback retry omits the images. CLI
+      // backends keep their own sessions, so whether the first attempt's turn is in the
+      // next backend's history is not known here. Staging does not use CLI backends.
       images: params.isFallbackRetry ? undefined : params.opts.images,
       streamParams: params.opts.streamParams,
     });
@@ -163,7 +202,10 @@ function runAgentAttempt(params: {
     config: params.cfg,
     skillsSnapshot: params.skillsSnapshot,
     prompt: effectivePrompt,
-    images: params.isFallbackRetry ? undefined : params.opts.images,
+    // Caller images go to every attempt, fallback retries included. The transcript
+    // stores images as text placeholders (session-tool-result-guard), so the first
+    // attempt's copy cannot reach the fallback model and re-sending is not a duplicate.
+    images: params.opts.images,
     clientTools: params.opts.clientTools,
     provider: params.providerOverride,
     model: params.modelOverride,
@@ -542,6 +584,15 @@ export async function agentCommand(
       // (positive tunes, explicit 0 disables). Chat-path only; other
       // runWithModelFallback callers pass nothing and are unaffected.
       const perCandidateTimeoutMs = resolveModelCandidateTimeoutMs(process.env);
+      if (opts.images?.length) {
+        // Same model registry the embedded runner resolves against (run.ts writes models.json
+        // before resolveModel); the capability filter below must see the same models.
+        try {
+          await ensureOpenClawModelsJson(cfg, agentDir);
+        } catch {
+          // Resolution still falls back to the inline config; unknown models are kept.
+        }
+      }
       const fallbackResult = await runWithModelFallback({
         cfg,
         provider,
@@ -549,6 +600,19 @@ export async function agentCommand(
         agentDir,
         fallbacksOverride: effectiveFallbacksOverride,
         perCandidateTimeoutMs,
+        // With caller images, text-only candidates are filtered out before anything runs.
+        imageInput: opts.images?.length
+          ? {
+              imageCount: opts.images.length,
+              supported: (candidateProvider, candidateModel) =>
+                resolveCandidateImageSupport({
+                  provider: candidateProvider,
+                  model: candidateModel,
+                  agentDir,
+                  cfg,
+                }),
+            }
+          : undefined,
         run: (providerOverride, modelOverride) => {
           const isFallbackRetry = fallbackAttemptIndex > 0;
           fallbackAttemptIndex += 1;

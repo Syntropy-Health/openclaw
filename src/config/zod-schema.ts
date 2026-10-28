@@ -542,6 +542,7 @@ export const OpenClawSchema = z
                         urlAllowlist: z.array(z.string()).optional(),
                         allowedMimes: z.array(z.string()).optional(),
                         maxBytes: z.number().int().positive().optional(),
+                        maxCount: z.number().int().positive().optional(),
                         maxRedirects: z.number().int().nonnegative().optional(),
                         timeoutMs: z.number().int().positive().optional(),
                       })

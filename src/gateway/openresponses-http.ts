@@ -8,6 +8,7 @@
 
 import { randomUUID } from "node:crypto";
 import type { IncomingMessage, ServerResponse } from "node:http";
+import { isImageInputUnsupportedError } from "../agents/image-input-error.js";
 import type { ClientToolDefinition } from "../agents/pi-embedded-runner/run/params.js";
 import { createDefaultDeps } from "../cli/deps.js";
 import { agentCommand } from "../commands/agent.js";
@@ -21,6 +22,7 @@ import {
   DEFAULT_INPUT_MAX_REDIRECTS,
   DEFAULT_INPUT_TIMEOUT_MS,
   extractFileContentFromSource,
+  checkInputImageCount,
   extractImageContentFromSource,
   normalizeMimeList,
   resolveInputFileLimits,
@@ -181,10 +183,32 @@ function resolveResponsesLimits(
       urlAllowlist: normalizeHostnameAllowlist(images?.urlAllowlist),
       allowedMimes: normalizeMimeList(images?.allowedMimes, DEFAULT_INPUT_IMAGE_MIMES),
       maxBytes: images?.maxBytes ?? DEFAULT_INPUT_IMAGE_MAX_BYTES,
+      maxCount: typeof images?.maxCount === "number" ? Math.floor(images.maxCount) : undefined,
       maxRedirects: images?.maxRedirects ?? DEFAULT_INPUT_MAX_REDIRECTS,
       timeoutMs: images?.timeoutMs ?? DEFAULT_INPUT_TIMEOUT_MS,
     },
   };
+}
+
+function imageInputUnsupportedMessage(err: Error): string {
+  return `${err.message}; no configured model for this agent accepts image input`;
+}
+
+function countInputImageParts(input: CreateResponseBody["input"]): number {
+  if (!Array.isArray(input)) {
+    return 0;
+  }
+  let count = 0;
+  for (const item of input) {
+    if (item.type === "message" && typeof item.content !== "string") {
+      for (const part of item.content) {
+        if (part.type === "input_image") {
+          count += 1;
+        }
+      }
+    }
+  }
+  return count;
 }
 
 function extractClientTools(body: CreateResponseBody): ClientToolDefinition[] {
@@ -560,6 +584,20 @@ export async function handleOpenResponsesHttpRequest(
   const model = payload.model;
   const user = payload.user;
 
+  // Image count cap: reject before decoding anything, with the cap named in the error.
+  // (Checked again below, once PDF pages rendered to images are counted too.)
+  const imageCountError = checkInputImageCount(
+    countInputImageParts(payload.input),
+    limits.images,
+    "gateway.http.endpoints.responses.images.maxCount",
+  );
+  if (imageCountError) {
+    sendJson(res, 400, {
+      error: { message: imageCountError, type: "invalid_request_error" },
+    });
+    return true;
+  }
+
   // Extract images + files from input (Phase 2)
   let images: ImageContent[] = [];
   let fileContexts: string[] = [];
@@ -648,6 +686,20 @@ export async function handleOpenResponsesHttpRequest(
     logWarn(`openresponses: request parsing failed: ${String(err)}`);
     sendJson(res, 400, {
       error: { message: "invalid request", type: "invalid_request_error" },
+    });
+    return true;
+  }
+
+  // Re-check after input_file PDFs were rendered to page images: maxCount bounds the
+  // TOTAL number of images that would reach the model.
+  const totalImageCountError = checkInputImageCount(
+    images.length,
+    limits.images,
+    "gateway.http.endpoints.responses.images.maxCount",
+  );
+  if (totalImageCountError) {
+    sendJson(res, 400, {
+      error: { message: totalImageCountError, type: "invalid_request_error" },
     });
     return true;
   }
@@ -851,6 +903,12 @@ export async function handleOpenResponsesHttpRequest(
       sendJson(res, 200, response);
     } catch (err) {
       logWarn(`openresponses: non-stream response failed: ${String(err)}`);
+      if (isImageInputUnsupportedError(err)) {
+        sendJson(res, 400, {
+          error: { message: imageInputUnsupportedMessage(err), type: "invalid_request_error" },
+        });
+        return true;
+      }
       const response = createResponseResource({
         id: responseId,
         model,
@@ -1247,7 +1305,9 @@ export async function handleOpenResponsesHttpRequest(
         model,
         status: "failed",
         output: [],
-        error: { code: "api_error", message: "internal error" },
+        error: isImageInputUnsupportedError(err)
+          ? { code: "invalid_request_error", message: imageInputUnsupportedMessage(err) }
+          : { code: "api_error", message: "internal error" },
         usage: finalUsage,
       });
 

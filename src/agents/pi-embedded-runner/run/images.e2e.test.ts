@@ -6,6 +6,7 @@ import { createHostSandboxFsBridge } from "../../test-helpers/host-sandbox-fs-br
 import {
   detectAndLoadPromptImages,
   detectImageReferences,
+  ImageInputUnsupportedError,
   loadImageFromRef,
   modelSupportsImages,
 } from "./images.js";
@@ -241,16 +242,31 @@ describe("loadImageFromRef", () => {
 });
 
 describe("detectAndLoadPromptImages", () => {
-  it("returns no images for non-vision models even when existing images are provided", async () => {
-    const result = await detectAndLoadPromptImages({
-      prompt: "ignore",
+  it("rejects caller-supplied images for a text-only model with a typed error", async () => {
+    const run = detectAndLoadPromptImages({
+      prompt: "what is in this photo?",
       workspaceDir: "/tmp",
       model: { input: ["text"] },
       existingImages: [{ type: "image", data: "abc", mimeType: "image/png" }],
     });
 
-    expect(result.images).toHaveLength(0);
-    expect(result.detectedRefs).toHaveLength(0);
+    await expect(run).rejects.toBeInstanceOf(ImageInputUnsupportedError);
+    await expect(run).rejects.toThrow(/model does not accept image input/);
+  });
+
+  it("keeps today's behaviour for a text-only model when no images were supplied", async () => {
+    for (const existingImages of [undefined, []]) {
+      const result = await detectAndLoadPromptImages({
+        prompt: "compare with /tmp/photo.png",
+        workspaceDir: "/tmp",
+        model: { input: ["text"] },
+        existingImages,
+      });
+
+      expect(result.images).toHaveLength(0);
+      expect(result.detectedRefs).toHaveLength(0);
+      expect(result.historyImagesByIndex.size).toBe(0);
+    }
   });
 
   it("skips history messages that already include image content", async () => {
