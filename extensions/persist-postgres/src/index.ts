@@ -1,5 +1,6 @@
 import { createRetryingInit, type OpenClawPluginApi } from "openclaw/plugin-sdk";
 import { createPgClient, ensureSchema, persistMessage, purgeExpiredConversations } from "./db.js";
+import { sessionKeyForLog } from "./log-redaction.js";
 
 // How often the retention sweep runs when a retention window is configured.
 const PURGE_INTERVAL_MS = 60 * 60 * 1000; // hourly
@@ -76,7 +77,9 @@ const persistPostgresPlugin = {
             role: "user",
             content: event.prompt,
           });
-          api.logger.info(`persist-postgres: persisted user message for session ${sessionKey}`);
+          api.logger.info(
+            `persist-postgres: persisted user message for ${sessionKeyForLog(ctx?.sessionKey)}`,
+          );
         } catch (err) {
           api.logger.error(`persist-postgres: before_agent_start error: ${err}`);
         }
@@ -110,7 +113,7 @@ const persistPostgresPlugin = {
             content,
           });
           api.logger.info(
-            `persist-postgres: persisted assistant message for session ${sessionKey}`,
+            `persist-postgres: persisted assistant message for ${sessionKeyForLog(ctx?.sessionKey)}`,
           );
         } catch (err) {
           api.logger.error(`persist-postgres: agent_end error: ${err}`);
