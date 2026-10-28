@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 /**
  * Session keys carry the caller's identity (e.g. `agent:main:openresponses-user:<clerk sub>`),
  * so they must never appear verbatim in logs. The persisted rows keep the real key;
@@ -5,6 +6,7 @@
  */
 import { describe, expect, test, vi } from "vitest";
 import type { OpenClawPluginApi } from "../../../src/plugins/types.js";
+import plugin from "./index.js";
 import { sessionKeyForLog } from "./log-redaction.js";
 
 vi.mock("./db.js", () => ({
@@ -47,6 +49,11 @@ describe("sessionKeyForLog", () => {
     expect(out).not.toBe(sessionKeyForLog(`${KEY}x`));
   });
 
+  test("is keyed: not the plain sha256 of the key, so it cannot be recomputed from a list of ids", () => {
+    const plain = createHash("sha256").update(KEY).digest("hex").slice(0, 12);
+    expect(sessionKeyForLog(KEY)).not.toBe(`session#${plain}`);
+  });
+
   test("an absent key is logged as unknown", () => {
     expect(sessionKeyForLog(undefined)).toBe("session#unknown");
     expect(sessionKeyForLog("")).toBe("session#unknown");
@@ -55,7 +62,6 @@ describe("sessionKeyForLog", () => {
 
 describe("persist-postgres hook logs", () => {
   test("the user- and assistant-message log lines carry no user_ id", async () => {
-    const { default: plugin } = await import("./index.js");
     const { a, hooks, info } = api();
     plugin.register(a);
     const before = hooks.find((h) => h.name === "before_agent_start");
@@ -76,5 +82,14 @@ describe("persist-postgres hook logs", () => {
       expect(l).not.toContain(KEY);
       expect(l).toContain(sessionKeyForLog(KEY));
     }
+  });
+
+  test("a turn with no session key logs session#unknown", async () => {
+    const { a, hooks, info } = api();
+    plugin.register(a);
+    const before = hooks.find((h) => h.name === "before_agent_start");
+    await before!.handler({ prompt: "hi" }, { messageProvider: "shrinemobile" });
+    const line = info.mock.calls.map((c) => String(c[0])).find((l) => l.includes("persisted user"));
+    expect(line).toContain("session#unknown");
   });
 });

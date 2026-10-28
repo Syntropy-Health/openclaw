@@ -78,7 +78,7 @@ const persistPostgresPlugin = {
             content: event.prompt,
           });
           api.logger.info(
-            `persist-postgres: persisted user message for ${sessionKeyForLog(sessionKey)}`,
+            `persist-postgres: persisted user message for ${sessionKeyForLog(ctx?.sessionKey)}`,
           );
         } catch (err) {
           api.logger.error(`persist-postgres: before_agent_start error: ${err}`);
@@ -113,7 +113,7 @@ const persistPostgresPlugin = {
             content,
           });
           api.logger.info(
-            `persist-postgres: persisted assistant message for ${sessionKeyForLog(sessionKey)}`,
+            `persist-postgres: persisted assistant message for ${sessionKeyForLog(ctx?.sessionKey)}`,
           );
         } catch (err) {
           api.logger.error(`persist-postgres: agent_end error: ${err}`);
