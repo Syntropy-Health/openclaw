@@ -13,7 +13,7 @@ import {
   isFailoverError,
   isTimeoutError,
 } from "./failover-error.js";
-import { isImageInputUnsupportedError } from "./image-input-error.js";
+import { ImageInputUnsupportedError } from "./image-input-error.js";
 import {
   buildConfiguredAllowlistKeys,
   buildModelAliasIndex,
@@ -336,13 +336,33 @@ export async function runWithModelFallback<T>(params: {
    * are NOT abandoned). The abandoned run is orphaned (it finishes in the bg).
    */
   perCandidateTimeoutMs?: number;
+  /**
+   * Set when the caller supplied images. Candidates whose model is known NOT to accept
+   * image input are removed BEFORE anything runs, so they never start, never write a
+   * prompt and never count as attempts. `supported` returns undefined when a candidate's
+   * capability cannot be resolved: such a candidate is kept (the filter fails open) and
+   * the in-runner guard stops it if it really is text-only.
+   */
+  imageInput?: {
+    imageCount?: number;
+    supported: (provider: string, model: string) => boolean | undefined;
+  };
 }): Promise<ModelFallbackRunResult<T>> {
-  const candidates = resolveFallbackCandidates({
+  const resolvedCandidates = resolveFallbackCandidates({
     cfg: params.cfg,
     provider: params.provider,
     model: params.model,
     fallbacksOverride: params.fallbacksOverride,
   });
+  const imageInput = params.imageInput;
+  const candidates = imageInput
+    ? resolvedCandidates.filter(
+        (candidate) => imageInput.supported(candidate.provider, candidate.model) !== false,
+      )
+    : resolvedCandidates;
+  if (candidates.length === 0 && resolvedCandidates.length > 0) {
+    throw new ImageInputUnsupportedError(imageInput?.imageCount ?? 1);
+  }
   const authStore = params.cfg
     ? ensureAuthProfileStore(params.agentDir, { allowKeychainPrompt: false })
     : null;
@@ -425,25 +445,6 @@ export async function runWithModelFallback<T>(params: {
       if (isLikelyContextOverflowError(errMessage)) {
         throw err;
       }
-      // The caller supplied images and this candidate has no image input: skip it and
-      // try the next one. If no remaining candidate accepts images, this error ends the turn.
-      if (isImageInputUnsupportedError(err)) {
-        lastError = err;
-        attempts.push({
-          provider: candidate.provider,
-          model: candidate.model,
-          error: errMessage,
-          code: err.code,
-        });
-        await params.onError?.({
-          provider: candidate.provider,
-          model: candidate.model,
-          error: err,
-          attempt: i + 1,
-          total: candidates.length,
-        });
-        continue;
-      }
       const normalized =
         coerceToFailoverError(err, {
           provider: candidate.provider,
@@ -476,11 +477,6 @@ export async function runWithModelFallback<T>(params: {
   }
 
   if (attempts.length <= 1 && lastError) {
-    throw lastError;
-  }
-  // Every candidate after the last real failure was text-only: surface the typed error
-  // (a client error) rather than a generic "all models failed".
-  if (isImageInputUnsupportedError(lastError)) {
     throw lastError;
   }
   const summary =

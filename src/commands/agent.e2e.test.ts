@@ -296,59 +296,151 @@ describe("agentCommand", () => {
     });
   });
 
-  it("skips a text-only fallback and runs the next image-capable one with the images", async () => {
-    await withTempHome(async (home) => {
+  describe("image-capable fallback filter", () => {
+    const IMAGES = [{ type: "image" as const, data: "aGVsbG8=", mimeType: "image/jpeg" }];
+    const BODY = "what did I eat?";
+    const inlineModel = (id: string, input: Array<"text" | "image">) => ({
+      id,
+      name: id,
+      reasoning: false,
+      input,
+      cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+      contextWindow: 200_000,
+      maxTokens: 8_192,
+    });
+
+    /** A config whose acme/* models declare their input capability inline. */
+    function mockImageConfig(home: string, primary: string, fallbacks: string[]) {
       const store = path.join(home, "sessions.json");
-      mockConfig(home, store, {
-        model: {
-          primary: "anthropic/claude-haiku-4-5",
-          fallbacks: ["openai/gpt-text", "openai/gpt-5.2"],
+      const refs = [primary, ...fallbacks];
+      configSpy.mockReturnValue({
+        agents: {
+          defaults: {
+            model: { primary, fallbacks },
+            models: Object.fromEntries(refs.map((ref) => [ref, {}])),
+            workspace: path.join(home, "openclaw"),
+          },
         },
         models: {
-          "anthropic/claude-haiku-4-5": {},
-          "openai/gpt-text": {},
-          "openai/gpt-5.2": {},
-        },
-      });
-      vi.mocked(runEmbeddedPiAgent)
-        .mockRejectedValueOnce(Object.assign(new Error("rate limited"), { status: 429 }))
-        .mockRejectedValueOnce(new ImageInputUnsupportedError(1))
-        .mockResolvedValueOnce({
-          payloads: [{ text: "oatmeal" }],
-          meta: {
-            durationMs: 5,
-            agentMeta: { sessionId: "s", provider: "openai", model: "gpt-5.2" },
+          providers: {
+            acme: {
+              baseUrl: "http://127.0.0.1:9/v1",
+              api: "openai-completions",
+              models: [
+                inlineModel("text-only", ["text"]),
+                inlineModel("text-only-2", ["text"]),
+                inlineModel("vision", ["text", "image"]),
+                inlineModel("vision-2", ["text", "image"]),
+              ],
+            },
           },
-        });
-      const images = [{ type: "image" as const, data: "aGVsbG8=", mimeType: "image/jpeg" }];
+        },
+        session: { store, mainKey: "main" },
+      } as never);
+    }
 
-      await agentCommand({ message: "what did I eat?", to: "+1555", images }, runtime);
-
-      const calls = vi.mocked(runEmbeddedPiAgent).mock.calls.map((call) => call[0]);
-      expect(calls.map((c) => c?.model)).toEqual(["claude-haiku-4-5", "gpt-text", "gpt-5.2"]);
-      expect(calls[2]?.images).toEqual(images);
+    const ok = (model: string) => ({
+      payloads: [{ text: "oatmeal" }],
+      meta: { durationMs: 5, agentMeta: { sessionId: "s", provider: "acme", model } },
     });
-  });
+    const embeddedCalls = () => vi.mocked(runEmbeddedPiAgent).mock.calls.map((call) => call[0]);
 
-  it("fails with ImageInputUnsupportedError when no remaining fallback accepts images", async () => {
-    await withTempHome(async (home) => {
-      const store = path.join(home, "sessions.json");
-      mockConfig(home, store, {
-        model: { primary: "anthropic/claude-haiku-4-5", fallbacks: ["openai/gpt-text"] },
-        models: { "anthropic/claude-haiku-4-5": {}, "openai/gpt-text": {} },
+    it("never starts a text-only primary; the vision fallback runs first with the user's prompt", async () => {
+      await withTempHome(async (home) => {
+        mockImageConfig(home, "acme/text-only", ["acme/vision"]);
+        vi.mocked(runEmbeddedPiAgent).mockResolvedValueOnce(ok("vision"));
+
+        await agentCommand({ message: BODY, to: "+1555", images: IMAGES }, runtime);
+
+        const calls = embeddedCalls();
+        expect(calls.map((c) => c?.model)).toEqual(["vision"]);
+        expect(calls[0]?.prompt).toBe(BODY);
+        expect(calls[0]?.images).toEqual(IMAGES);
       });
-      vi.mocked(runEmbeddedPiAgent)
-        .mockRejectedValueOnce(Object.assign(new Error("rate limited"), { status: 429 }))
-        .mockRejectedValueOnce(new ImageInputUnsupportedError(1));
-      const images = [{ type: "image" as const, data: "aGVsbG8=", mimeType: "image/jpeg" }];
+    });
 
-      await expect(
-        agentCommand({ message: "what did I eat?", to: "+1555", images }, runtime),
-      ).rejects.toBeInstanceOf(ImageInputUnsupportedError);
+    it("all candidates text-only: ImageInputUnsupportedError with 0 runner calls", async () => {
+      await withTempHome(async (home) => {
+        mockImageConfig(home, "acme/text-only", ["acme/text-only-2"]);
+
+        await expect(
+          agentCommand({ message: BODY, to: "+1555", images: IMAGES }, runtime),
+        ).rejects.toBeInstanceOf(ImageInputUnsupportedError);
+        expect(runEmbeddedPiAgent).not.toHaveBeenCalled();
+      });
+    });
+
+    it("without images the text-only models run as before (no filtering)", async () => {
+      await withTempHome(async (home) => {
+        mockImageConfig(home, "acme/text-only", ["acme/vision"]);
+        vi.mocked(runEmbeddedPiAgent).mockResolvedValueOnce(ok("text-only"));
+
+        await agentCommand({ message: BODY, to: "+1555" }, runtime);
+
+        expect(embeddedCalls().map((c) => c?.model)).toEqual(["text-only"]);
+      });
+    });
+
+    it("vision 429 -> vision fallback: base continuation prompt, plus the images", async () => {
+      await withTempHome(async (home) => {
+        mockImageConfig(home, "acme/vision", ["acme/vision-2"]);
+        vi.mocked(runEmbeddedPiAgent)
+          .mockRejectedValueOnce(Object.assign(new Error("rate limited"), { status: 429 }))
+          .mockResolvedValueOnce(ok("vision-2"));
+
+        await agentCommand({ message: BODY, to: "+1555", images: IMAGES }, runtime);
+
+        const calls = embeddedCalls();
+        expect(calls.map((c) => c?.prompt)).toEqual([
+          BODY,
+          "Continue where you left off. The previous model attempt failed or timed out.",
+        ]);
+        expect(calls[1]?.images).toEqual(IMAGES);
+      });
+    });
+
+    it("vision 429 with only a text-only fallback: the real 429 failure, never the image 400", async () => {
+      await withTempHome(async (home) => {
+        mockImageConfig(home, "acme/vision", ["acme/text-only"]);
+        vi.mocked(runEmbeddedPiAgent).mockRejectedValueOnce(
+          Object.assign(new Error("rate limited"), { status: 429 }),
+        );
+
+        const err = await agentCommand(
+          { message: BODY, to: "+1555", images: IMAGES },
+          runtime,
+        ).then(
+          () => undefined,
+          (e: unknown) => e,
+        );
+
+        expect(embeddedCalls().map((c) => c?.model)).toEqual(["vision"]);
+        expect(err).toBeDefined();
+        expect(err).not.toBeInstanceOf(ImageInputUnsupportedError);
+        expect((err as { status?: number }).status).toBe(429);
+      });
+    });
+
+    it("per-candidate timeout: the fallback gets the continuation; the body is sent exactly once", async () => {
+      await withTempHome(async (home) => {
+        vi.stubEnv("OPENCLAW_MODEL_CANDIDATE_TIMEOUT_MS", "50");
+        mockImageConfig(home, "acme/vision", ["acme/vision-2"]);
+        vi.mocked(runEmbeddedPiAgent)
+          .mockImplementationOnce(() => new Promise(() => {})) // a hung primary
+          .mockResolvedValueOnce(ok("vision-2"));
+
+        await agentCommand({ message: BODY, to: "+1555", images: IMAGES }, runtime);
+
+        const calls = embeddedCalls();
+        expect(calls.map((c) => c?.model)).toEqual(["vision", "vision-2"]);
+        expect(calls[1]?.prompt).toMatch(/^Continue where you left off/);
+        // No duplicate user message: the user's own text went into the transcript once.
+        expect(calls.filter((c) => c?.prompt === BODY)).toHaveLength(1);
+      });
     });
   });
 
-  it("CLI backends: a fallback retry does NOT re-send images (the CLI keeps its own transcript)", async () => {
+  it("CLI backends: a fallback retry omits images (base behaviour, known limitation)", async () => {
     await withTempHome(async (home) => {
       const store = path.join(home, "sessions.json");
       mockConfig(home, store, {
@@ -371,7 +463,9 @@ describe("agentCommand", () => {
       const calls = vi.mocked(runCliAgent).mock.calls.map((call) => call[0]);
       expect(calls).toHaveLength(2);
       expect(calls[0]?.images).toEqual(images);
+      expect(calls[0]?.prompt).toBe("what did I eat?");
       expect(calls[1]?.images).toBeUndefined();
+      expect(calls[1]?.prompt).toMatch(/^Continue where you left off/);
       expect(runEmbeddedPiAgent).not.toHaveBeenCalled();
     });
   });

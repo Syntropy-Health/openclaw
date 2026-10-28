@@ -22,6 +22,8 @@ import {
   resolveConfiguredModelRef,
   resolveThinkingDefault,
 } from "../agents/model-selection.js";
+import { resolveModel } from "../agents/pi-embedded-runner/model.js";
+import { modelSupportsImages } from "../agents/pi-embedded-runner/run/images.js";
 import { runEmbeddedPiAgent } from "../agents/pi-embedded.js";
 import { buildWorkspaceSkillSnapshot } from "../agents/skills.js";
 import { getSkillsSnapshotVersion } from "../agents/skills/refresh.js";
@@ -84,6 +86,28 @@ function resolveFallbackRetryPrompt(params: { body: string; isFallbackRetry: boo
   return "Continue where you left off. The previous model attempt failed or timed out.";
 }
 
+/**
+ * Whether a fallback candidate accepts image input, resolved the same way the embedded
+ * runner resolves its model (resolveModel + modelSupportsImages). undefined when it cannot
+ * be resolved (CLI backends, unknown models): the fallback filter then keeps the candidate.
+ */
+function resolveCandidateImageSupport(params: {
+  provider: string;
+  model: string;
+  agentDir: string;
+  cfg: ReturnType<typeof loadConfig>;
+}): boolean | undefined {
+  if (isCliProvider(params.provider, params.cfg)) {
+    return undefined;
+  }
+  try {
+    const { model } = resolveModel(params.provider, params.model, params.agentDir, params.cfg);
+    return model ? modelSupportsImages(model) : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
 function runAgentAttempt(params: {
   providerOverride: string;
   modelOverride: string;
@@ -130,10 +154,9 @@ function runAgentAttempt(params: {
       runId: params.runId,
       extraSystemPrompt: params.opts.extraSystemPrompt,
       cliSessionId,
-      // CLI backends keep their own transcript and resume per provider session, so the
-      // first attempt's images are already in that backend's history; re-sending them on
-      // a fallback retry would double-send. (Embedded runs below DO re-send: their
-      // transcript stores only an image placeholder.)
+      // Known limitation (base behaviour): a CLI fallback retry omits the images. CLI
+      // backends keep their own sessions, so whether the first attempt's turn is in the
+      // next backend's history is not known here. Staging does not use CLI backends.
       images: params.isFallbackRetry ? undefined : params.opts.images,
       streamParams: params.opts.streamParams,
     });
@@ -556,6 +579,19 @@ export async function agentCommand(
         agentDir,
         fallbacksOverride: effectiveFallbacksOverride,
         perCandidateTimeoutMs,
+        // With caller images, text-only candidates are filtered out before anything runs.
+        imageInput: opts.images?.length
+          ? {
+              imageCount: opts.images.length,
+              supported: (candidateProvider, candidateModel) =>
+                resolveCandidateImageSupport({
+                  provider: candidateProvider,
+                  model: candidateModel,
+                  agentDir,
+                  cfg,
+                }),
+            }
+          : undefined,
         run: (providerOverride, modelOverride) => {
           const isFallbackRetry = fallbackAttemptIndex > 0;
           fallbackAttemptIndex += 1;
