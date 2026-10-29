@@ -8,40 +8,16 @@
  * Run: DATABASE_URL=<url> pnpm vitest run extensions/memory-graphiti/recall-store.integration.test.ts
  */
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { createPgRecallStore, type RecallItem, type RecallStore } from "./recall-store.js";
+import { createPgRecallStore, type RecallItem } from "./recall-store.js";
 import { ensureReceiptSchema } from "./receipts.js";
 
 const DB_URL = process.env.DATABASE_URL;
 const describeIf = DB_URL ? describe : describe.skip;
 
-type Sql = Parameters<typeof createPgRecallStore>[0] & { end: (o?: object) => Promise<void> };
-
-/** A process-local store: what a gateway would have WITHOUT Postgres. RED-arm only. */
-function createInMemoryRecallStore(): RecallStore {
-  const rows = new Map<string, { items: RecallItem[]; state: "ready" | "timed_out"; at: string }>();
-  const k = (g: string, t: string) => `${g}\u0000${t}`;
-  return {
-    async write(g, t, items, state) {
-      rows.set(k(g, t), { items, state, at: new Date().toISOString() });
-    },
-    async read(g, t) {
-      const r = rows.get(k(g, t));
-      return r ? { turnId: t, ...r } : null;
-    },
-    async latest() {
-      return null;
-    },
-    async deleteGroup() {
-      return 0;
-    },
-    async forgetGroup() {
-      return 0;
-    },
-    async deleteCitingFacts() {
-      return 0;
-    },
-  };
-}
+type Sql = Parameters<typeof createPgRecallStore>[0] & {
+  end: (o?: object) => Promise<void>;
+  unsafe: (q: string) => Promise<unknown>;
+};
 
 const items = (n: number): RecallItem[] =>
   Array.from({ length: n }, (_, i) => ({
@@ -56,6 +32,7 @@ describeIf("RecallStore (real Postgres)", () => {
   const A = `ok_recall_a_${run}`;
   const B = `ok_recall_b_${run}`;
   const C = `ok_recall_c_${run}`;
+  const OTHER_SCHEMA = `mg_recall_neg_${run}`;
   const sqls: Sql[] = [];
 
   const open = async (): Promise<Sql> => {
@@ -78,6 +55,7 @@ describeIf("RecallStore (real Postgres)", () => {
     if (sql) {
       await sql`DELETE FROM lp_memory_recall WHERE group_id IN (${A}, ${B}, ${C})`;
       await sql`DELETE FROM lp_memory_recall_block WHERE group_id IN (${A}, ${B}, ${C})`;
+      await sql.unsafe(`DROP SCHEMA IF EXISTS ${OTHER_SCHEMA} CASCADE`);
     }
     for (const s of sqls) {
       await s.end({ timeout: 5 });
@@ -94,11 +72,25 @@ describeIf("RecallStore (real Postgres)", () => {
     expect(JSON.stringify(r?.items)).toBe(JSON.stringify(written));
   });
 
-  it("RED arm: a process-local (in-memory) store FAILS the same cross-instance arm", async () => {
-    const a = createInMemoryRecallStore();
-    const b = createInMemoryRecallStore();
-    await a.write(A, "resp_cross", items(4), "ready");
-    expect(await b.read(A, "resp_cross")).toBeNull(); // the panel would answer `none`
+  it("negative control: a store on ANOTHER database schema (no shared rows) reads null", async () => {
+    // What the cross-instance arm would see if the record were NOT shared: an
+    // instance whose tables are not the writer's. Proves the arm above can fail.
+    const admin = await open();
+    await admin.unsafe(`CREATE SCHEMA IF NOT EXISTS ${OTHER_SCHEMA}`); // run-suffixed identifier
+    const postgres = (await import("postgres")).default;
+    const other = postgres(DB_URL!, {
+      ssl: { rejectUnauthorized: false },
+      max: 1,
+      idle_timeout: 5,
+      connection: { search_path: OTHER_SCHEMA },
+    }) as unknown as Sql;
+    sqls.push(other);
+    await ensureReceiptSchema(other);
+    const a = createPgRecallStore(await open());
+    const b = createPgRecallStore(other);
+    await a.write(A, "resp_cross_neg", items(2), "ready");
+    expect(await a.read(A, "resp_cross_neg")).not.toBeNull();
+    expect(await b.read(A, "resp_cross_neg")).toBeNull();
   });
 
   it("TTL: a row older than 10 minutes reads as none (read and latest)", async () => {

@@ -50,6 +50,11 @@ describe("createPgRecallStore (statement shape)", () => {
     expect(calls[0].text).toContain("DELETE FROM lp_memory_recall_block WHERE until < now()");
     expect(calls[0].values).toContain("ok_g");
     expect(calls[0].values).toContain(RECALL_CAP_PER_GROUP - 1);
+    expect(calls[0].values).toContain(4); // keep this turn + the 4 newest others
+    // eviction keeps the NEWEST: ordered by at DESC, within this group only
+    expect(calls[0].text).toMatch(
+      /DELETE FROM lp_memory_recall WHERE group_id = \$ AND turn_id <> \$ AND turn_id NOT IN \( SELECT turn_id FROM lp_memory_recall WHERE group_id = \$ AND turn_id <> \$ ORDER BY at DESC, turn_id DESC LIMIT \$ \)/,
+    );
     expect(calls[0].values).toContainEqual(ITEMS);
   });
 
@@ -57,14 +62,17 @@ describe("createPgRecallStore (statement shape)", () => {
     const { sql, calls } = recordingSql();
     expect(await createPgRecallStore(sql).read("ok_g", "resp_1")).toBeNull();
     expect(calls[0].text).toMatch(/WHERE group_id = \$ AND turn_id = \$ AND at > now\(\)/);
-    expect(calls[0].values).toEqual(["ok_g", "resp_1", RECALL_TTL_MINUTES]);
+    expect(calls[0].values).toEqual(["ok_g", "resp_1", 10]); // the TTL is exactly 10 minutes
+    expect(RECALL_TTL_MINUTES).toBe(10);
   });
 
   it("latest is the newest unexpired row of the group", async () => {
     const { sql, calls } = recordingSql();
     await createPgRecallStore(sql).latest("ok_g");
-    expect(calls[0].text).toContain("ORDER BY at DESC");
-    expect(calls[0].values).toEqual(["ok_g", RECALL_TTL_MINUTES]);
+    expect(calls[0].text).toMatch(
+      /WHERE group_id = \$ AND at > now\(\) - make_interval\(mins => \$\) ORDER BY at DESC, turn_id DESC LIMIT 1/,
+    );
+    expect(calls[0].values).toEqual(["ok_g", 10]);
   });
 
   it("rows come back in canonical item key order (jsonb reorders keys)", async () => {
@@ -91,6 +99,19 @@ describe("createPgRecallStore (statement shape)", () => {
     expect(calls[0].text).toMatch(/DELETE FROM lp_memory_recall WHERE group_id = \$/);
     expect(calls[0].values).toEqual(["ok_g", RECALL_BLOCK_MINUTES, "ok_g"]);
     expect(RECALL_BLOCK_MINUTES).toBe(11);
+  });
+
+  it("deleteCitingFacts is scoped to the caller's group", async () => {
+    const { sql, calls } = recordingSql();
+    await createPgRecallStore(sql).deleteCitingFacts("ok_g", ["e_1"]);
+    expect(calls[0].text).toMatch(/DELETE FROM lp_memory_recall WHERE group_id = \$ AND EXISTS/);
+    expect(calls[0].values[0]).toBe("ok_g");
+  });
+
+  it("the sweep in write uses the same 10-minute TTL", async () => {
+    const { sql, calls } = recordingSql();
+    await createPgRecallStore(sql).write("ok_g", "resp_1", ITEMS, "ready");
+    expect(calls[0].values[0]).toBe(10);
   });
 
   it("an empty fact-id list deletes nothing and issues no statement", async () => {

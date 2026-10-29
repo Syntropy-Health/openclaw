@@ -4,7 +4,11 @@
  * (RecallStore, keyed by the turn's run id) so the panel shows exactly what the
  * agent got. On timeout nothing is injected and the record says `timed_out`.
  */
+import fs from "node:fs";
 import type { IncomingMessage, ServerResponse } from "node:http";
+import os from "node:os";
+import path from "node:path";
+import { Command } from "commander";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { RankedFact, SearchRankedOptions } from "./client.js";
 
@@ -12,6 +16,18 @@ const db = vi.hoisted(() => ({ peers: new Map<string, string | null>() }));
 vi.mock("postgres", () => {
   const sql = Object.assign(
     (strings: TemplateStringsArray, ...values: unknown[]) => {
+      const q = strings.join("?");
+      // The operator CLI forget looks the user up by internal id.
+      if (q.includes("FROM lp_users WHERE id =")) {
+        return Promise.resolve(
+          values[0] === "uuid-u1"
+            ? [{ id: "uuid-u1", external_id: "user_2abcDEF345ghiJKL678mnoPQR" }]
+            : [],
+        );
+      }
+      if (q.includes("lp_user_channels") && q.includes("WHERE user_id")) {
+        return Promise.resolve([]);
+      }
       if (strings.join("?").includes("lp_user_channels")) {
         const peer = values[1] as string;
         return Promise.resolve(db.peers.has(peer) ? [{ external_id: db.peers.get(peer) }] : []);
@@ -27,6 +43,8 @@ vi.mock("postgres", () => {
 const recall = vi.hoisted(() => ({
   writes: [] as Array<{ group: string; turnId: string; items: unknown[]; state: string }>,
   write: null as null | ((...a: unknown[]) => Promise<void>),
+  reads: 0,
+  forgotten: [] as string[],
 }));
 vi.mock("./recall-store.js", async (importOriginal) => {
   const actual = await importOriginal<typeof import("./recall-store.js")>();
@@ -43,10 +61,15 @@ vi.mock("./recall-store.js", async (importOriginal) => {
         }
         recall.writes.push({ group, turnId, items, state });
       },
-      read: async (g: string, t: string) => asRecord(find(g, t)),
-      latest: async (g: string) => asRecord(find(g)),
+      read: async (g: string, t: string) => (recall.reads++, asRecord(find(g, t))),
+      latest: async (g: string) => (recall.reads++, asRecord(find(g))),
       deleteGroup: async () => 0,
-      forgetGroup: async () => 0,
+      forgetGroup: async (g: string) => {
+        recall.forgotten.push(g);
+        const before = recall.writes.length;
+        recall.writes = recall.writes.filter((w) => w.group !== g);
+        return before - recall.writes.length;
+      },
       deleteCitingFacts: async () => 0,
     }),
   };
@@ -94,6 +117,7 @@ type Route = (req: IncomingMessage, res: ServerResponse) => Promise<void>;
 async function register(extra: Record<string, unknown> = {}, cfg?: Record<string, unknown>) {
   const hooks: Record<string, Hook> = {};
   const routes: Record<string, Route> = {};
+  const clis: Array<(ctx: { program: unknown }) => void> = [];
   const logger = { info: vi.fn(), warn: vi.fn(), error: vi.fn(), debug: vi.fn() };
   const api = {
     id: "memory-graphiti",
@@ -119,7 +143,9 @@ async function register(extra: Record<string, unknown> = {}, cfg?: Record<string
     }),
     registerChannel: vi.fn(),
     registerGatewayMethod: vi.fn(),
-    registerCli: vi.fn(),
+    registerCli: vi.fn((fn: (ctx: { program: unknown }) => void) => {
+      clis.push(fn);
+    }),
     registerService: vi.fn(),
     registerProvider: vi.fn(),
     registerCommand: vi.fn(),
@@ -130,7 +156,7 @@ async function register(extra: Record<string, unknown> = {}, cfg?: Record<string
   };
   const mod = await import("./index.js");
   mod.default.register(api as never);
-  return { hooks, logger, routes };
+  return { hooks, logger, routes, clis };
 }
 
 const ranked = (facts: ReturnType<typeof factFixture>[]): RankedFact[] =>
@@ -155,6 +181,8 @@ beforeEach(() => {
   db.peers.set("u1", CLERK);
   recall.writes.length = 0;
   recall.write = null;
+  recall.reads = 0;
+  recall.forgotten.length = 0;
 });
 
 afterEach(() => {
@@ -262,7 +290,7 @@ describe("recall: the budget", () => {
     const { hooks } = await register({ recall: { timeoutMs: 60 } });
     const t0 = Date.now();
     const out = await hooks.before_agent_start?.({ prompt: "how did I sleep?" }, TURN);
-    expect(Date.now() - t0).toBeLessThan(1000);
+    expect(Date.now() - t0).toBeLessThan(300);
     expect(out).toBeUndefined();
     expect(seen?.aborted).toBe(true);
     await flush();
@@ -278,7 +306,7 @@ describe("recall: the budget", () => {
     const { hooks } = await register({ recall: { timeoutMs: 60 } });
     const t0 = Date.now();
     expect(await hooks.before_agent_start?.({ prompt: "how did I sleep?" }, TURN)).toBeUndefined();
-    expect(Date.now() - t0).toBeLessThan(1000);
+    expect(Date.now() - t0).toBeLessThan(300);
     await flush();
     expect(recall.writes.map((w) => w.state)).toEqual(["timed_out"]);
   });
@@ -306,7 +334,7 @@ describe("recall: the budget", () => {
     const out = (await hooks.before_agent_start?.({ prompt: "how did I sleep?" }, TURN)) as {
       prependContext?: string;
     };
-    expect(Date.now() - t0).toBeLessThan(1000);
+    expect(Date.now() - t0).toBeLessThan(300);
     expect(out?.prependContext).toContain("<graphiti-facts>");
     expect(logger.warn.mock.calls.map((c) => String(c[0])).join("\n")).toMatch(
       /recall record not written/,
@@ -520,5 +548,112 @@ describe("recall route end to end (hook → store → GET /gateway/memory/recall
     expect((await getRecall(routes["/gateway/memory/recall"], "good")).json.state).toBe(
       "not_enabled",
     );
+  });
+});
+
+describe("budget edges", () => {
+  it("search never settles AND the store write never resolves: the turn still returns in < 300 ms", async () => {
+    vi.spyOn(ZepCloudClient.prototype, "searchRanked").mockImplementation(
+      () => new Promise(() => {}),
+    );
+    recall.write = () => new Promise(() => {}); // the timed_out record write hangs too
+    const { hooks } = await register({ recall: { timeoutMs: 60 } });
+    const t0 = Date.now();
+    expect(await hooks.before_agent_start?.({ prompt: "how did I sleep?" }, TURN)).toBeUndefined();
+    expect(Date.now() - t0).toBeLessThan(300);
+  });
+
+  it("the configured timeoutMs is honoured: a 300 ms search with timeoutMs 60 is timed_out, nothing injected", async () => {
+    vi.spyOn(ZepCloudClient.prototype, "searchRanked").mockImplementation(
+      () => new Promise((r) => setTimeout(() => r(RANKED), 300)),
+    );
+    const { hooks } = await register({ recall: { timeoutMs: 60 } });
+    const t0 = Date.now();
+    const out = await hooks.before_agent_start?.({ prompt: "how did I sleep?" }, TURN);
+    expect(Date.now() - t0).toBeLessThan(250);
+    expect(out).toBeUndefined();
+    await flush();
+    expect(recall.writes.map((w) => w.state)).toEqual(["timed_out"]);
+  });
+});
+
+describe("forget erases recall through the plugin's own wiring", () => {
+  let stateDir: string;
+  let prevStateDir: string | undefined;
+  beforeEach(() => {
+    stateDir = fs.mkdtempSync(path.join(os.tmpdir(), "mg-recall-forget-"));
+    fs.mkdirSync(path.join(stateDir, "agents", "main", "sessions"), { recursive: true });
+    prevStateDir = process.env.OPENCLAW_STATE_DIR;
+    process.env.OPENCLAW_STATE_DIR = stateDir;
+  });
+  afterEach(() => {
+    if (prevStateDir === undefined) {
+      delete process.env.OPENCLAW_STATE_DIR;
+    } else {
+      process.env.OPENCLAW_STATE_DIR = prevStateDir;
+    }
+    fs.rmSync(stateDir, { recursive: true, force: true });
+  });
+
+  it("HTTP: POST /gateway/memory/forget erases the turn's record; GET recall then answers none", async () => {
+    vi.spyOn(ZepCloudClient.prototype, "searchRanked").mockResolvedValue(RANKED);
+    vi.spyOn(ZepCloudClient.prototype, "forget").mockResolvedValue(true);
+    const { hooks, routes } = await register();
+    await hooks.before_agent_start?.({ prompt: "how did I sleep?" }, TURN);
+    expect((await getRecall(routes["/gateway/memory/recall"], "good", RUN_ID)).json.state).toBe(
+      "ready",
+    );
+    let status = 0;
+    let body = "";
+    await routes["/gateway/memory/forget"]?.(
+      {
+        method: "POST",
+        url: "/gateway/memory/forget",
+        headers: { authorization: "Bearer good" },
+      } as unknown as IncomingMessage,
+      {
+        writeHead: (s: number) => {
+          status = s;
+        },
+        end: (b: string) => {
+          body = b;
+        },
+      } as unknown as ServerResponse,
+    );
+    expect(status).toBe(200);
+    expect(JSON.parse(body).status).toBe("SUCCEEDED");
+    expect(recall.forgotten).toContain(GROUP);
+    expect((await getRecall(routes["/gateway/memory/recall"], "good", RUN_ID)).json.state).toBe(
+      "none",
+    );
+  });
+
+  it("CLI: `graphiti forget --user` erases the record and prints its recall= count", async () => {
+    vi.spyOn(ZepCloudClient.prototype, "searchRanked").mockResolvedValue(RANKED);
+    vi.spyOn(ZepCloudClient.prototype, "forget").mockResolvedValue(true);
+    const log = vi.spyOn(console, "log").mockImplementation(() => {});
+    const { hooks, clis } = await register();
+    await hooks.before_agent_start?.({ prompt: "how did I sleep?" }, TURN);
+    const program = new Command();
+    program.exitOverride();
+    for (const fn of clis) {
+      fn({ program });
+    }
+    await program.parseAsync(["graphiti", "forget", "--user", "uuid-u1", "--state-dir", stateDir], {
+      from: "user",
+    });
+    expect(recall.forgotten).toContain(GROUP);
+    const printed = log.mock.calls.map((c) => String(c[0])).join("\n");
+    expect(printed).toMatch(/graphiti forget: userFound=true .*recall=1 /);
+    expect(recall.writes.filter((w) => w.group === GROUP)).toHaveLength(0);
+  });
+});
+
+describe("recall route with autoRecall off", () => {
+  it("answers not_enabled and never reads the store", async () => {
+    const { routes } = await register({ autoRecall: false });
+    const r = await getRecall(routes["/gateway/memory/recall"], "good", RUN_ID);
+    expect(r.json.state).toBe("not_enabled");
+    expect(recall.reads).toBe(0);
   });
 });
