@@ -45,6 +45,13 @@ export interface HighlightStore {
   staleDue(opts: { debounceSec: number; cap: number; limit: number }): Promise<string[]>;
   /** Every stale group, whatever its on-demand count (the nightly run). */
   nightlyDue(limit: number): Promise<string[]>;
+  /**
+   * Remove every cached highlight that cites any of these facts (remove, R7), keep
+   * the rest in order, recompute source ids and mark the row stale so it
+   * regenerates. A ready row left with none becomes unavailable. Returns the
+   * number of highlights removed.
+   */
+  dropCiting(groupId: string, factIds: string[]): Promise<number>;
 }
 
 type Row = {
@@ -136,6 +143,37 @@ export function createPgHighlightStore(sql: Sql): HighlightStore {
         SELECT group_id FROM lp_memory_highlights
         WHERE stale_since IS NOT NULL ORDER BY stale_since LIMIT ${limit}`;
       return rows.map((r) => r.group_id);
+    },
+
+    async dropCiting(groupId, factIds) {
+      if (factIds.length === 0) {
+        return 0;
+      }
+      const rows = await sql<{ dropped: number }>`
+        WITH cur AS (
+          SELECT payload FROM lp_memory_highlights WHERE group_id = ${groupId} FOR UPDATE
+        ),
+        kept AS (
+          SELECT COALESCE(jsonb_agg(e ORDER BY ord), '[]'::jsonb) AS p, count(*)::int AS n
+          FROM cur, jsonb_array_elements(cur.payload) WITH ORDINALITY AS x(e, ord)
+          WHERE NOT EXISTS (
+            SELECT 1 FROM jsonb_array_elements(e -> 'sources') src
+            WHERE src ->> 'fact_id' = ANY(${factIds}::text[])
+          )
+        ),
+        total AS (SELECT jsonb_array_length(payload) AS n FROM cur)
+        UPDATE lp_memory_highlights h SET
+          payload = kept.p,
+          source_fact_ids = ARRAY(
+            SELECT DISTINCT src ->> 'fact_id'
+            FROM jsonb_array_elements(kept.p) e, jsonb_array_elements(e -> 'sources') src
+          ),
+          state = CASE WHEN h.state = 'ready' AND kept.n = 0 THEN 'unavailable' ELSE h.state END,
+          stale_since = now()
+        FROM kept, total
+        WHERE h.group_id = ${groupId} AND kept.n < total.n
+        RETURNING (total.n - kept.n) AS dropped`;
+      return rows[0]?.dropped ?? 0;
     },
 
     async deleteGroup(groupId) {

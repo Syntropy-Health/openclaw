@@ -35,6 +35,7 @@ describeIf("highlight store (real Postgres)", () => {
   const B = `ok_hl_b_${run}`;
   const C = `ok_hl_c_${run}`;
   const N = `ok_hl_n_${run}`;
+  const R = `ok_hl_r_${run}`;
   let sql: Sql;
   let store: HighlightStore;
 
@@ -51,7 +52,7 @@ describeIf("highlight store (real Postgres)", () => {
 
   afterAll(async () => {
     if (sql) {
-      await sql`DELETE FROM lp_memory_highlights WHERE group_id IN (${A}, ${B}, ${C}, ${N})`;
+      await sql`DELETE FROM lp_memory_highlights WHERE group_id IN (${A}, ${B}, ${C}, ${N}, ${R})`;
       await sql.end({ timeout: 5 });
     }
   });
@@ -192,5 +193,40 @@ describeIf("highlight store (real Postgres)", () => {
   it("nightlyDue: every stale group, whatever its on-demand count", async () => {
     const due = await store.nightlyDue(100);
     expect(due).toEqual(expect.arrayContaining([A, C, N]));
+  });
+
+  it("dropCiting: removes every highlight citing a fact, keeps order, recomputes ids, marks stale", async () => {
+    await store.claimOnDemand(R, 3);
+    await store.put(
+      R,
+      {
+        state: "ready",
+        payload: [
+          hl("hl_1", ["e_1", "e_2"]),
+          hl("hl_2", ["e_3"]),
+          hl("hl_3", ["e_2", "e_4"]),
+          hl("hl_4", ["e_5"]),
+        ],
+      },
+      await store.clock(),
+    );
+    expect(await store.dropCiting(R, ["e_2"])).toBe(2);
+    const row = await store.get(R);
+    expect(row?.payload.map((h) => h.id)).toEqual(["hl_2", "hl_4"]);
+    expect(row?.sourceFactIds.toSorted()).toEqual(["e_3", "e_5"]);
+    expect(row?.state).toBe("ready");
+    expect(row?.staleSince).toBeInstanceOf(Date);
+    // Nothing cites e_9: no change, 0.
+    expect(await store.dropCiting(R, ["e_9"])).toBe(0);
+    // Dropping the rest leaves a ready row with no highlights as unavailable (regenerates).
+    expect(await store.dropCiting(R, ["e_3", "e_5"])).toBe(2);
+    expect(await store.get(R)).toMatchObject({
+      state: "unavailable",
+      payload: [],
+      sourceFactIds: [],
+    });
+    // A group with no row: 0, nothing created.
+    expect(await store.dropCiting(`${R}_none`, ["e_1"])).toBe(0);
+    expect(await store.get(`${R}_none`)).toBeNull();
   });
 });

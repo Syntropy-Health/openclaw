@@ -60,6 +60,26 @@ export type DropCounts = {
   guard: number;
 };
 
+/**
+ * PVR F3: a user's raw recent facts, newest first, valid only, at most
+ * FALLBACK_FACTS_MAX. Served when highlights are unavailable.
+ */
+export function recentFacts(facts: readonly MemoryFact[]): HighlightSource[] {
+  return facts
+    .filter((f) => !f.invalidAt && !f.expiredAt)
+    .toSorted(
+      (a, b) =>
+        Date.parse(b.validAt ?? b.createdAt) - Date.parse(a.validAt ?? a.createdAt) ||
+        (a.id < b.id ? -1 : 1),
+    )
+    .slice(0, FALLBACK_FACTS_MAX)
+    .map((f) => ({
+      fact_id: f.id,
+      fact: f.fact,
+      last_seen: new Date(f.validAt ?? f.createdAt).toISOString().slice(0, 10),
+    }));
+}
+
 export type GenerateResult =
   | { state: "empty"; highlights: []; dropped: DropCounts }
   | { state: "ready"; highlights: Highlight[]; dropped: DropCounts }
@@ -177,7 +197,7 @@ export async function generateHighlights(
     return {
       state: "unavailable",
       reason: "summariser_error",
-      fallback_facts: valid.slice(0, FALLBACK_FACTS_MAX).map(toSource),
+      fallback_facts: recentFacts(valid),
       dropped,
     };
   };

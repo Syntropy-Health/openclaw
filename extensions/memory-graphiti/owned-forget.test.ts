@@ -180,6 +180,49 @@ describe("forgetOwnedFacts", () => {
   });
 });
 
+describe("forgetOwnedFacts beforeDelete", () => {
+  it("receives the owned facts (with episodes) before anything is deleted", async () => {
+    const b = new GlobalDeleteBackend();
+    b.seed("ok_A", [fact("a1", { episodeIds: ["ep1"] }), fact("a2")]);
+    b.seed("ok_B", [fact("b1")]);
+    const seen: Array<{ ids: string[]; stillThere: boolean }> = [];
+    await forgetOwnedFacts(b, "ok_A", ["a1", "b1"], {
+      beforeDelete: async (owned) => {
+        seen.push({ ids: owned.map((f) => f.id), stillThere: b.has("a1") });
+        expect(owned[0].episodeIds).toEqual(["ep1"]);
+      },
+    });
+    expect(seen).toEqual([{ ids: ["a1"], stillThere: true }]);
+    expect(b.has("a1")).toBe(false);
+  });
+
+  it("a failing beforeDelete deletes nothing and propagates", async () => {
+    const b = new GlobalDeleteBackend();
+    b.seed("ok_A", [fact("a1")]);
+    await expect(
+      forgetOwnedFacts(b, "ok_A", ["a1"], {
+        beforeDelete: async () => {
+          throw new Error("tombstone write failed");
+        },
+      }),
+    ).rejects.toThrow(/tombstone/);
+    expect(b.has("a1")).toBe(true);
+    expect(b.forgetCalls).toEqual([]);
+  });
+
+  it("not called when nothing is owned", async () => {
+    const b = new GlobalDeleteBackend();
+    b.seed("ok_B", [fact("b1")]);
+    let called = false;
+    await forgetOwnedFacts(b, "ok_A", ["b1"], {
+      beforeDelete: async () => {
+        called = true;
+      },
+    });
+    expect(called).toBe(false);
+  });
+});
+
 /** A relative path in POSIX form, whatever the platform separator. */
 const toPosixPath = (rel: string): string => rel.split(path.sep).join("/");
 

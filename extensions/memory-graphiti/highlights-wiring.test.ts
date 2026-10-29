@@ -10,6 +10,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { CaptureResult } from "./capture.js";
 import { opaqueGroupId } from "./receipts.js";
+import { ZepCloudClient } from "./zep-cloud-client.js";
 
 const order = vi.hoisted(() => [] as string[]);
 
@@ -29,6 +30,16 @@ vi.mock("postgres", () => {
     },
   );
   return { default: () => sql };
+});
+
+vi.mock("../../src/gateway/auth.js", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../../src/gateway/auth.js")>();
+  return {
+    ...actual,
+    resolveClerkAuth: () => ({ issuer: "https://clerk.test" }),
+    authorizeClerkJwt: async (token: string) =>
+      token === "good" ? { ok: true, externalId: "user_2abcDEF345ghiJKL678mnoPQR" } : { ok: false },
+  };
 });
 
 const capture = vi.hoisted(() => ({
@@ -55,6 +66,7 @@ vi.mock("./highlights/store.js", async (importOriginal) => {
       claimOnDemand: async () => false,
       staleDue: async () => [],
       nightlyDue: async () => [],
+      dropCiting: async () => 0,
     }),
   };
 });
@@ -118,6 +130,7 @@ type Hook = (event: unknown, ctx: unknown) => unknown;
 async function register(cfg: Record<string, unknown>) {
   const hooks: Record<string, Hook> = {};
   const services: Array<{ start: () => unknown; stop?: () => unknown }> = [];
+  const routes: Record<string, (req: unknown, res: unknown) => Promise<void>> = {};
   const logger = { info: vi.fn(), warn: vi.fn(), error: vi.fn(), debug: vi.fn() };
   const api = {
     id: "memory-graphiti",
@@ -130,7 +143,11 @@ async function register(cfg: Record<string, unknown>) {
     registerTool: vi.fn(),
     registerHook: vi.fn(),
     registerHttpHandler: vi.fn(),
-    registerHttpRoute: vi.fn(),
+    registerHttpRoute: vi.fn(
+      (r: { path: string; handler: (q: unknown, s: unknown) => Promise<void> }) => {
+        routes[r.path] = r.handler;
+      },
+    ),
     registerChannel: vi.fn(),
     registerGatewayMethod: vi.fn(),
     registerCli: vi.fn(),
@@ -146,7 +163,7 @@ async function register(cfg: Record<string, unknown>) {
   };
   const mod = await import("./index.js");
   mod.default.register(api as never);
-  return { hooks, services, logger };
+  return { hooks, services, logger, routes };
 }
 
 const CLOUD = {
@@ -239,5 +256,54 @@ describe("highlights worker lifecycle (P5.2 wiring)", () => {
     delete process.env.OPENCLAW_MEMORY_GROUP_KEY;
     await register(CLOUD);
     expect(sched.created).toBe(0);
+  });
+});
+
+describe("highlights routes registration (A&D §4.9)", () => {
+  const getState = async (routes: Record<string, (q: unknown, s: unknown) => Promise<void>>) => {
+    let body = "";
+    await routes["/gateway/memory/highlights"](
+      { method: "GET", headers: { authorization: "Bearer good" }, url: "/" },
+      { writeHead: () => undefined, end: (b: string) => (body = b) },
+    );
+    return JSON.parse(body) as { state: string };
+  };
+
+  it("both routes are registered; under the approval with DB + pepper they are enabled", async () => {
+    // No network in a unit test: the fallback listing is stubbed on the real client.
+    const list = vi
+      .spyOn(ZepCloudClient.prototype, "listFacts")
+      .mockResolvedValue({ facts: [], nextCursor: null });
+    const { routes } = await register(CLOUD);
+    expect(Object.keys(routes)).toEqual(
+      expect.arrayContaining(["/gateway/memory/highlights", "/gateway/memory/highlights/remove"]),
+    );
+    // Enabled: the stub store has no row, so a first read queues (not not_enabled).
+    expect((await getState(routes)).state).toBe("unavailable");
+    expect(list).toHaveBeenCalledWith(GROUP, { includeInvalid: false });
+  });
+
+  it("without the approval (self-hosted, no DB) the routes answer not_enabled", async () => {
+    const { routes } = await register({
+      backend: "self-hosted",
+      serverUrl: "http://localhost:8000",
+    });
+    expect((await getState(routes)).state).toBe("not_enabled");
+  });
+
+  it("DB + pepper but NO PHI approval: the store exists, the routes still answer not_enabled", async () => {
+    const { routes } = await register({
+      backend: "self-hosted",
+      serverUrl: "http://localhost:8000",
+      groupIdStrategy: "identity",
+      databaseUrl: "postgres://mock/no-approval",
+    });
+    expect((await getState(routes)).state).toBe("not_enabled");
+  });
+
+  it("with memory refused (no pepper) the routes answer not_enabled", async () => {
+    delete process.env.OPENCLAW_MEMORY_GROUP_KEY;
+    const { routes } = await register(CLOUD);
+    expect((await getState(routes)).state).toBe("not_enabled");
   });
 });

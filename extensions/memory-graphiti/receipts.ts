@@ -106,6 +106,16 @@ export interface ReceiptLedger {
   addTombstones(groupId: string, hashes: string[]): Promise<void>;
   /** Delete every receipt AND pending row for a group (the user's forget). Returns receipts removed. */
   deleteGroup(groupId: string): Promise<number>;
+  /**
+   * Entry hashes whose receipts cite any of these store episodes (highlight remove
+   * tombstones them). `untracked` counts episodes with no receipt in the group
+   * (captured before receipts existed): still deleted from the store, never
+   * tombstoned.
+   */
+  entryHashesForEpisodes(
+    groupId: string,
+    episodeIds: string[],
+  ): Promise<{ hashes: string[]; untracked: number }>;
 }
 
 type Sql = {
@@ -287,6 +297,25 @@ export function createPgReceiptLedger(sql: Sql): ReceiptLedger {
         SELECT ${groupId}, h FROM unnest(${hashes}::text[]) AS h
         ON CONFLICT (group_id, entry_hash) DO UPDATE SET created_at = now()`;
     },
+    async entryHashesForEpisodes(groupId, episodeIds) {
+      const wanted = [...new Set(episodeIds)];
+      if (wanted.length === 0) {
+        return { hashes: [], untracked: 0 };
+      }
+      const rows = await sql<{ entry_hash: string; episode_ids: unknown }>`
+        SELECT entry_hash, episode_ids FROM lp_memory_receipts
+        WHERE group_id = ${groupId} AND episode_ids ?| ${wanted}::text[]`;
+      const seen = new Set<string>();
+      for (const r of rows) {
+        for (const e of Array.isArray(r.episode_ids) ? r.episode_ids : []) {
+          seen.add(String(e));
+        }
+      }
+      return {
+        hashes: [...new Set(rows.map((r) => r.entry_hash))],
+        untracked: wanted.filter((e) => !seen.has(e)).length,
+      };
+    },
     async deleteGroup(groupId) {
       await sql`DELETE FROM lp_memory_pending WHERE group_id = ${groupId}`;
       const rows = await sql<{ id: string }>`
@@ -368,6 +397,24 @@ export function createMemoryReceiptLedger(): ReceiptLedger & {
           rows.set(key(r.groupId, h), r);
         }
       }
+    },
+    async entryHashesForEpisodes(groupId, episodeIds) {
+      const wanted = new Set(episodeIds);
+      const hashes = new Set<string>();
+      const seen = new Set<string>();
+      for (const [k, r] of rows) {
+        if (!k.startsWith(`${groupId}\u0000`)) {
+          continue;
+        }
+        const hits = r.episodeIds.filter((e) => wanted.has(e));
+        if (hits.length > 0) {
+          hashes.add(k.slice(groupId.length + 1));
+          for (const e of hits) {
+            seen.add(e);
+          }
+        }
+      }
+      return { hashes: [...hashes], untracked: [...wanted].filter((e) => !seen.has(e)).length };
     },
     async deleteGroup(groupId) {
       for (const k of [...pend.keys()]) {

@@ -253,3 +253,44 @@ describe("GET /gateway/memory/recall — contract", () => {
     expect(read).not.toHaveBeenCalled();
   });
 });
+
+describe("GET /gateway/memory/recall — highlight_id join (PR-2)", () => {
+  it("each item carries the id of the cached highlight that cites its fact, else null", async () => {
+    const { d } = await deps();
+    const index = vi.fn(async (g: string) =>
+      g === groupFor(SUB_A) ? new Map([["e_a2", "hl_espresso"]]) : new Map<string, string>(),
+    );
+    const r = await call(
+      createRecallHandler({ ...d, recall: { ...d.recall!, highlightIndex: index } }),
+      { url: `${RECALL_ROUTE_PATH}?turn=resp_a_2` },
+    );
+    expect(
+      (r.json as { items: Array<{ highlight_id: string | null }> }).items.map(
+        (i) => i.highlight_id,
+      ),
+    ).toEqual([null, "hl_espresso"]);
+    expect(index).toHaveBeenCalledWith(groupFor(SUB_A));
+  });
+
+  it("a highlight index failure never fails the recall route: highlight_id null", async () => {
+    const { d } = await deps();
+    const r = await call(
+      createRecallHandler({
+        ...d,
+        recall: {
+          ...d.recall!,
+          highlightIndex: async () => {
+            throw new Error("db");
+          },
+        },
+      }),
+      { url: `${RECALL_ROUTE_PATH}?turn=resp_a_2` },
+    );
+    expect(r.status).toBe(200);
+    expect(
+      (r.json as { items: Array<{ highlight_id: unknown }> }).items.every(
+        (i) => i.highlight_id === null,
+      ),
+    ).toBe(true);
+  });
+});

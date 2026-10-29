@@ -92,6 +92,40 @@ describeIf("receipt ledger episode_ids (real Postgres)", () => {
     expect(await typeOf(LEGACY)).toEqual([["array", ["ep_old_1", "ep_old_2"]]]);
   });
 
+  it("entryHashesForEpisodes: entry hashes whose receipts cite any episode; untracked counted", async () => {
+    const ledger = createPgReceiptLedger(sql);
+    const G2 = `${A}_ep`;
+    const base = { store: "zep-cloud", contentHash: "c", ingestedAt: new Date().toISOString() };
+    await ledger.record({
+      ...base,
+      groupId: G2,
+      entryHashes: ["h_a1", "h_a2"],
+      episodeIds: ["ep_a"],
+    });
+    await ledger.record({
+      ...base,
+      groupId: G2,
+      entryHashes: ["h_b"],
+      episodeIds: ["ep_b", "ep_c"],
+    });
+    await ledger.record({
+      ...base,
+      groupId: `${G2}_other`,
+      entryHashes: ["h_x"],
+      episodeIds: ["ep_a"],
+    });
+    try {
+      const r = await ledger.entryHashesForEpisodes(G2, ["ep_a", "ep_c", "ep_none"]);
+      expect(r.hashes.toSorted()).toEqual(["h_a1", "h_a2", "h_b"]);
+      expect(r.untracked).toBe(1); // ep_none has no receipt
+      // Another group's receipt for the same episode id is never returned.
+      expect(r.hashes).not.toContain("h_x");
+      expect(await ledger.entryHashesForEpisodes(G2, [])).toEqual({ hashes: [], untracked: 0 });
+    } finally {
+      await sql`DELETE FROM lp_memory_receipts WHERE group_id IN (${G2}, ${`${G2}_other`})`;
+    }
+  });
+
   it("concurrent first boots on an empty schema all succeed (CREATE IF NOT EXISTS races)", async () => {
     const postgres = (await import("postgres")).default;
     const schema = `mg_ddl_race_${run}`; // run-suffixed identifier

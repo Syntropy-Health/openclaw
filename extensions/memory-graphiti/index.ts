@@ -33,6 +33,13 @@ import { createForgetHandler, FORGET_ROUTE_PATH } from "./forget-route.js";
 import { forgetByExternalId, forgetUser, type GroupLock } from "./forget.js";
 import { generateHighlights } from "./highlights/generate.js";
 import { regenerateGroup } from "./highlights/regenerate.js";
+import { removeHighlight } from "./highlights/remove.js";
+import {
+  createHighlightsHandler,
+  createRemoveHighlightHandler,
+  HIGHLIGHTS_ROUTE_PATH,
+  REMOVE_HIGHLIGHT_ROUTE_PATH,
+} from "./highlights/routes.js";
 import { createHighlightRunner } from "./highlights/runner.js";
 import { createHighlightScheduler, type HighlightScheduler } from "./highlights/scheduler.js";
 import { createPgHighlightStore, type HighlightStore } from "./highlights/store.js";
@@ -334,6 +341,7 @@ const memoryPlugin = {
         addPending: async (g, h, ref, store) => (await ready(), pg.addPending(g, h, ref, store)),
         clearPending: async (g, h) => (await ready(), pg.clearPending(g, h)),
         deleteGroup: async (g) => (await ready(), pg.deleteGroup(g)),
+        entryHashesForEpisodes: async (g, e) => (await ready(), pg.entryHashesForEpisodes(g, e)),
       };
     } else {
       api.logger.warn(
@@ -401,6 +409,7 @@ const memoryPlugin = {
         claimOnDemand: async (g, c) => (await ready(), pgHighlights.claimOnDemand(g, c)),
         staleDue: async (o) => (await ready(), pgHighlights.staleDue(o)),
         nightlyDue: async (n) => (await ready(), pgHighlights.nightlyDue(n)),
+        dropCiting: async (g, ids) => (await ready(), pgHighlights.dropCiting(g, ids)),
       };
       highlightStore = store;
       const runner = createHighlightRunner({ cfg: api.config, model: cfg.highlights?.model });
@@ -433,6 +442,10 @@ const memoryPlugin = {
           }),
       });
     }
+
+    // The routes serve highlights only under the PHI approval (A&D §4.9).
+    const highlightsEnabled =
+      approval !== undefined && highlightStore !== null && highlightScheduler !== null;
 
     /**
      * The memory group for a turn: identity-resolved where possible, ALWAYS
@@ -821,6 +834,7 @@ const memoryPlugin = {
                   client,
                   ledger,
                   recall: recallStore ?? undefined,
+                  highlights: highlightStore ?? undefined,
                   opaque,
                   externalId,
                   stateDir: gatewayStateDir(),
@@ -841,8 +855,68 @@ const memoryPlugin = {
         ...clerkRouteAuth,
         recall:
           recallStore && !memoryRefused && cfg.autoRecall
-            ? { store: recallStore, groupFor: (sub) => opaque(sub) }
+            ? {
+                store: recallStore,
+                groupFor: (sub) => opaque(sub),
+                highlightIndex: highlightsEnabled
+                  ? async (g) => {
+                      const row = await highlightStore!.get(g);
+                      const index = new Map<string, string>();
+                      for (const h of row?.payload ?? []) {
+                        for (const src of h.sources) {
+                          if (!index.has(src.fact_id)) {
+                            index.set(src.fact_id, h.id);
+                          }
+                        }
+                      }
+                      return index;
+                    }
+                  : undefined,
+              }
             : null,
+        logger: api.logger,
+      }),
+    });
+
+    // Highlights (A&D §4.9): registered always, so SJ always gets the contract
+    // shape; enabled only under the PHI approval with the identity DB and a pepper.
+    api.registerHttpRoute({
+      path: HIGHLIGHTS_ROUTE_PATH,
+      handler: createHighlightsHandler({
+        ...clerkRouteAuth,
+        highlights: highlightsEnabled
+          ? {
+              groupFor: (sub) => opaque(sub),
+              store: highlightStore!,
+              client,
+              requestNow: (g) => highlightScheduler!.requestNow(g),
+            }
+          : null,
+        logger: api.logger,
+      }),
+    });
+    api.registerHttpRoute({
+      path: REMOVE_HIGHLIGHT_ROUTE_PATH,
+      handler: createRemoveHighlightHandler({
+        ...clerkRouteAuth,
+        remove: highlightsEnabled
+          ? {
+              groupFor: (sub) => opaque(sub),
+              run: (g, id) =>
+                withGroups([g], () =>
+                  removeHighlight(g, id, {
+                    store: highlightStore!,
+                    client,
+                    ledger,
+                    recall: recallStore,
+                    logger: {
+                      info: (m: string) => api.logger.info?.(m),
+                      warn: (m: string) => api.logger.warn(m),
+                    },
+                  }),
+                ),
+            }
+          : null,
         logger: api.logger,
       }),
     });
@@ -886,6 +960,7 @@ const memoryPlugin = {
                 client,
                 ledger,
                 recall: recallStore ?? undefined,
+                highlights: highlightStore ?? undefined,
                 opaque,
                 userId: opts.user,
                 stateDir,

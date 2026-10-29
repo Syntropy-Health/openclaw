@@ -91,6 +91,26 @@ export class FakeHighlightStore implements HighlightStore {
       .map(([g]) => g);
   }
 
+  async dropCiting(groupId: string, factIds: string[]): Promise<number> {
+    const r = this.rows.get(groupId);
+    if (!r || factIds.length === 0) {
+      return 0;
+    }
+    const gone = new Set(factIds);
+    const kept = r.payload.filter((h) => !h.sources.some((s) => gone.has(s.fact_id)));
+    const dropped = r.payload.length - kept.length;
+    if (dropped === 0) {
+      return 0;
+    }
+    r.payload = kept;
+    r.sourceFactIds = [...new Set(kept.flatMap((h) => h.sources.map((s) => s.fact_id)))];
+    if (r.state === "ready" && kept.length === 0) {
+      r.state = "unavailable";
+    }
+    r.staleSince = this.now();
+    return dropped;
+  }
+
   async nightlyDue(limit: number): Promise<string[]> {
     return [...this.rows.entries()]
       .filter(([, r]) => r.staleSince !== null)

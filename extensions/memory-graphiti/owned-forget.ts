@@ -1,4 +1,4 @@
-import type { MemoryFactSurface } from "./client.js";
+import type { MemoryFact, MemoryFactSurface } from "./client.js";
 
 /** Most listFacts pages read while looking for the requested ids (bounded cost). */
 const MAX_PAGES = 100;
@@ -28,13 +28,21 @@ export async function forgetOwnedFacts(
   client: MemoryFactSurface,
   groupId: string,
   factIds: readonly string[],
+  opts: {
+    /**
+     * Runs after the ownership check and before any delete, with the owned facts
+     * (episodes included). If it throws, nothing is deleted. Remove uses it to
+     * tombstone the facts' source entries first.
+     */
+    beforeDelete?: (owned: MemoryFact[]) => Promise<void>;
+  } = {},
 ): Promise<OwnedForgetResult> {
   const wanted = new Set(factIds);
   if (wanted.size === 0) {
     return { deleted: 0, absent: 0, notOwned: 0 };
   }
 
-  const owned: string[] = [];
+  const owned: MemoryFact[] = [];
   let cursor: string | undefined;
   let pages = 0;
   for (;;) {
@@ -43,8 +51,8 @@ export async function forgetOwnedFacts(
     }
     const page = await client.listFacts(groupId, { includeInvalid: true, cursor });
     for (const f of page.facts) {
-      if (wanted.has(f.id) && !owned.includes(f.id)) {
-        owned.push(f.id);
+      if (wanted.has(f.id) && !owned.some((o) => o.id === f.id)) {
+        owned.push(f);
       }
     }
     if (owned.length === wanted.size || !page.nextCursor) {
@@ -57,6 +65,10 @@ export async function forgetOwnedFacts(
   if (owned.length === 0) {
     return { deleted: 0, absent: 0, notOwned };
   }
-  const { deleted, absent } = await client.forgetFacts(groupId, owned);
+  await opts.beforeDelete?.(owned);
+  const { deleted, absent } = await client.forgetFacts(
+    groupId,
+    owned.map((f) => f.id),
+  );
   return { deleted, absent, notOwned };
 }
