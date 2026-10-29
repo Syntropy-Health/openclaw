@@ -51,6 +51,21 @@ describe("highlights.rank config", () => {
     });
   }
 
+  it("model: an anthropic model ref is accepted; absent stays absent", () => {
+    expect(parse({ model: "anthropic/claude-haiku-4-5" }).highlights?.model).toBe(
+      "anthropic/claude-haiku-4-5",
+    );
+    expect(parse({}).highlights?.model).toBeUndefined();
+    expect(validate({ highlights: { model: "anthropic/claude-haiku-4-5" } })).toEqual({ ok: true });
+  });
+
+  for (const model of ["openai/gpt-5", "claude-haiku-4-5", "anthropic/", "", 42]) {
+    it(`model: rejects ${JSON.stringify(model)} in both the parser and the manifest`, () => {
+      expect(() => parse({ model })).toThrow(/highlights\.model/);
+      expect(validate({ highlights: { model } }).ok).toBe(false);
+    });
+  }
+
   it("rejects a non-finite half-life in the parser (JSON cannot carry one)", () => {
     expect(() => parse({ rank: { halfLifeDays: Number.POSITIVE_INFINITY } })).toThrow(/highlights/);
     expect(() => parse({ rank: { wOcc: Number.NaN } })).toThrow(/highlights/);

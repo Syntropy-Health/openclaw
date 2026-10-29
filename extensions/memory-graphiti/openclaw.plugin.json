@@ -61,7 +61,7 @@
     },
     "highlights": {
       "label": "Highlights",
-      "help": "{ rank: { halfLifeDays (default 14), wOcc (0.5), wLink (0.5), wSal (0.25) } }: ranking constants for memory highlights (score = importance x 0.5^(age/halfLifeDays)).",
+      "help": "{ rank: { halfLifeDays (default 14), wOcc (0.5), wLink (0.5), wSal (0.25) } }: ranking constants for memory highlights (score = importance x 0.5^(age/halfLifeDays)); model: \"anthropic/<id>\" for the summariser (anthropic only; absent = the agent's default model, if anthropic).",
       "advanced": true
     },
     "recall": {
@@ -127,11 +127,31 @@
             "type": "object",
             "additionalProperties": false,
             "properties": {
-              "halfLifeDays": { "type": "number", "exclusiveMinimum": 0, "maximum": 3650 },
-              "wOcc": { "type": "number", "minimum": 0, "maximum": 10 },
-              "wLink": { "type": "number", "minimum": 0, "maximum": 10 },
-              "wSal": { "type": "number", "minimum": 0, "maximum": 10 }
+              "halfLifeDays": {
+                "type": "number",
+                "exclusiveMinimum": 0,
+                "maximum": 3650
+              },
+              "wOcc": {
+                "type": "number",
+                "minimum": 0,
+                "maximum": 10
+              },
+              "wLink": {
+                "type": "number",
+                "minimum": 0,
+                "maximum": 10
+              },
+              "wSal": {
+                "type": "number",
+                "minimum": 0,
+                "maximum": 10
+              }
             }
+          },
+          "model": {
+            "type": "string",
+            "pattern": "^anthropic/\\S+$"
           }
         }
       },

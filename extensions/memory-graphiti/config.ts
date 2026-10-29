@@ -78,6 +78,8 @@ export type GraphitiConfig = {
 export type HighlightsConfig = {
   /** Ranking constants (A&D §4.3). */
   rank: RankConfig;
+  /** Summariser model, "anthropic/<id>" (D2: anthropic only). Absent: the agent default, if anthropic. */
+  model?: string;
 };
 
 /** Bounds for `highlights.rank`; the manifest schema carries the same ones. */
@@ -426,12 +428,21 @@ export const graphitiConfigSchema = {
 
     // highlights (optional): ranking constants; absent keys take the R3 defaults.
     const rank: RankConfig = { ...DEFAULT_RANK_CONFIG };
+    let highlightsModel: string | undefined;
     if (cfg.highlights !== undefined) {
       const h = cfg.highlights as Record<string, unknown> | null;
       if (!h || typeof h !== "object" || Array.isArray(h)) {
-        throw new Error("highlights must be an object { rank? }");
+        throw new Error("highlights must be an object { rank?, model? }");
       }
-      assertAllowedKeys(h, ["rank"], "highlights");
+      assertAllowedKeys(h, ["rank", "model"], "highlights");
+      if (h.model !== undefined) {
+        if (typeof h.model !== "string" || !/^anthropic\/\S+$/.test(h.model)) {
+          throw new Error(
+            'highlights.model must be "anthropic/<model id>" (the summariser is pinned to anthropic)',
+          );
+        }
+        highlightsModel = h.model;
+      }
       if (h.rank !== undefined) {
         const r = h.rank as Record<string, unknown> | null;
         if (!r || typeof r !== "object" || Array.isArray(r)) {
@@ -485,7 +496,7 @@ export const graphitiConfigSchema = {
       qaNumbers,
       phiCloudApproval,
       recall,
-      highlights: { rank },
+      highlights: highlightsModel ? { rank, model: highlightsModel } : { rank },
     };
   },
 
