@@ -6,6 +6,7 @@ import {
   type GraphitiConfig,
   type GroupIdContext,
 } from "./config.js";
+import { DEFAULT_RANK_CONFIG } from "./highlights/rank.js";
 import { extractMessages, formatGraphitiFacts, createClient } from "./index.js";
 
 // ============================================================================
@@ -30,6 +31,8 @@ describe("graphitiConfigSchema.parse", () => {
       maxFacts: 10,
       // P3: tripwire QA-number set, defaulted to [] by the parser.
       qaNumbers: [],
+      // Highlights ranking constants, defaulted to the R3 values by the parser.
+      highlights: { rank: DEFAULT_RANK_CONFIG },
     });
   });
 
@@ -48,6 +51,8 @@ describe("graphitiConfigSchema.parse", () => {
       maxFacts: 10,
       // P3: tripwire QA-number set, defaulted to [] by the parser.
       qaNumbers: [],
+      // Highlights ranking constants, defaulted to the R3 values by the parser.
+      highlights: { rank: DEFAULT_RANK_CONFIG },
     });
   });
 

@@ -59,6 +59,11 @@
       "help": "Known-synthetic/QA WhatsApp numbers (E.164).",
       "advanced": true
     },
+    "highlights": {
+      "label": "Highlights",
+      "help": "{ rank: { halfLifeDays (default 14), wOcc (0.5), wLink (0.5), wSal (0.25) } }: ranking constants for memory highlights (score = importance x 0.5^(age/halfLifeDays)).",
+      "advanced": true
+    },
     "recall": {
       "label": "Recall tuning",
       "help": "{ reranker: rrf | mmr | cross_encoder (default rrf), timeoutMs (default 800 ms; past it the turn gets no facts — previously recall waited up to ~60 s on Zep, 5 s on REST), mmrLambda (0..1, default 0.5, mmr only) }.",
@@ -112,6 +117,22 @@
         "type": "array",
         "items": {
           "type": "string"
+        }
+      },
+      "highlights": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "rank": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "halfLifeDays": { "type": "number", "exclusiveMinimum": 0, "maximum": 3650 },
+              "wOcc": { "type": "number", "minimum": 0, "maximum": 10 },
+              "wLink": { "type": "number", "minimum": 0, "maximum": 10 },
+              "wSal": { "type": "number", "minimum": 0, "maximum": 10 }
+            }
+          }
         }
       },
       "recall": {
