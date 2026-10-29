@@ -61,8 +61,8 @@ describe("ZepCloudClient.listFacts", () => {
     const warn = vi.fn();
     const { client, zep } = zepClient({ warn });
     let n = 0;
-    zep.graph.edge.getByUserId.mockImplementation(async (_u: string, req: { limit?: number }) =>
-      Array.from({ length: req.limit ?? 50 }, () => toSdkEdge(factFixture(++n))),
+    zep.graph.edge.getByUserId.mockImplementation(async (_u: string, req?: { limit?: number }) =>
+      Array.from({ length: req?.limit ?? 50 }, () => toSdkEdge(factFixture(++n))),
     );
     const r = await client.listFacts(G);
     expect(r.facts.length).toBe(2000);
@@ -191,5 +191,16 @@ describe("ZepCloudClient.forgetFacts", () => {
     );
     await expect(client.forgetFacts(G, ["e_0001", "e_0002"])).rejects.toThrow("503");
     expect(await client.forgetFacts(G, ["e_0001", "e_0002"])).toEqual({ deleted: 2, absent: 0 });
+  });
+});
+
+describe("ZepCloudClient.capabilities", () => {
+  it("lists, forgets, honours every reranker and reports scores", () => {
+    expect(zepClient().client.capabilities()).toEqual({
+      listFacts: true,
+      forgetFacts: true,
+      rerankers: ["rrf", "mmr", "cross_encoder"],
+      scores: true,
+    });
   });
 });

@@ -5,12 +5,14 @@
  *   - listFacts: id order, cursor = the last id returned;
  *   - searchRanked: token overlap with the query (facts with none are not hits),
  *     then the newest first, then id;
- *   - forgetFacts: deletes within the group only.
+ *   - forgetFacts: deletes within the group only;
+ *   - rerankers: only rrf; any other request is marked server_default.
  * It runs the same contract suite as the real adapters.
  */
 import type {
   ListFactsOptions,
   ListFactsResult,
+  MemoryCapabilities,
   MemoryFact,
   MemoryFactSurface,
   RankedFact,
@@ -24,6 +26,10 @@ const isValid = (f: MemoryFact) => !f.invalidAt && !f.expiredAt;
 export class FakeMemoryClient implements MemoryFactSurface {
   readonly label = "fake-memory";
   private readonly groups = new Map<string, Map<string, MemoryFact>>();
+
+  capabilities(): MemoryCapabilities {
+    return { listFacts: true, forgetFacts: true, rerankers: ["rrf"], scores: true };
+  }
 
   /** Put facts into a group (test setup). */
   seed(groupId: string, facts: MemoryFact[]): void {
@@ -83,10 +89,12 @@ export class FakeMemoryClient implements MemoryFactSurface {
           (a.f.id < b.f.id ? -1 : 1),
       )
       .slice(0, Math.max(0, opts.limit));
+    const fallback = opts.reranker === "rrf" ? {} : { rerankerApplied: "server_default" as const };
     return scored.map(({ f, overlap }, i) => ({
       ...structuredClone(f),
       rank: i + 1,
       score: q.size > 0 ? overlap / q.size : 0,
+      ...fallback,
     }));
   }
 

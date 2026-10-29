@@ -12,6 +12,7 @@ import {
   type GraphitiMessage,
   type ListFactsOptions,
   type ListFactsResult,
+  type MemoryCapabilities,
   type MemoryFact,
   type RankedFact,
   type SearchRankedOptions,
@@ -74,6 +75,15 @@ export class ZepCloudClient implements MemoryClient {
     this.zep = new ZepClient({ apiKey });
     this.label = "zep-cloud";
     this.logger = opts.logger;
+  }
+
+  capabilities(): MemoryCapabilities {
+    return {
+      listFacts: true,
+      forgetFacts: true,
+      rerankers: ["rrf", "mmr", "cross_encoder"],
+      scores: true,
+    };
   }
 
   /**
