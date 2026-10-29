@@ -169,12 +169,13 @@ describe("GET /gateway/memory/highlights", () => {
   });
 
   it("ready: the cached highlights as stored, with generated_at and stale", async () => {
-    const { handler, store } = getSetup();
-    await store.claimOnDemand("ok_user_A", 3);
+    const { handler, store, requestNow } = getSetup();
+    await store.claimOnDemand("ok_user_A", 3, { create: true });
     await store.put(
       "ok_user_A",
       { state: "ready", payload: [hl("1"), hl("2")] },
       await store.clock(),
+      (await store.get("ok_user_A"))!.epoch,
     );
     const x = await get(handler);
     expect(x.json()).toMatchObject({
@@ -187,23 +188,35 @@ describe("GET /gateway/memory/highlights", () => {
     expect(typeof x.json().generated_at).toBe("string");
     await store.markStale("ok_user_A");
     expect((await get(handler)).json().stale).toBe(true);
+    expect(requestNow).not.toHaveBeenCalled(); // a ready read spends no slot
   });
 
   it("empty: zero facts", async () => {
-    const { handler, store } = getSetup();
-    await store.claimOnDemand("ok_user_A", 3);
-    await store.put("ok_user_A", { state: "empty", payload: [] }, await store.clock());
+    const { handler, store, requestNow } = getSetup();
+    await store.claimOnDemand("ok_user_A", 3, { create: true });
+    await store.put(
+      "ok_user_A",
+      { state: "empty", payload: [] },
+      await store.clock(),
+      (await store.get("ok_user_A"))!.epoch,
+    );
     expect((await get(handler)).json()).toMatchObject({
       state: "empty",
       highlights: [],
       fallback_facts: null,
     });
+    expect(requestNow).not.toHaveBeenCalled();
   });
 
   it("a failed generation with the day's cap used: summariser_error, fallback, not stale", async () => {
     const { handler, store, requestNow } = getSetup();
-    await store.claimOnDemand("ok_user_A", 3);
-    await store.put("ok_user_A", { state: "unavailable", payload: [] }, await store.clock());
+    await store.claimOnDemand("ok_user_A", 3, { create: true });
+    await store.put(
+      "ok_user_A",
+      { state: "unavailable", payload: [] },
+      await store.clock(),
+      (await store.get("ok_user_A"))!.epoch,
+    );
     requestNow.mockResolvedValue(false);
     expect((await get(handler)).json()).toMatchObject({
       state: "unavailable",
@@ -252,8 +265,13 @@ describe("GET /gateway/memory/highlights", () => {
 
   it("users never cross: B sees only B's group", async () => {
     const { handler, store, listFacts } = getSetup();
-    await store.claimOnDemand("ok_user_A", 3);
-    await store.put("ok_user_A", { state: "ready", payload: [hl("a")] }, await store.clock());
+    await store.claimOnDemand("ok_user_A", 3, { create: true });
+    await store.put(
+      "ok_user_A",
+      { state: "ready", payload: [hl("a")] },
+      await store.clock(),
+      (await store.get("ok_user_A"))!.epoch,
+    );
     const b = await get(handler, B);
     expect(b.json().state).toBe("unavailable");
     expect((b.json().fallback_facts as Array<{ fact_id: string }>).map((f) => f.fact_id)).toEqual([
@@ -405,5 +423,45 @@ describe("POST /gateway/memory/highlights/remove", () => {
       retryable: true,
       reasons: ["store_error"],
     });
+  });
+});
+
+describe("GET fallback cache and request failures (QG)", () => {
+  it("repeat reads within 30 s reuse the fallback: one listFacts per group", async () => {
+    const { handler, listFacts } = getSetup();
+    await get(handler);
+    await get(handler);
+    await get(handler);
+    expect(listFacts).toHaveBeenCalledTimes(1);
+  });
+
+  it("a failure to record the request is store_error (never an unexplained unavailable)", async () => {
+    const { handler, requestNow } = getSetup();
+    requestNow.mockRejectedValueOnce(new Error("db"));
+    expect((await get(handler)).json()).toMatchObject({
+      state: "unavailable",
+      reason: "store_error",
+      stale: false,
+    });
+  });
+});
+
+describe("remove route hardening (QG)", () => {
+  it("a declared Content-Length over the cap is refused before reading", async () => {
+    const { handler, run } = removeSetup();
+    const x = res();
+    await handler(req("POST", { ...A, "content-length": "99999" }, "{}"), x.r);
+    expect(x.out.status).toBe(413);
+    expect(run).not.toHaveBeenCalled();
+  });
+
+  it("disabled gateway: misconfigured whatever the body (no parse)", async () => {
+    const { handler } = removeSetup({ remove: null });
+    for (const body of [{ highlight_id: ID }, { highlight_id: "junk" }, "not json"]) {
+      expect((await post(handler, body)).json()).toMatchObject({
+        status: "FAILED",
+        reasons: ["misconfigured"],
+      });
+    }
   });
 });

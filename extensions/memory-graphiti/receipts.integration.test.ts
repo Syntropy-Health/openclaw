@@ -92,6 +92,11 @@ describeIf("receipt ledger episode_ids (real Postgres)", () => {
     expect(await typeOf(LEGACY)).toEqual([["array", ["ep_old_1", "ep_old_2"]]]);
   });
 
+  it("a migrated legacy row is found by the tombstone lookup (P2.9a feeds remove)", async () => {
+    const r = await createPgReceiptLedger(sql).entryHashesForEpisodes(LEGACY, ["ep_old_1"]);
+    expect(r).toEqual({ hashes: ["h_old"], untracked: 0 });
+  });
+
   it("entryHashesForEpisodes: entry hashes whose receipts cite any episode; untracked counted", async () => {
     const ledger = createPgReceiptLedger(sql);
     const G2 = `${A}_ep`;

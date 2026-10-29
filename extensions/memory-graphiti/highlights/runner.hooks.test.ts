@@ -27,26 +27,28 @@ vi.mock("@mariozechner/pi-ai", async (importOriginal) => ({
   completeSimple,
 }));
 
-const HOOK_NAMES: PluginHookName[] = [
-  "before_agent_start",
-  "llm_input",
-  "llm_output",
-  "agent_end",
-  "before_compaction",
-  "after_compaction",
-  "before_reset",
-  "message_received",
-  "message_sending",
-  "message_sent",
-  "before_tool_call",
-  "after_tool_call",
-  "tool_result_persist",
-  "before_message_write",
-  "session_start",
-  "session_end",
-  "gateway_start",
-  "gateway_stop",
-];
+const HOOK_NAME_SET = {
+  before_agent_start: true,
+  llm_input: true,
+  llm_output: true,
+  agent_end: true,
+  before_compaction: true,
+  after_compaction: true,
+  before_reset: true,
+  message_received: true,
+  message_sending: true,
+  message_sent: true,
+  before_tool_call: true,
+  after_tool_call: true,
+  tool_result_persist: true,
+  before_message_write: true,
+  session_start: true,
+  session_end: true,
+  gateway_start: true,
+  gateway_stop: true,
+} satisfies Record<PluginHookName, true>;
+/** Every hook name, kept exhaustive by the type above: a new hook fails to compile here. */
+const HOOK_NAMES = Object.keys(HOOK_NAME_SET) as PluginHookName[];
 
 describe("summariser runner fires no plugin hook", () => {
   const hookCalls: string[] = [];

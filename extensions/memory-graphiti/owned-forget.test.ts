@@ -231,7 +231,7 @@ function filesCallingForgetFacts(root: string): string[] {
   const hits: string[] = [];
   const walk = (dir: string) => {
     for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
-      if (entry.name === "node_modules" || entry.name === "testing") {
+      if (entry.name === "node_modules") {
         continue;
       }
       const full = path.join(dir, entry.name);
@@ -239,8 +239,8 @@ function filesCallingForgetFacts(root: string): string[] {
         walk(full);
       } else if (
         /\.(c|m)?(t|j)sx?$/.test(entry.name) &&
-        !/\.test\.|\.contract\./.test(entry.name) &&
-        /\.forgetFacts\s*\(/.test(fs.readFileSync(full, "utf8"))
+        !/\.test\.|\.contract\.|^fake-|-fake\./.test(entry.name) &&
+        /\bforgetFacts\b/.test(fs.readFileSync(full, "utf8"))
       ) {
         hits.push(toPosixPath(path.relative(root, full)));
       }
@@ -253,6 +253,12 @@ function filesCallingForgetFacts(root: string): string[] {
 describe("P2.9b guard: forgetFacts is called only through forgetOwnedFacts", () => {
   it("no other plugin module calls .forgetFacts( directly", () => {
     const root = path.dirname(fileURLToPath(import.meta.url));
-    expect(filesCallingForgetFacts(root)).toEqual(["owned-forget.ts"]);
+    // Any mention of the identifier (call, bracket access, destructuring) outside
+    // the interface, the backend definitions and the one sanctioned caller.
+    expect(filesCallingForgetFacts(root)).toEqual([
+      "client.ts",
+      "owned-forget.ts",
+      "zep-cloud-client.ts",
+    ]);
   });
 });

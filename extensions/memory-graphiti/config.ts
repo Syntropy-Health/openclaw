@@ -1,4 +1,5 @@
 import { normalizeE164 } from "openclaw/plugin-sdk";
+import { DEFAULT_RANK_CONFIG, type RankConfig } from "./highlights/rank.js";
 import { isCanonicalE164 } from "./tripwire.js";
 
 export type GroupIdStrategy = "channel-sender" | "session" | "static" | "identity";
@@ -8,8 +9,6 @@ export type GroupIdStrategy = "channel-sender" | "session" | "static" | "identit
  * Legacy derived field, kept for backward-compat with readers of `cfg.mode`
  * (createClient's fallback path). Prefer `backend` for new code.
  */
-import { DEFAULT_RANK_CONFIG, type RankConfig } from "./highlights/rank.js";
-
 export type BackendMode = "cloud" | "self-hosted";
 
 /**

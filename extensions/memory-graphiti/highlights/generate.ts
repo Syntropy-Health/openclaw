@@ -19,6 +19,10 @@ export const FACT_TEXT_MAX = 300;
 /** Most raw facts in the unavailable fallback (PVR F3). */
 export const FALLBACK_FACTS_MAX = 20;
 export const TITLE_MAX = 80;
+/** One sentence: the served body is bounded and plain text. */
+export const BODY_MAX = 240;
+/** Markup never reaches the served payload, whatever the consumer does with it. */
+const MARKUP = /[<>]|\]\(/;
 export const SUMMARISER_TIMEOUT_MS = 30_000;
 /** D2: the summariser is pinned to this provider. */
 export const SUMMARISER_PROVIDER = "anthropic";
@@ -268,6 +272,9 @@ export async function generateHighlights(
       e.title.length === 0 ||
       e.title.length > TITLE_MAX ||
       !isOneSentence(e.body) ||
+      e.body.length > BODY_MAX ||
+      MARKUP.test(e.title) ||
+      MARKUP.test(e.body) ||
       (e.goal_linked && e.goal_ref === undefined)
     ) {
       dropped.shape++;

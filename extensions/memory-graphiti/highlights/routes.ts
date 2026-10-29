@@ -24,6 +24,9 @@ export const HIGHLIGHTS_CONTRACT = "memory-highlights/1";
 /** A remove request is a few dozen bytes; anything past this is refused unread. */
 const MAX_BODY_BYTES = 4096;
 const HIGHLIGHT_ID = /^hl_[0-9a-f]{24}$/;
+/** The raw-fact fallback is reused for this long per group (bounds listFacts per user). */
+export const FALLBACK_CACHE_MS = 30_000;
+const FALLBACK_CACHE_MAX = 1_000;
 
 type Reason = "backend_unsupported" | "store_error" | "summariser_error";
 
@@ -36,6 +39,7 @@ export type HighlightsRouteDeps = ClerkRouteAuthDeps & {
     /** Take an on-demand slot and start a generation; false when today's cap is used. */
     requestNow: (groupId: string) => Promise<boolean>;
   } | null;
+  now?: () => number;
 };
 
 const view = (o: {
@@ -59,6 +63,27 @@ const view = (o: {
 });
 
 export function createHighlightsHandler(deps: HighlightsRouteDeps) {
+  const now = deps.now ?? Date.now;
+  // Per-group fallback cache: a user refreshing an unavailable view must not turn
+  // each GET into another full fact listing at the backend.
+  const fallbackCache = new Map<string, { at: number; facts: HighlightSource[] }>();
+  const cachedFallback = (group: string): HighlightSource[] | undefined => {
+    const hit = fallbackCache.get(group);
+    if (hit && now() - hit.at < FALLBACK_CACHE_MS) {
+      return hit.facts;
+    }
+    fallbackCache.delete(group);
+    return undefined;
+  };
+  const rememberFallback = (group: string, facts: HighlightSource[]) => {
+    if (fallbackCache.size >= FALLBACK_CACHE_MAX) {
+      const oldest = fallbackCache.keys().next().value;
+      if (oldest !== undefined) {
+        fallbackCache.delete(oldest);
+      }
+    }
+    fallbackCache.set(group, { at: now(), facts });
+  };
   return async (req: IncomingMessage, res: ServerResponse): Promise<void> => {
     if ((req.method ?? "").toUpperCase() !== "GET") {
       sendJson(res, 405, { error: "method not allowed" });
@@ -112,30 +137,38 @@ export function createHighlightsHandler(deps: HighlightsRouteDeps) {
 
     // No row yet, or the last generation failed: serve the raw recent facts (F3)
     // and queue a generation, unless the backend cannot list facts at all.
-    let fallback: HighlightSource[] | null = null;
-    try {
-      fallback = recentFacts((await h.client.listFacts(group, { includeInvalid: false })).facts);
-    } catch (err) {
-      if (err instanceof MemoryCapabilityError) {
-        answer("unavailable", view({ state: "unavailable", reason: "backend_unsupported" }));
-        return;
+    let fallback: HighlightSource[] | null = cachedFallback(group) ?? null;
+    if (!fallback) {
+      try {
+        fallback = recentFacts((await h.client.listFacts(group, { includeInvalid: false })).facts);
+        rememberFallback(group, fallback);
+      } catch (err) {
+        if (err instanceof MemoryCapabilityError) {
+          answer("unavailable", view({ state: "unavailable", reason: "backend_unsupported" }));
+          return;
+        }
+        fallback = null;
       }
-      fallback = null;
     }
-    let queued = false;
+    let queued: boolean;
     try {
       queued = await h.requestNow(group);
     } catch {
-      queued = false;
+      // Could not even record the request: a store failure, said as such.
+      answer("unavailable", view({ state: "unavailable", reason: "store_error", fallback }));
+      return;
     }
+    // Pending = a generation was just queued, or one is already marked (a claim
+    // marks the row stale, so this holds across instances).
     const pending = queued || (row?.staleSince ?? null) !== null;
     answer(
       "unavailable",
       view({
         state: "unavailable",
         stale: pending,
-        // A first read (no row) or a retry now under way has no failure to report yet.
-        reason: !row || pending ? null : "summariser_error",
+        // unavailable + reason null + stale:true means "generation pending" (A&D §1a).
+        // Not pending and no slot left: the last generation failed.
+        reason: pending ? null : "summariser_error",
         fallback,
       }),
     );
@@ -169,6 +202,10 @@ const failed = (reason: RemoveResult["reasons"][number], retryable: boolean) =>
 
 /** The request body, or "too_large" once it passes MAX_BODY_BYTES (reading stops). */
 function readBody(req: IncomingMessage): Promise<string | "too_large"> {
+  const declared = Number(req.headers["content-length"]);
+  if (Number.isFinite(declared) && declared > MAX_BODY_BYTES) {
+    return Promise.resolve("too_large");
+  }
   return new Promise((resolve, reject) => {
     const chunks: Buffer[] = [];
     let size = 0;
@@ -181,6 +218,8 @@ function readBody(req: IncomingMessage): Promise<string | "too_large"> {
       if (size > MAX_BODY_BYTES) {
         done = true;
         resolve("too_large");
+        // Stop the upload, not just the buffering.
+        req.destroy?.();
         return;
       }
       chunks.push(c);
@@ -223,6 +262,13 @@ export function createRemoveHighlightHandler(deps: RemoveRouteDeps) {
     if (sub === null) {
       return;
     }
+    if (!deps.remove) {
+      // Same answer whatever the body: a disabled gateway never parses it.
+      deps.logger?.error?.("memory-highlights-remove: FAILED reason=misconfigured (not enabled)");
+      sendJson(res, 200, failed("misconfigured", false));
+      return;
+    }
+    const remove = deps.remove;
     let raw: string | "too_large";
     try {
       raw = await readBody(req);
@@ -258,15 +304,10 @@ export function createRemoveHighlightHandler(deps: RemoveRouteDeps) {
       sendJson(res, 200, failed("rate_limited", true));
       return;
     }
-    if (!deps.remove) {
-      deps.logger?.error?.("memory-highlights-remove: FAILED reason=misconfigured (not enabled)");
-      sendJson(res, 200, failed("misconfigured", false));
-      return;
-    }
     running.add(sub);
     let r: RemoveResult;
     try {
-      r = await deps.remove.run(deps.remove.groupFor(sub), id);
+      r = await remove.run(remove.groupFor(sub), id);
     } catch {
       r = { status: "FAILED", retryable: true, reasons: ["store_error"], removed_facts: 0 };
     } finally {

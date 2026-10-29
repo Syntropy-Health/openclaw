@@ -50,14 +50,16 @@ vi.mock("./capture.js", async (importOriginal) => {
   return { ...actual, captureWithReceipts: vi.fn(() => capture.next!()) };
 });
 
-const store = vi.hoisted(() => ({ markStale: [] as string[] }));
+const store = vi.hoisted(() => ({ markStale: [] as string[], row: null as unknown }));
 vi.mock("./highlights/store.js", async (importOriginal) => {
   const actual = await importOriginal<typeof import("./highlights/store.js")>();
   return {
     ...actual,
     createPgHighlightStore: () => ({
       clock: async () => new Date(),
-      get: async () => null,
+      get: async () => store.row,
+      acquireLease: async () => true,
+      releaseLease: async () => undefined,
       put: async () => false,
       markStale: async (g: string) => {
         store.markStale.push(g);
@@ -71,13 +73,26 @@ vi.mock("./highlights/store.js", async (importOriginal) => {
   };
 });
 
-const sched = vi.hoisted(() => ({ created: 0, started: 0, stopped: 0 }));
+const gen = vi.hoisted(() => ({ calls: [] as Array<Record<string, unknown>> }));
+vi.mock("./highlights/generate.js", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("./highlights/generate.js")>();
+  return {
+    ...actual,
+    generateHighlights: vi.fn(async (_facts: unknown, o: Record<string, unknown>) => {
+      gen.calls.push(o);
+      return { state: "empty", highlights: [], dropped: {} };
+    }),
+  };
+});
+
+const sched = vi.hoisted(() => ({ created: 0, started: 0, stopped: 0, opts: null as unknown }));
 vi.mock("./highlights/scheduler.js", async (importOriginal) => {
   const actual = await importOriginal<typeof import("./highlights/scheduler.js")>();
   return {
     ...actual,
-    createHighlightScheduler: () => {
+    createHighlightScheduler: (o: unknown) => {
       sched.created++;
+      sched.opts = o;
       return {
         start: () => {
           sched.started++;
@@ -184,7 +199,7 @@ beforeEach(() => {
   process.env.OPENCLAW_MEMORY_GROUP_KEY = PEPPER;
   store.markStale.length = 0;
   order.length = 0;
-  Object.assign(sched, { created: 0, started: 0, stopped: 0 });
+  Object.assign(sched, { created: 0, started: 0, stopped: 0, opts: null });
 });
 afterEach(() => {
   delete process.env.OPENCLAW_MEMORY_GROUP_KEY;
@@ -299,11 +314,51 @@ describe("highlights routes registration (A&D §4.9)", () => {
       databaseUrl: "postgres://mock/no-approval",
     });
     expect((await getState(routes)).state).toBe("not_enabled");
+    // And no worker: no group's facts go to the summariser without the approval.
+    expect(sched.created).toBe(0);
+  });
+
+  it("no approval: a confirmed capture never marks highlights stale", async () => {
+    capture.next = async () => result({ confirmed: 3, sent: 3 });
+    const { hooks } = await register({
+      backend: "self-hosted",
+      serverUrl: "http://localhost:8000",
+      groupIdStrategy: "identity",
+      databaseUrl: "postgres://mock/no-approval-2",
+    });
+    await hooks.agent_end(END_EVENT, TURN);
+    await flush();
+    expect(store.markStale).toEqual([]);
   });
 
   it("with memory refused (no pepper) the routes answer not_enabled", async () => {
     delete process.env.OPENCLAW_MEMORY_GROUP_KEY;
     const { routes } = await register(CLOUD);
     expect((await getState(routes)).state).toBe("not_enabled");
+  });
+});
+
+describe("configured rank constants reach generation (QG)", () => {
+  it("highlights.rank from plugin config is passed to generateHighlights", async () => {
+    gen.calls.length = 0;
+    vi.spyOn(ZepCloudClient.prototype, "listFacts").mockResolvedValue({
+      facts: [],
+      nextCursor: null,
+    });
+    await register({ ...CLOUD, highlights: { rank: { halfLifeDays: 30 } } });
+    const opts = sched.opts as { regenerate: (g: string) => Promise<unknown> };
+    // The mocked store answers get() with null, so drive the real regenerate deps directly:
+    // a row must exist for generation to run.
+    store.row = {
+      state: "unavailable",
+      payload: [],
+      generatedAt: new Date(),
+      staleSince: null,
+      sourceFactIds: [],
+      epoch: "1",
+    };
+    await opts.regenerate(GROUP);
+    store.row = null;
+    expect(gen.calls.at(-1)?.rank).toMatchObject({ halfLifeDays: 30, wOcc: 0.5 });
   });
 });

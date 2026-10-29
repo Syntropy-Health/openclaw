@@ -1,4 +1,4 @@
-import type { Highlight, HighlightCacheState } from "./types.js";
+import type { Highlight, HighlightCacheState, HighlightSource } from "./types.js";
 
 type Sql = <T = Record<string, unknown>>(
   strings: TemplateStringsArray,
@@ -11,6 +11,13 @@ export type HighlightRow = {
   generatedAt: Date;
   staleSince: Date | null;
   sourceFactIds: string[];
+  /**
+   * Row version, from a database sequence: new on every insert and bumped by every
+   * content change other than a generation (dropCiting). A regeneration writes
+   * only if the epoch it read is still current, so a remove or forget-and-recreate
+   * on ANY instance during the run wins (the group lock is per process).
+   */
+  epoch: string;
 };
 
 export type HighlightWrite = {
@@ -24,23 +31,35 @@ export interface HighlightStore {
   clock(): Promise<Date>;
   get(groupId: string): Promise<HighlightRow | null>;
   /**
-   * Store a generation result into the group's EXISTING row; returns whether one
-   * was updated. It never creates a row (claimOnDemand does), so a forget that
-   * deleted the row first stays total, on any instance. `startedAt` is
+   * Store a generation result into the group's EXISTING row, only while its epoch
+   * is still `epoch` (read with the row when the run began); returns whether it
+   * wrote. It never creates a row (only a first read's claim does), so a forget
+   * stays total and a remove is never undone, on any instance. Clears the
+   * regeneration lease. `startedAt` is
    * store.clock() read when the run began: a stale mark made after it survives
    * (that turn is not reflected yet); an older mark is cleared.
    */
-  put(groupId: string, result: HighlightWrite, startedAt: Date): Promise<boolean>;
+  put(groupId: string, result: HighlightWrite, startedAt: Date, epoch: string): Promise<boolean>;
   /** Mark an existing row stale (now). A group with no row is left alone. */
   markStale(groupId: string): Promise<void>;
   /** Delete the group's row (forget). Returns rows removed. */
   deleteGroup(groupId: string): Promise<number>;
   /**
-   * Take one of today's (UTC, database clock) on-demand generation slots. A group
-   * with no row gets an `unavailable` placeholder holding slot 1. False when the
-   * cap is reached; atomic under concurrency.
+   * Take one of today's (UTC, database clock) on-demand generation slots and mark
+   * the row stale (a generation is pending, visible on every instance). With
+   * `create`, a group with no row gets an `unavailable` placeholder holding slot 1
+   * (a user's first read ONLY); without it, a missing row stays missing, so the
+   * worker can never re-create a row a forget deleted. False when the cap is
+   * reached or (without create) there is no row; atomic under concurrency.
    */
-  claimOnDemand(groupId: string, cap: number): Promise<boolean>;
+  claimOnDemand(groupId: string, cap: number, opts?: { create?: boolean }): Promise<boolean>;
+  /**
+   * Take the group's regeneration lease for `seconds` (database clock), so two
+   * instances never regenerate one group at once. False while another holds it.
+   */
+  acquireLease(groupId: string, seconds: number): Promise<boolean>;
+  /** Release the lease (also released by a successful put). */
+  releaseLease(groupId: string): Promise<void>;
   /** Groups stale for at least `debounceSec` and still under today's cap. */
   staleDue(opts: { debounceSec: number; cap: number; limit: number }): Promise<string[]>;
   /** Every stale group, whatever its on-demand count (the nightly run). */
@@ -60,7 +79,38 @@ type Row = {
   generated_at: Date | string;
   stale_since: Date | string | null;
   source_fact_ids: string[];
+  epoch: string | number | bigint;
 };
+
+const str = (v: unknown): string => (typeof v === "string" ? v : String(v ?? ""));
+
+/**
+ * Rebuild highlights in the contract's key order (A&D §1a): jsonb stores object
+ * keys in its own order, and key order is part of the contract (as for recall).
+ */
+export function canonicalHighlights(raw: unknown): Highlight[] {
+  if (!Array.isArray(raw)) {
+    return [];
+  }
+  return raw.map((x: Record<string, unknown>) => ({
+    id: str(x.id),
+    category: str(x.category) as Highlight["category"],
+    title: str(x.title),
+    body: str(x.body),
+    first_seen: str(x.first_seen),
+    last_seen: str(x.last_seen),
+    occurrences: Number(x.occurrences),
+    recurring: x.recurring === true,
+    score: Number(x.score),
+    sources: (Array.isArray(x.sources) ? x.sources : []).map(
+      (y: Record<string, unknown>): HighlightSource => ({
+        fact_id: str(y.fact_id),
+        fact: str(y.fact),
+        last_seen: str(y.last_seen),
+      }),
+    ),
+  }));
+}
 
 const toDate = (v: Date | string): Date => (v instanceof Date ? v : new Date(v));
 
@@ -73,7 +123,7 @@ export function createPgHighlightStore(sql: Sql): HighlightStore {
 
     async get(groupId) {
       const rows = await sql<Row>`
-        SELECT state, payload, generated_at, stale_since, source_fact_ids
+        SELECT state, payload, generated_at, stale_since, source_fact_ids, epoch::text AS epoch
         FROM lp_memory_highlights WHERE group_id = ${groupId}`;
       const r = rows[0];
       if (!r) {
@@ -81,14 +131,15 @@ export function createPgHighlightStore(sql: Sql): HighlightStore {
       }
       return {
         state: r.state as HighlightCacheState,
-        payload: r.payload as Highlight[],
+        payload: canonicalHighlights(r.payload),
         generatedAt: toDate(r.generated_at),
         staleSince: r.stale_since === null ? null : toDate(r.stale_since),
         sourceFactIds: r.source_fact_ids,
+        epoch: str(r.epoch),
       };
     },
 
-    async put(groupId, result, startedAt) {
+    async put(groupId, result, startedAt, epoch) {
       const ids = [...new Set(result.payload.flatMap((h) => h.sources.map((src) => src.fact_id)))];
       // Payload sent as TEXT for Postgres to parse: a bare `${string}::jsonb`
       // would be JSON-encoded again by the driver and stored as a JSON string.
@@ -99,8 +150,9 @@ export function createPgHighlightStore(sql: Sql): HighlightStore {
           state = ${result.state},
           generated_at = now(),
           source_fact_ids = ${ids}::text[],
-          stale_since = CASE WHEN stale_since > ${startedAt} THEN stale_since ELSE NULL END
-        WHERE group_id = ${groupId}
+          stale_since = CASE WHEN stale_since > ${startedAt} THEN stale_since ELSE NULL END,
+          regen_lease_until = NULL
+        WHERE group_id = ${groupId} AND epoch = ${epoch}::bigint
         RETURNING group_id`;
       return rows.length === 1;
     },
@@ -109,23 +161,53 @@ export function createPgHighlightStore(sql: Sql): HighlightStore {
       await sql`UPDATE lp_memory_highlights SET stale_since = now() WHERE group_id = ${groupId}`;
     },
 
-    async claimOnDemand(groupId, cap) {
+    async claimOnDemand(groupId, cap, opts = {}) {
+      if (!opts.create) {
+        const rows = await sql<{ n: number }>`
+          UPDATE lp_memory_highlights SET
+            ondemand_count = CASE
+              WHEN ondemand_day = (now() AT TIME ZONE 'utc')::date THEN ondemand_count + 1
+              ELSE 1
+            END,
+            ondemand_day = (now() AT TIME ZONE 'utc')::date,
+            stale_since = now()
+          WHERE group_id = ${groupId}
+            AND (ondemand_day IS DISTINCT FROM (now() AT TIME ZONE 'utc')::date
+                 OR ondemand_count < ${cap})
+          RETURNING ondemand_count AS n`;
+        return rows.length === 1;
+      }
       const rows = await sql<{ n: number }>`
         INSERT INTO lp_memory_highlights
-          (group_id, payload, state, generated_at, source_fact_ids, ondemand_day, ondemand_count)
+          (group_id, payload, state, generated_at, source_fact_ids, ondemand_day, ondemand_count,
+           stale_since)
         VALUES (${groupId}, '[]'::jsonb, 'unavailable', now(), '{}'::text[],
-                (now() AT TIME ZONE 'utc')::date, 1)
+                (now() AT TIME ZONE 'utc')::date, 1, now())
         ON CONFLICT (group_id) DO UPDATE SET
           ondemand_count = CASE
             WHEN lp_memory_highlights.ondemand_day = (now() AT TIME ZONE 'utc')::date
             THEN lp_memory_highlights.ondemand_count + 1
             ELSE 1
           END,
-          ondemand_day = (now() AT TIME ZONE 'utc')::date
+          ondemand_day = (now() AT TIME ZONE 'utc')::date,
+          stale_since = now()
         WHERE lp_memory_highlights.ondemand_day IS DISTINCT FROM (now() AT TIME ZONE 'utc')::date
            OR lp_memory_highlights.ondemand_count < ${cap}
         RETURNING ondemand_count AS n`;
       return rows.length === 1;
+    },
+
+    async acquireLease(groupId, seconds) {
+      const rows = await sql<{ group_id: string }>`
+        UPDATE lp_memory_highlights SET regen_lease_until = now() + make_interval(secs => ${seconds})
+        WHERE group_id = ${groupId}
+          AND (regen_lease_until IS NULL OR regen_lease_until < now())
+        RETURNING group_id`;
+      return rows.length === 1;
+    },
+
+    async releaseLease(groupId) {
+      await sql`UPDATE lp_memory_highlights SET regen_lease_until = NULL WHERE group_id = ${groupId}`;
     },
 
     async staleDue({ debounceSec, cap, limit }) {
@@ -169,7 +251,8 @@ export function createPgHighlightStore(sql: Sql): HighlightStore {
             FROM jsonb_array_elements(kept.p) e, jsonb_array_elements(e -> 'sources') src
           ),
           state = CASE WHEN h.state = 'ready' AND kept.n = 0 THEN 'unavailable' ELSE h.state END,
-          stale_since = now()
+          stale_since = now(),
+          epoch = nextval('lp_memory_highlights_epoch')
         FROM kept, total
         WHERE h.group_id = ${groupId} AND kept.n < total.n
         RETURNING (total.n - kept.n) AS dropped`;
@@ -182,4 +265,20 @@ export function createPgHighlightStore(sql: Sql): HighlightStore {
       return rows.length;
     },
   };
+}
+
+/**
+ * fact_id → the id of the first cached highlight (in served order) that cites it.
+ * Joins recall items to highlights (A&D §4.6).
+ */
+export function highlightIdByFact(payload: readonly Highlight[]): Map<string, string> {
+  const index = new Map<string, string>();
+  for (const h of payload) {
+    for (const src of h.sources) {
+      if (!index.has(src.fact_id)) {
+        index.set(src.fact_id, h.id);
+      }
+    }
+  }
+  return index;
 }

@@ -57,6 +57,11 @@ describeIf("highlight store (real Postgres)", () => {
     }
   });
 
+  const epochOf = async (g: string) => (await store.get(g))?.epoch ?? "0";
+  /** put as a run that starts now with the row's current epoch would. */
+  const putNow = async (g: string, w: Parameters<HighlightStore["put"]>[1]) =>
+    store.put(g, w, await store.clock(), await epochOf(g));
+
   it("the table has the A&D §5 columns", async () => {
     const cols = await sql<{ column_name: string; data_type: string }>`
       SELECT column_name, data_type FROM information_schema.columns
@@ -64,9 +69,11 @@ describeIf("highlight store (real Postgres)", () => {
     expect(Object.fromEntries(cols.map((c) => [c.column_name, c.data_type]))).toEqual({
       generated_at: "timestamp with time zone",
       group_id: "text",
+      epoch: "bigint",
       ondemand_count: "integer",
       ondemand_day: "date",
       payload: "jsonb",
+      regen_lease_until: "timestamp with time zone",
       source_fact_ids: "ARRAY",
       stale_since: "timestamp with time zone",
       state: "text",
@@ -75,16 +82,14 @@ describeIf("highlight store (real Postgres)", () => {
 
   it("put on a group with no row writes nothing (a forget that ran first stays total)", async () => {
     expect(await store.get(A)).toBeNull();
-    expect(
-      await store.put(A, { state: "ready", payload: [hl("hl_x", ["e_x"])] }, await store.clock()),
-    ).toBe(false);
+    expect(await putNow(A, { state: "ready", payload: [hl("hl_x", ["e_x"])] })).toBe(false);
     expect(await store.get(A)).toBeNull();
   });
 
   it("put then get round-trips the payload exactly", async () => {
-    expect(await store.claimOnDemand(A, 3)).toBe(true);
+    expect(await store.claimOnDemand(A, 3, { create: true })).toBe(true);
     const payload = [hl("hl_1", ["e_1", "e_2"]), hl("hl_2", ["e_2", "e_3"])];
-    expect(await store.put(A, { state: "ready", payload }, await store.clock())).toBe(true);
+    expect(await putNow(A, { state: "ready", payload })).toBe(true);
     const row = await store.get(A);
     expect(row).toMatchObject({ state: "ready", payload, staleSince: null });
     expect(row?.sourceFactIds.toSorted()).toEqual(["e_1", "e_2", "e_3"]);
@@ -107,17 +112,22 @@ describeIf("highlight store (real Postgres)", () => {
     // gateway's, so app/database skew cannot lose or keep a mark wrongly.
     const startedBefore = await store.clock();
     await store.markStale(A);
-    await store.put(A, { state: "ready", payload: [hl("hl_1", ["e_1"])] }, startedBefore);
+    await store.put(
+      A,
+      { state: "ready", payload: [hl("hl_1", ["e_1"])] },
+      startedBefore,
+      await epochOf(A),
+    );
     expect((await store.get(A))?.staleSince).toBeInstanceOf(Date);
 
     // A put from a run that started after the latest mark clears it.
-    await store.put(A, { state: "ready", payload: [hl("hl_1", ["e_1"])] }, await store.clock());
+    await putNow(A, { state: "ready", payload: [hl("hl_1", ["e_1"])] });
     expect((await store.get(A))?.staleSince).toBeNull();
   });
 
   it("empty state stores an empty payload and no source ids; groups never cross", async () => {
-    await store.claimOnDemand(B, 3);
-    await store.put(B, { state: "empty", payload: [] }, await store.clock());
+    await store.claimOnDemand(B, 3, { create: true });
+    await putNow(B, { state: "empty", payload: [] });
     expect(await store.get(B)).toMatchObject({ state: "empty", payload: [], sourceFactIds: [] });
     expect((await store.get(A))?.state).toBe("ready");
   });
@@ -134,7 +144,7 @@ describeIf("highlight store (real Postgres)", () => {
         SET stale_since = now() - make_interval(secs => ${seconds}) WHERE group_id = ${g}`;
 
   it("claimOnDemand: a first read inserts an unavailable placeholder and takes slot 1", async () => {
-    expect(await store.claimOnDemand(N, 3)).toBe(true);
+    expect(await store.claimOnDemand(N, 3, { create: true })).toBe(true);
     expect(await store.get(N)).toMatchObject({
       state: "unavailable",
       payload: [],
@@ -147,27 +157,29 @@ describeIf("highlight store (real Postgres)", () => {
   });
 
   it("claimOnDemand: at most `cap` per UTC day; a new day resets the count; payload untouched", async () => {
-    expect(await store.claimOnDemand(C, 3)).toBe(true);
-    await store.put(C, { state: "ready", payload: [hl("hl_c", ["e_c"])] }, await store.clock());
-    expect(await store.claimOnDemand(C, 3)).toBe(true);
-    expect(await store.claimOnDemand(C, 3)).toBe(true);
-    expect(await store.claimOnDemand(C, 3)).toBe(false);
+    expect(await store.claimOnDemand(C, 3, { create: true })).toBe(true);
+    await putNow(C, { state: "ready", payload: [hl("hl_c", ["e_c"])] });
+    expect(await store.claimOnDemand(C, 3, { create: true })).toBe(true);
+    expect(await store.claimOnDemand(C, 3, { create: true })).toBe(true);
+    expect(await store.claimOnDemand(C, 3, { create: true })).toBe(false);
     expect((await store.get(C))?.state).toBe("ready");
     await sql`UPDATE lp_memory_highlights SET ondemand_day = ondemand_day - 1 WHERE group_id = ${C}`;
     // A new day: the count restarts at 1, so exactly 3 more claims succeed.
-    expect(await store.claimOnDemand(C, 3)).toBe(true);
+    expect(await store.claimOnDemand(C, 3, { create: true })).toBe(true);
     const n = await sql<{ n: number }>`
       SELECT ondemand_count AS n FROM lp_memory_highlights WHERE group_id = ${C}`;
     expect(n[0].n).toBe(1);
-    expect(await store.claimOnDemand(C, 3)).toBe(true);
-    expect(await store.claimOnDemand(C, 3)).toBe(true);
-    expect(await store.claimOnDemand(C, 3)).toBe(false);
+    expect(await store.claimOnDemand(C, 3, { create: true })).toBe(true);
+    expect(await store.claimOnDemand(C, 3, { create: true })).toBe(true);
+    expect(await store.claimOnDemand(C, 3, { create: true })).toBe(false);
   });
 
   it("claimOnDemand under concurrency never exceeds the cap", async () => {
     const g = `${C}_race`;
     try {
-      const results = await Promise.all(Array.from({ length: 8 }, () => store.claimOnDemand(g, 3)));
+      const results = await Promise.all(
+        Array.from({ length: 8 }, () => store.claimOnDemand(g, 3, { create: true })),
+      );
       expect(results.filter(Boolean)).toHaveLength(3);
     } finally {
       await sql`DELETE FROM lp_memory_highlights WHERE group_id = ${g}`;
@@ -196,7 +208,7 @@ describeIf("highlight store (real Postgres)", () => {
   });
 
   it("dropCiting: removes every highlight citing a fact, keeps order, recomputes ids, marks stale", async () => {
-    await store.claimOnDemand(R, 3);
+    await store.claimOnDemand(R, 3, { create: true });
     await store.put(
       R,
       {
@@ -209,6 +221,7 @@ describeIf("highlight store (real Postgres)", () => {
         ],
       },
       await store.clock(),
+      await epochOf(R),
     );
     expect(await store.dropCiting(R, ["e_2"])).toBe(2);
     const row = await store.get(R);
@@ -228,5 +241,135 @@ describeIf("highlight store (real Postgres)", () => {
     // A group with no row: 0, nothing created.
     expect(await store.dropCiting(`${R}_none`, ["e_1"])).toBe(0);
     expect(await store.get(`${R}_none`)).toBeNull();
+  });
+
+  it("claimOnDemand without create never inserts (the worker cannot re-create a forgotten row)", async () => {
+    const g = `${R}_nocreate`;
+    expect(await store.claimOnDemand(g, 3)).toBe(false);
+    expect(await store.get(g)).toBeNull();
+  });
+
+  it("a claim marks the row stale (pending, visible on every instance)", async () => {
+    const g = `${R}_pending`;
+    try {
+      await store.claimOnDemand(g, 3, { create: true });
+      expect((await store.get(g))?.staleSince).toBeInstanceOf(Date);
+    } finally {
+      await store.deleteGroup(g);
+    }
+  });
+
+  it("RACE: a put whose run started before a remove (epoch moved) writes nothing", async () => {
+    const g = `${R}_race_remove`;
+    try {
+      await store.claimOnDemand(g, 3, { create: true });
+      await putNow(g, { state: "ready", payload: [hl("hl_1", ["e_1"]), hl("hl_2", ["e_2"])] });
+      // Instance X starts a run: reads the row (epoch) and the clock.
+      const atStart = await store.get(g);
+      const startedAt = await store.clock();
+      // Instance Y removes hl_1 meanwhile.
+      expect(await store.dropCiting(g, ["e_1"])).toBe(1);
+      // X finishes with a payload still citing the removed fact: refused.
+      expect(
+        await store.put(
+          g,
+          { state: "ready", payload: [hl("hl_1", ["e_1"])] },
+          startedAt,
+          atStart!.epoch,
+        ),
+      ).toBe(false);
+      expect((await store.get(g))?.payload.map((h) => h.id)).toEqual(["hl_2"]);
+    } finally {
+      await store.deleteGroup(g);
+    }
+  });
+
+  it("RACE: a put whose run started before a forget-and-recreate (new row) writes nothing", async () => {
+    const g = `${R}_race_forget`;
+    try {
+      await store.claimOnDemand(g, 3, { create: true });
+      const atStart = await store.get(g);
+      const startedAt = await store.clock();
+      await store.deleteGroup(g); // forget
+      await store.claimOnDemand(g, 3, { create: true }); // a fresh first read
+      expect(
+        await store.put(
+          g,
+          { state: "ready", payload: [hl("hl_old", ["e_9"])] },
+          startedAt,
+          atStart!.epoch,
+        ),
+      ).toBe(false);
+      expect((await store.get(g))?.payload).toEqual([]);
+    } finally {
+      await store.deleteGroup(g);
+    }
+  });
+
+  it("lease: one holder at a time; released by put or releaseLease; expires", async () => {
+    const g = `${R}_lease`;
+    try {
+      await store.claimOnDemand(g, 3, { create: true });
+      expect(await store.acquireLease(g, 120)).toBe(true);
+      expect(await store.acquireLease(g, 120)).toBe(false);
+      await putNow(g, { state: "empty", payload: [] });
+      expect(await store.acquireLease(g, 120)).toBe(true);
+      await store.releaseLease(g);
+      expect(await store.acquireLease(g, 120)).toBe(true);
+      await sql`UPDATE lp_memory_highlights SET regen_lease_until = now() - interval '1 second'
+                WHERE group_id = ${g}`;
+      expect(await store.acquireLease(g, 120)).toBe(true);
+      expect(await store.acquireLease(`${g}_none`, 120)).toBe(false);
+      const both = await Promise.all([store.releaseLease(g), undefined]);
+      expect(both).toHaveLength(2);
+      const race = await Promise.all(Array.from({ length: 6 }, () => store.acquireLease(g, 120)));
+      expect(race.filter(Boolean)).toHaveLength(1);
+    } finally {
+      await store.deleteGroup(g);
+    }
+  });
+
+  it("get returns highlights in the contract's key order (jsonb reorders keys)", async () => {
+    const g = `${R}_order`;
+    try {
+      await store.claimOnDemand(g, 3, { create: true });
+      await putNow(g, { state: "ready", payload: [hl("hl_1", ["e_1"])] });
+      const row = await store.get(g);
+      expect(Object.keys(row!.payload[0])).toEqual([
+        "id",
+        "category",
+        "title",
+        "body",
+        "first_seen",
+        "last_seen",
+        "occurrences",
+        "recurring",
+        "score",
+        "sources",
+      ]);
+      expect(Object.keys(row!.payload[0].sources[0])).toEqual(["fact_id", "fact", "last_seen"]);
+    } finally {
+      await store.deleteGroup(g);
+    }
+  });
+
+  it("dropCiting touches ONLY the given group's row (another group citing the same fact is unchanged)", async () => {
+    const g1 = `${R}_x1`;
+    const g2 = `${R}_x2`;
+    try {
+      for (const g of [g1, g2]) {
+        await store.claimOnDemand(g, 3, { create: true });
+        await putNow(g, {
+          state: "ready",
+          payload: [hl(`hl_${g.slice(-2)}`, ["e_shared"]), hl("hl_k", ["e_k"])],
+        });
+      }
+      const before = await store.get(g2);
+      expect(await store.dropCiting(g1, ["e_shared"])).toBe(1);
+      expect(await store.get(g2)).toEqual(before);
+    } finally {
+      await store.deleteGroup(g1);
+      await store.deleteGroup(g2);
+    }
   });
 });

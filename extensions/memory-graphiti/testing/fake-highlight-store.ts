@@ -1,18 +1,27 @@
 /**
  * In-memory HighlightStore with the Postgres store's semantics (store.ts), for
- * tests above the store. The clock is injected so the debounce and the UTC day
- * can be driven by fake timers. The real SQL is covered by
+ * tests above the store. The clock is injected so the debounce, the UTC day and
+ * the lease can be driven by fake timers. The real SQL is covered by
  * highlights/store.integration.test.ts.
  */
 import type { HighlightRow, HighlightStore, HighlightWrite } from "../highlights/store.js";
 
-type Row = HighlightRow & { ondemandDay: string | null; ondemandCount: number };
+type Row = HighlightRow & {
+  ondemandDay: string | null;
+  ondemandCount: number;
+  leaseUntil: number | null;
+};
 
 const utcDay = (d: Date) => d.toISOString().slice(0, 10);
 
 export class FakeHighlightStore implements HighlightStore {
   readonly rows = new Map<string, Row>();
+  private seq = 0;
   constructor(private readonly now: () => Date = () => new Date()) {}
+
+  private nextEpoch(): string {
+    return String(++this.seq);
+  }
 
   async clock(): Promise<Date> {
     return this.now();
@@ -23,13 +32,18 @@ export class FakeHighlightStore implements HighlightStore {
     if (!r) {
       return null;
     }
-    const { ondemandDay: _d, ondemandCount: _c, ...row } = r;
+    const { ondemandDay: _d, ondemandCount: _c, leaseUntil: _l, ...row } = r;
     return structuredClone(row);
   }
 
-  async put(groupId: string, result: HighlightWrite, startedAt: Date): Promise<boolean> {
+  async put(
+    groupId: string,
+    result: HighlightWrite,
+    startedAt: Date,
+    epoch: string,
+  ): Promise<boolean> {
     const r = this.rows.get(groupId);
-    if (!r) {
+    if (!r || r.epoch !== epoch) {
       return false;
     }
     r.state = result.state;
@@ -39,6 +53,7 @@ export class FakeHighlightStore implements HighlightStore {
     if (!(r.staleSince && r.staleSince > startedAt)) {
       r.staleSince = null;
     }
+    r.leaseUntil = null;
     return true;
   }
 
@@ -53,18 +68,27 @@ export class FakeHighlightStore implements HighlightStore {
     return this.rows.delete(groupId) ? 1 : 0;
   }
 
-  async claimOnDemand(groupId: string, cap: number): Promise<boolean> {
+  async claimOnDemand(
+    groupId: string,
+    cap: number,
+    opts: { create?: boolean } = {},
+  ): Promise<boolean> {
     const today = utcDay(this.now());
     const r = this.rows.get(groupId);
     if (!r) {
+      if (!opts.create) {
+        return false;
+      }
       this.rows.set(groupId, {
         state: "unavailable",
         payload: [],
         generatedAt: this.now(),
-        staleSince: null,
+        staleSince: this.now(),
         sourceFactIds: [],
+        epoch: this.nextEpoch(),
         ondemandDay: today,
         ondemandCount: 1,
+        leaseUntil: null,
       });
       return true;
     }
@@ -73,7 +97,25 @@ export class FakeHighlightStore implements HighlightStore {
     }
     r.ondemandCount = r.ondemandDay === today ? r.ondemandCount + 1 : 1;
     r.ondemandDay = today;
+    r.staleSince = this.now();
     return true;
+  }
+
+  async acquireLease(groupId: string, seconds: number): Promise<boolean> {
+    const r = this.rows.get(groupId);
+    const now = this.now().getTime();
+    if (!r || (r.leaseUntil !== null && r.leaseUntil >= now)) {
+      return false;
+    }
+    r.leaseUntil = now + seconds * 1000;
+    return true;
+  }
+
+  async releaseLease(groupId: string): Promise<void> {
+    const r = this.rows.get(groupId);
+    if (r) {
+      r.leaseUntil = null;
+    }
   }
 
   async staleDue(opts: { debounceSec: number; cap: number; limit: number }): Promise<string[]> {
@@ -88,6 +130,14 @@ export class FakeHighlightStore implements HighlightStore {
       )
       .toSorted(([, a], [, b]) => a.staleSince!.getTime() - b.staleSince!.getTime())
       .slice(0, opts.limit)
+      .map(([g]) => g);
+  }
+
+  async nightlyDue(limit: number): Promise<string[]> {
+    return [...this.rows.entries()]
+      .filter(([, r]) => r.staleSince !== null)
+      .toSorted(([, a], [, b]) => a.staleSince!.getTime() - b.staleSince!.getTime())
+      .slice(0, limit)
       .map(([g]) => g);
   }
 
@@ -108,14 +158,7 @@ export class FakeHighlightStore implements HighlightStore {
       r.state = "unavailable";
     }
     r.staleSince = this.now();
+    r.epoch = this.nextEpoch();
     return dropped;
-  }
-
-  async nightlyDue(limit: number): Promise<string[]> {
-    return [...this.rows.entries()]
-      .filter(([, r]) => r.staleSince !== null)
-      .toSorted(([, a], [, b]) => a.staleSince!.getTime() - b.staleSince!.getTime())
-      .slice(0, limit)
-      .map(([g]) => g);
   }
 }

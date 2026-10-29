@@ -5,6 +5,7 @@
 import { describe, expect, it, vi } from "vitest";
 import type { MemoryFact } from "../client.js";
 import {
+  BODY_MAX,
   FACT_TEXT_MAX,
   FALLBACK_FACTS_MAX,
   INPUT_FACTS_MAX,
@@ -324,5 +325,47 @@ describe("generateHighlights", () => {
     await generateHighlights(FACTS, opts(run, { logger: log }));
     const lines = [...log.info.mock.calls, ...log.warn.mock.calls].map((c) => String(c[0]));
     expect(lines.join("\n")).not.toMatch(/sleep|coffee|weeknight|ok_group/i);
+  });
+});
+
+describe("generateHighlights QG hardening", () => {
+  it(`a body over ${BODY_MAX} chars, or with markup, is dropped as shape`, async () => {
+    const { run } = runnerReturning([
+      ok({ body: `You mentioned ${"x".repeat(BODY_MAX)}` }),
+      ok({ title: "<b>Sleep</b>", refs: ["f2"] }),
+      ok({ body: "See [this](https://example.com) note", refs: ["f3"] }),
+      ok({ title: "Kept", refs: ["f4"] }),
+    ]);
+    const res = await generateHighlights(FACTS, opts(run));
+    expect(res.state === "ready" && res.highlights.map((h) => h.title)).toEqual(["Kept"]);
+    expect(res.dropped.shape).toBe(3);
+  });
+
+  it("the 7-cap keeps the BEST 7 by score, whatever the model's order", async () => {
+    const subsets = [
+      ["f2"],
+      ["f3"],
+      ["f4"],
+      ["f2", "f3"],
+      ["f2", "f4"],
+      ["f3", "f4"],
+      ["f2", "f3", "f4"],
+      ["f1", "f2"],
+      ["f1", "f3"],
+    ];
+    const entries = subsets.map((refs, i) => ok({ title: `T${i}`, refs }));
+    // The best entry comes LAST: every fact (most episodes), symptoms, high salience.
+    entries.push(
+      ok({ title: "BEST", refs: ["f1", "f2", "f3", "f4"], category: "symptoms", salience: "high" }),
+    );
+    const { run } = runnerReturning(entries);
+    const res = await generateHighlights(FACTS, opts(run));
+    if (res.state !== "ready") {
+      throw new Error("expected ready");
+    }
+    expect(res.highlights).toHaveLength(7);
+    expect(res.highlights[0].title).toBe("BEST");
+    const scores = res.highlights.map((h) => h.score);
+    expect(scores).toEqual([...scores].toSorted((a, b) => b - a));
   });
 });

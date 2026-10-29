@@ -163,10 +163,17 @@ export async function ensureReceiptSchema(sql: Sql): Promise<void> {
   );
   // One-shot repair, safe to repeat: earlier versions stored episode_ids as a JSON
   // string holding the array. Unwrap those rows; arrays are left alone.
-  await sql`
-    UPDATE lp_memory_receipts
-    SET episode_ids = (episode_ids #>> '{}')::jsonb
-    WHERE jsonb_typeof(episode_ids) = 'string' AND left(episode_ids #>> '{}', 1) = '['`;
+  // Best-effort: a malformed legacy row must never block the schema (every memory
+  // feature waits on it). Rows it cannot unwrap stay strings; highlight remove
+  // then counts their episodes as untracked (deleted, not tombstoned).
+  try {
+    await sql`
+      UPDATE lp_memory_receipts
+      SET episode_ids = (episode_ids #>> '{}')::jsonb
+      WHERE jsonb_typeof(episode_ids) = 'string' AND left(episode_ids #>> '{}', 1) = '['`;
+  } catch {
+    // left as strings; see above
+  }
   await ddl(
     () => sql`
     CREATE TABLE IF NOT EXISTS lp_memory_pending (
@@ -204,6 +211,7 @@ export async function ensureReceiptSchema(sql: Sql): Promise<void> {
   await ddl(() => sql`CREATE INDEX IF NOT EXISTS lp_memory_recall_at ON lp_memory_recall (at)`);
   // The generated highlights per group, as served (A&D §5). Keyed by the opaque
   // group; payload holds fact text, under the same controls as the receipts.
+  await ddl(() => sql`CREATE SEQUENCE IF NOT EXISTS lp_memory_highlights_epoch`);
   await ddl(
     () => sql`
     CREATE TABLE IF NOT EXISTS lp_memory_highlights (
@@ -214,7 +222,9 @@ export async function ensureReceiptSchema(sql: Sql): Promise<void> {
       stale_since TIMESTAMPTZ,
       ondemand_day DATE,
       ondemand_count INT NOT NULL DEFAULT 0,
-      source_fact_ids TEXT[] NOT NULL
+      source_fact_ids TEXT[] NOT NULL,
+      epoch BIGINT NOT NULL DEFAULT nextval('lp_memory_highlights_epoch'),
+      regen_lease_until TIMESTAMPTZ
     )`,
   );
   // A forget blocks recall writes for the group briefly, so a turn whose recall

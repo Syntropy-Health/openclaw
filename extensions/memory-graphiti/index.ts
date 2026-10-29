@@ -42,7 +42,11 @@ import {
 } from "./highlights/routes.js";
 import { createHighlightRunner } from "./highlights/runner.js";
 import { createHighlightScheduler, type HighlightScheduler } from "./highlights/scheduler.js";
-import { createPgHighlightStore, type HighlightStore } from "./highlights/store.js";
+import {
+  createPgHighlightStore,
+  highlightIdByFact,
+  type HighlightStore,
+} from "./highlights/store.js";
 import {
   externalIdScopeKey,
   resolveIdentityScopeKey,
@@ -391,11 +395,20 @@ const memoryPlugin = {
     const withGroups: GroupLock = createGroupLock();
 
     // Highlights (A&D §4): the cache lives in Postgres, so without the identity
-    // database there are no highlights at all. Rows are created only when a user
-    // reads their highlights (route, P6); the worker and stale marks touch existing
-    // rows only. Nothing runs while memory is refused.
+    // database there are no highlights at all. The STORE exists whenever the
+    // database does and memory is not refused, so forget can always erase rows
+    // (even ones left from a time the approval was in force). The WORKER, the stale
+    // marks and the routes run only under the PHI approval: no group's facts go to
+    // the summariser without it (A&D §4.9, §5). Rows are created only by a user's
+    // read (route); the worker touches existing rows only.
     let highlightStore: HighlightStore | null = null;
     let highlightScheduler: HighlightScheduler | null = null;
+    const sweepRecall = identitySql
+      ? async () => (
+          await ready(),
+          sweepExpiredRecall(identitySql as unknown as Parameters<typeof sweepExpiredRecall>[0])
+        )
+      : null;
     if (identitySql && !memoryRefused) {
       const pgHighlights = createPgHighlightStore(
         identitySql as unknown as Parameters<typeof createPgHighlightStore>[0],
@@ -403,15 +416,20 @@ const memoryPlugin = {
       const store: HighlightStore = {
         clock: async () => (await ready(), pgHighlights.clock()),
         get: async (g) => (await ready(), pgHighlights.get(g)),
-        put: async (g, r, t) => (await ready(), pgHighlights.put(g, r, t)),
+        put: async (g, r, t, e) => (await ready(), pgHighlights.put(g, r, t, e)),
         markStale: async (g) => (await ready(), pgHighlights.markStale(g)),
         deleteGroup: async (g) => (await ready(), pgHighlights.deleteGroup(g)),
-        claimOnDemand: async (g, c) => (await ready(), pgHighlights.claimOnDemand(g, c)),
+        claimOnDemand: async (g, c, o) => (await ready(), pgHighlights.claimOnDemand(g, c, o)),
+        acquireLease: async (g, sec) => (await ready(), pgHighlights.acquireLease(g, sec)),
+        releaseLease: async (g) => (await ready(), pgHighlights.releaseLease(g)),
         staleDue: async (o) => (await ready(), pgHighlights.staleDue(o)),
         nightlyDue: async (n) => (await ready(), pgHighlights.nightlyDue(n)),
         dropCiting: async (g, ids) => (await ready(), pgHighlights.dropCiting(g, ids)),
       };
       highlightStore = store;
+    }
+    if (highlightStore && approval !== undefined) {
+      const store = highlightStore;
       const runner = createHighlightRunner({ cfg: api.config, model: cfg.highlights?.model });
       const hlLogger = {
         info: (m: string) => api.logger.info?.(m),
@@ -422,10 +440,7 @@ const memoryPlugin = {
         lock: withGroups,
         now: () => new Date(),
         logger: hlLogger,
-        sweep: async () => (
-          await ready(),
-          sweepExpiredRecall(identitySql as unknown as Parameters<typeof sweepExpiredRecall>[0])
-        ),
+        sweep: sweepRecall ?? undefined,
         regenerate: (groupId) =>
           regenerateGroup(groupId, {
             client,
@@ -442,6 +457,8 @@ const memoryPlugin = {
           }),
       });
     }
+
+    let recallSweepTimer: ReturnType<typeof setInterval> | undefined;
 
     // The routes serve highlights only under the PHI approval (A&D §4.9).
     const highlightsEnabled =
@@ -859,18 +876,7 @@ const memoryPlugin = {
                 store: recallStore,
                 groupFor: (sub) => opaque(sub),
                 highlightIndex: highlightsEnabled
-                  ? async (g) => {
-                      const row = await highlightStore!.get(g);
-                      const index = new Map<string, string>();
-                      for (const h of row?.payload ?? []) {
-                        for (const src of h.sources) {
-                          if (!index.has(src.fact_id)) {
-                            index.set(src.fact_id, h.id);
-                          }
-                        }
-                      }
-                      return index;
-                    }
+                  ? async (g) => highlightIdByFact((await highlightStore!.get(g))?.payload ?? [])
                   : undefined,
               }
             : null,
@@ -973,7 +979,7 @@ const memoryPlugin = {
               return;
             }
             console.log(
-              `graphiti forget: userFound=${r.userFound} storeGroupsDeleted=${r.storeGroupsDeleted} storeGroupsAbsent=${r.storeGroupsAbsent} receipts=${r.receipts} recall=${r.recall} transcripts=${r.transcripts} sharedSkipped=${r.sharedSkipped} lockedSkipped=${r.lockedSkipped} vanished=${r.vanished}`,
+              `graphiti forget: userFound=${r.userFound} storeGroupsDeleted=${r.storeGroupsDeleted} storeGroupsAbsent=${r.storeGroupsAbsent} receipts=${r.receipts} recall=${r.recall} highlights=${r.highlights} transcripts=${r.transcripts} sharedSkipped=${r.sharedSkipped} lockedSkipped=${r.lockedSkipped} vanished=${r.vanished}`,
             );
           });
 
@@ -1155,8 +1161,8 @@ const memoryPlugin = {
               );
               // Highlights go stale only on CONFIRMED new memory (read-back
               // matched); a mismatch or a still-pending send never marks it.
-              if (r.confirmed > 0 && highlightStore) {
-                highlightStore.markStale(groupId).catch(() => {
+              if (r.confirmed > 0 && highlightsEnabled) {
+                highlightStore!.markStale(groupId).catch(() => {
                   api.logger.warn("memory-highlights: stale mark failed");
                 });
               }
@@ -1181,6 +1187,10 @@ const memoryPlugin = {
     // uses the connection).
     if (identitySql) {
       api.on("gateway_stop", async () => {
+        if (recallSweepTimer) {
+          clearInterval(recallSweepTimer);
+          recallSweepTimer = undefined;
+        }
         try {
           await highlightScheduler?.stop();
         } catch {
@@ -1204,9 +1214,19 @@ const memoryPlugin = {
         if (highlightScheduler) {
           highlightScheduler.start();
           api.logger.info("memory-highlights: worker started");
+        } else if (sweepRecall && recallStore) {
+          // No highlights worker: the recall TTL sweep still needs a timer.
+          recallSweepTimer = setInterval(() => {
+            sweepRecall().catch(() => api.logger.warn("memory-graphiti: recall sweep failed"));
+          }, 60_000);
+          recallSweepTimer.unref?.();
         }
       },
       stop: async () => {
+        if (recallSweepTimer) {
+          clearInterval(recallSweepTimer);
+          recallSweepTimer = undefined;
+        }
         await highlightScheduler?.stop();
         api.logger.info("memory-graphiti: stopped");
       },

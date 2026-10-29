@@ -13,6 +13,8 @@ import type { MemoryClient } from "./client.js";
 import { createForgetHandler, type ForgetRouteDeps } from "./forget-route.js";
 import { forgetByExternalId, forgetOutcome, type ForgetResult } from "./forget.js";
 import { createHighlightsHandler } from "./highlights/routes.js";
+import { createHighlightScheduler } from "./highlights/scheduler.js";
+import { createGroupLock } from "./lock.js";
 import { createMemoryReceiptLedger, opaqueGroupId } from "./receipts.js";
 import { FakeHighlightStore } from "./testing/fake-highlight-store.js";
 
@@ -222,7 +224,7 @@ describe("forgetByExternalId + tombstones (end to end, real files)", () => {
     const highlights = new FakeHighlightStore();
     const other = opaque("user_someoneElse");
     for (const g of [opaque(SUB), other]) {
-      await highlights.claimOnDemand(g, 3);
+      await highlights.claimOnDemand(g, 3, { create: true });
       await highlights.put(
         g,
         {
@@ -243,6 +245,7 @@ describe("forgetByExternalId + tombstones (end to end, real files)", () => {
           ],
         },
         await highlights.clock(),
+        (await highlights.get(g))!.epoch,
       );
     }
     const r = await forgetByExternalId({
@@ -260,7 +263,15 @@ describe("forgetByExternalId + tombstones (end to end, real files)", () => {
     expect(r.recall).toBe(2);
     expect(highlights.rows.has(opaque(SUB))).toBe(false);
     expect(highlights.rows.has(other)).toBe(true);
-    // The user's next GET: no highlights, no row created by the read itself.
+    // The user's next GET is a fresh first read through the REAL scheduler: it may
+    // create a placeholder (the user starts over), but nothing of the old memory.
+    const scheduler = createHighlightScheduler({
+      store: highlights,
+      lock: createGroupLock(),
+      regenerate: async () => "empty",
+      logger: { info: () => undefined, warn: () => undefined },
+      now: () => new Date(),
+    });
     const get = createHighlightsHandler({
       resolveClerk: () => CLERK,
       verifyJwt: async () => ({ ok: true, externalId: SUB }),
@@ -276,7 +287,7 @@ describe("forgetByExternalId + tombstones (end to end, real files)", () => {
             scores: true,
           }),
         },
-        requestNow: async () => false,
+        requestNow: (g: string) => scheduler.requestNow(g),
       },
     });
     let body = "";
@@ -284,8 +295,15 @@ describe("forgetByExternalId + tombstones (end to end, real files)", () => {
       { method: "GET", headers: { authorization: "Bearer t" }, url: "/" } as never,
       { writeHead: () => undefined, end: (b: string) => (body = b) } as never,
     );
-    expect(JSON.parse(body)).toMatchObject({ highlights: [] });
-    expect(highlights.rows.has(opaque(SUB))).toBe(false);
+    expect(JSON.parse(body)).toMatchObject({
+      state: "unavailable",
+      highlights: [],
+      fallback_facts: [],
+    });
+    const after = await highlights.get(opaque(SUB));
+    expect(after?.payload ?? []).toEqual([]);
+    expect(after?.sourceFactIds ?? []).toEqual([]);
+    await scheduler.stop();
   });
 
   it("also deletes the user's recall records (lp_memory_recall), and only theirs", async () => {

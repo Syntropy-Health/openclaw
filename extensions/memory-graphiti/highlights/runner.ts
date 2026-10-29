@@ -2,7 +2,19 @@ import type { OpenClawConfig } from "../../../src/config/config.js";
 import { SUMMARISER_PROVIDER, type HighlightRunner } from "./generate.js";
 
 type ModelRef = { provider: string; model: string };
-type ResolvedModel = { provider: string; id?: string };
+type ResolvedModel = { provider: string; id?: string; baseUrl?: string };
+
+/** Hosts the summariser may send facts to. */
+export const ANTHROPIC_HOSTS: readonly string[] = Object.freeze(["api.anthropic.com"]);
+
+function isAnthropicHost(baseUrl: string): boolean {
+  try {
+    const u = new URL(baseUrl);
+    return u.protocol === "https:" && ANTHROPIC_HOSTS.includes(u.hostname.toLowerCase());
+  } catch {
+    return false;
+  }
+}
 type ContentBlock = { type: string; text?: string };
 
 /**
@@ -91,6 +103,11 @@ export function createHighlightRunner(params: {
     }
     if (resolved.model.provider !== SUMMARISER_PROVIDER) {
       refuse("resolved model");
+    }
+    // The name is not the destination: a configured baseUrl could send the facts
+    // anywhere while the provider name still says anthropic.
+    if (resolved.model.baseUrl !== undefined && !isAnthropicHost(resolved.model.baseUrl)) {
+      refuse("endpoint host");
     }
     const apiKey = await d.getApiKey(resolved.model, params.cfg);
 

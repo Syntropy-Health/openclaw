@@ -124,3 +124,27 @@ describe("createHighlightRunner", () => {
     await expect(createHighlightRunner({ cfg: CFG, deps: d })(REQ)).rejects.toThrow(/empty/);
   });
 });
+
+describe("createHighlightRunner endpoint pin (QG)", () => {
+  it("a resolved anthropic model with a non-Anthropic baseUrl is refused before auth or any call", async () => {
+    for (const baseUrl of ["https://evil.example.com", "http://api.anthropic.com", "not a url"]) {
+      const d = deps({
+        resolveModel: vi.fn(() => ({ model: { provider: "anthropic", id: "m", baseUrl } })),
+      });
+      await expect(createHighlightRunner({ cfg: CFG, deps: d })(REQ)).rejects.toThrow(/anthropic/);
+      expect(d.getApiKey).not.toHaveBeenCalled();
+      expect(d.complete).not.toHaveBeenCalled();
+    }
+  });
+
+  it("the Anthropic API host is accepted", async () => {
+    const d = deps({
+      resolveModel: vi.fn(() => ({
+        model: { provider: "anthropic", id: "m", baseUrl: "https://api.anthropic.com" },
+      })),
+    });
+    await expect(createHighlightRunner({ cfg: CFG, deps: d })(REQ)).resolves.toContain(
+      "highlights",
+    );
+  });
+});

@@ -86,7 +86,7 @@ async function setup() {
   expect(first.confirmed).toBe(2);
   graph.set(G, [fact("e_1", ["ep_1"]), fact("e_2", ["ep_old_untracked"]), fact("e_3", ["ep_9"])]);
   graph.set("ok_b", [fact("b_1", ["ep_b"])]);
-  await store.claimOnDemand(G, 3);
+  await store.claimOnDemand(G, 3, { create: true });
   await store.put(
     G,
     {
@@ -94,6 +94,7 @@ async function setup() {
       payload: [hl("hl_sleep", ["e_1", "e_2"]), hl("hl_other", ["e_3"]), hl("hl_shared", ["e_2"])],
     },
     await store.clock(),
+    (await store.get(G))!.epoch,
   );
   return { graph, client, submit, ledger, store, recall, logger, deps, messages };
 }
@@ -148,7 +149,12 @@ describe("removeHighlight", () => {
 
   it("never deletes another group's fact, even if a cached source names one", async () => {
     const { deps, graph, store } = await setup();
-    await store.put(G, { state: "ready", payload: [hl("hl_bad", ["b_1"])] }, await store.clock());
+    await store.put(
+      G,
+      { state: "ready", payload: [hl("hl_bad", ["b_1"])] },
+      await store.clock(),
+      (await store.get(G))!.epoch,
+    );
     const r = await removeHighlight(G, "hl_bad", deps);
     expect(r).toMatchObject({ status: "SUCCEEDED", removed_facts: 0 });
     expect(graph.get("ok_b")?.map((f) => f.id)).toEqual(["b_1"]);
@@ -207,5 +213,39 @@ describe("removeHighlight", () => {
     await removeHighlight(G, "hl_sleep", deps);
     const text = JSON.stringify([...logger.info.mock.calls, ...logger.warn.mock.calls]);
     expect(text).not.toMatch(/ok_a|hl_sleep|fact e_/);
+  });
+});
+
+describe("removeHighlight QG arms", () => {
+  it("a backend that cannot list facts: FAILED misconfigured, not retryable, nothing deleted or tombstoned", async () => {
+    const { deps, client, ledger } = await setup();
+    const { MemoryCapabilityError } = await import("../client.js");
+    client.listFacts.mockRejectedValueOnce(new MemoryCapabilityError("backend_unsupported"));
+    const tomb = vi.spyOn(ledger, "addTombstones");
+    expect(await removeHighlight(G, "hl_sleep", deps)).toEqual({
+      status: "FAILED",
+      retryable: false,
+      reasons: ["misconfigured"],
+      removed_facts: 0,
+    });
+    expect(client.forgetFacts).not.toHaveBeenCalled();
+    expect(tomb).not.toHaveBeenCalled();
+  });
+
+  it("a TRUE partial delete (one fact gone, then a failure): retryable, the retry completes, no replay", async () => {
+    const { deps, client, graph, ledger, submit, messages, store } = await setup();
+    const real = client.forgetFacts.getMockImplementation()!;
+    client.forgetFacts.mockImplementationOnce(async (g: string, ids: string[]) => {
+      await real(g, [ids[0]]); // e_1 really goes
+      throw new Error("zep 500 on the second id");
+    });
+    expect((await removeHighlight(G, "hl_sleep", deps)).status).toBe("FAILED");
+    expect(graph.get(G)?.map((f) => f.id)).not.toContain("e_1");
+    const retry = await removeHighlight(G, "hl_sleep", deps);
+    expect(retry.status).toBe("SUCCEEDED");
+    expect((await store.get(G))?.payload.map((h) => h.id)).toEqual(["hl_other"]);
+    submit.mockClear();
+    await captureWithReceipts({ client, ledger, groupId: G, messages, inFlight: new Set() });
+    expect(submit).not.toHaveBeenCalled();
   });
 });
