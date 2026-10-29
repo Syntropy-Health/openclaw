@@ -118,13 +118,14 @@ export function scoreHighlight(
 
 /**
  * Rank entries best first: score descending, then last_seen descending, then id.
- * Returns at most MAX_HIGHLIGHTS, each with its derived signals and score. Pure:
- * the input is not modified.
+ * Returns at most `limit` (default MAX_HIGHLIGHTS), each with its derived signals
+ * and score. Pure: the input is not modified.
  */
 export function rankHighlights<T extends RankInput>(
   entries: readonly T[],
   now: Date,
   cfg: Readonly<RankConfig> = DEFAULT_RANK_CONFIG,
+  { limit = MAX_HIGHLIGHTS }: { limit?: number } = {},
 ): RankedHighlight<T>[] {
   const scored = entries.map((e) => {
     const signals = deriveSignals(e.sources);
@@ -136,5 +137,5 @@ export function rankHighlights<T extends RankInput>(
       Date.parse(b.last_seen) - Date.parse(a.last_seen) ||
       (a.id < b.id ? -1 : a.id > b.id ? 1 : 0),
   );
-  return scored.slice(0, MAX_HIGHLIGHTS);
+  return scored.slice(0, limit);
 }
