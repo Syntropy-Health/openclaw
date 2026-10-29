@@ -20,10 +20,9 @@ describe.skipIf(!API_KEY)("ZepCloudClient integration", () => {
 
   afterAll(async () => {
     // Cleanup: attempt to delete test user (ignore errors)
+    // Through the adapter (forget = Zep user delete): only zep-cloud-client.ts imports the SDK.
     try {
-      const { ZepClient } = await import("@getzep/zep-cloud");
-      const zep = new ZepClient({ apiKey: API_KEY! });
-      await zep.user.delete(TEST_USER_ID);
+      await client.forget(TEST_USER_ID);
     } catch {
       // Test user may not have been created
     }
@@ -57,7 +56,9 @@ describe.skipIf(!API_KEY)("ZepCloudClient integration", () => {
     for (let attempt = 0; attempt < 6; attempt++) {
       await new Promise((r) => setTimeout(r, 3000));
       episodes = await client.getEpisodes(TEST_USER_ID, 5);
-      if (episodes.length > 0) break;
+      if (episodes.length > 0) {
+        break;
+      }
     }
     expect(episodes.length).toBeGreaterThanOrEqual(1);
     expect(episodes[0].content).toBeTruthy();
