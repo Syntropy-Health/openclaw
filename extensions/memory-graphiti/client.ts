@@ -121,6 +121,12 @@ export class MemoryCapabilityError extends Error {
 export interface MemoryFactSurface {
   listFacts(groupId: string, opts?: ListFactsOptions): Promise<ListFactsResult>;
   searchRanked(groupId: string, query: string, opts: SearchRankedOptions): Promise<RankedFact[]>;
+  /**
+   * Delete facts by id. CALLERS MUST pass only ids of facts owned by `groupId`
+   * (read from that group's own records). A backend may not be able to check
+   * ownership itself: Zep edge ids are global, so a foreign id would be deleted.
+   * PR-2's remove path enforces the ownership check before calling this.
+   */
   forgetFacts(groupId: string, factIds: string[]): Promise<{ deleted: number; absent: number }>;
   capabilities(): MemoryCapabilities;
 }

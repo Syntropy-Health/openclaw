@@ -89,6 +89,7 @@ Enforced at the point of PHI flow (capture, recall, and every `memory_*`/`graphi
 | `autoCapture`     | boolean                                                         | `true`             | Capture conversations after each agent turn.                                                                              |
 | `autoRecall`      | boolean                                                         | `true`             | Inject relevant facts before each agent turn.                                                                             |
 | `maxFacts`        | number (1–100)                                                  | `10`               | Max facts to inject during auto-recall.                                                                                   |
+| `recall`          | `{ reranker?, timeoutMs?, mmrLambda? }`                         | see below          | Auto-recall tuning: reranker (`rrf` \| `mmr` \| `cross_encoder`), budget, MMR diversity.                                  |
 
 > **Deprecated:** omitting `backend` and relying on `apiKey`-presence auto-detection still works but logs a deprecation warning — always set `backend` explicitly.
 
@@ -126,7 +127,21 @@ All share `DATABASE_URL`.
 ## How It Works
 
 - **Auto-capture (`agent_end`):** extracts user+assistant turns → backend (PHI-gated per sender).
-- **Auto-recall (`before_agent_start`):** searches the graph for prompt-relevant facts → injects via `prependContext` (PHI-gated per sender).
+- **Auto-recall (`before_agent_start`):** ONE ranked search per turn for prompt-relevant facts → injects via `prependContext` (PHI-gated per sender). The same ranked list is recorded for the recall panel (see below).
+
+### Recall budget and tuning (`recall`)
+
+- **`timeoutMs` (default `800`, 50–10000).** The recall search must finish within this budget, or the turn goes ahead with **no** facts injected and the recall record says `timed_out`. Before this budget existed, recall waited for the backend's own request timeout: about 60 s on Zep Cloud (the SDK default) and 5 s on self-hosted Graphiti. A slow backend could hold a chat turn that long. Raise the budget only after measuring recall latency.
+- **`reranker` (default `rrf`).** `mmr` and `cross_encoder` need Zep Cloud; self-hosted graphiti-server ranks with its own default and the plugin logs that once at boot.
+- **`mmrLambda` (0–1, default `0.5`).** Used only with `reranker: "mmr"` (higher = more relevance, lower = more diversity).
+
+### Recall panel feed: `GET /gateway/memory/recall?turn=<response_id>`
+
+Returns exactly the facts injected into that turn (contract `memory-highlights/1`), for the caller's verified Clerk user only, with `cache-control: no-store`. Records live 10 minutes. Another user's turn id answers `none`.
+
+**Clients should always send `turn`** (the OpenResponses `response.id`). With `turn` omitted, the route returns the user's **newest** record across **all** of the user's channels and devices, which may belong to a different conversation than the one on screen.
+
+A forget (`POST /gateway/memory/forget` or `graphiti forget`) deletes the user's recall records and refuses new ones for 11 minutes, so a turn already in flight cannot re-create one.
 
 ### Agent Tools (backend-stable)
 

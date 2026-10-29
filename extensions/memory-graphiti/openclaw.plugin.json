@@ -61,7 +61,7 @@
     },
     "recall": {
       "label": "Recall tuning",
-      "help": "{ reranker: rrf | mmr | cross_encoder (default rrf), timeoutMs (default 800) }. Past the budget nothing is injected.",
+      "help": "{ reranker: rrf | mmr | cross_encoder (default rrf), timeoutMs (default 800 ms; past it the turn gets no facts — previously recall waited up to ~60 s on Zep, 5 s on REST), mmrLambda (0..1, default 0.5, mmr only) }.",
       "advanced": true
     },
     "phiCloudApproval": {
@@ -126,6 +126,11 @@
             "type": "integer",
             "minimum": 50,
             "maximum": 10000
+          },
+          "mmrLambda": {
+            "type": "number",
+            "minimum": 0,
+            "maximum": 1
           }
         }
       },

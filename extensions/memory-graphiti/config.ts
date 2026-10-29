@@ -76,8 +76,13 @@ export type RecallReranker = "rrf" | "mmr" | "cross_encoder";
 export type RecallConfig = {
   /** Reranker for the one ranked search per turn. Default "rrf". */
   reranker?: RecallReranker;
-  /** Budget for that search; past it, nothing is injected. Default 800. */
+  /**
+   * Budget for that search; past it, nothing is injected. Default 800 ms. (Before
+   * it existed, recall waited for the backend's own timeout: ~60 s Zep, 5 s REST.)
+   */
   timeoutMs?: number;
+  /** MMR relevance/diversity balance, 0..1, used only with reranker "mmr". Default 0.5. */
+  mmrLambda?: number;
 };
 
 export const RECALL_TIMEOUT_MIN_MS = 50;
@@ -372,9 +377,9 @@ export const graphitiConfigSchema = {
     if (cfg.recall !== undefined) {
       const r = cfg.recall as Record<string, unknown> | null;
       if (!r || typeof r !== "object" || Array.isArray(r)) {
-        throw new Error("recall must be an object { reranker?, timeoutMs? }");
+        throw new Error("recall must be an object { reranker?, timeoutMs?, mmrLambda? }");
       }
-      assertAllowedKeys(r, ["reranker", "timeoutMs"], "recall");
+      assertAllowedKeys(r, ["reranker", "timeoutMs", "mmrLambda"], "recall");
       recall = {};
       if (r.reranker !== undefined) {
         if (!VALID_RERANKERS.includes(r.reranker as RecallReranker)) {
@@ -395,6 +400,13 @@ export const graphitiConfigSchema = {
           );
         }
         recall.timeoutMs = t;
+      }
+      if (r.mmrLambda !== undefined) {
+        const l = r.mmrLambda;
+        if (typeof l !== "number" || !Number.isFinite(l) || l < 0 || l > 1) {
+          throw new Error("recall.mmrLambda must be a number between 0 and 1");
+        }
+        recall.mmrLambda = l;
       }
     }
 
@@ -475,7 +487,7 @@ export const graphitiConfigSchema = {
     },
     recall: {
       label: "Recall tuning",
-      help: "{ reranker: rrf | mmr | cross_encoder (default rrf), timeoutMs (default 800) }. Past the budget nothing is injected.",
+      help: "{ reranker: rrf | mmr | cross_encoder (default rrf), timeoutMs (default 800 ms; past it the turn gets no facts — previously recall waited up to ~60 s on Zep, 5 s on REST), mmrLambda (0..1, default 0.5, mmr only) }.",
       advanced: true,
     },
     qaNumbers: {

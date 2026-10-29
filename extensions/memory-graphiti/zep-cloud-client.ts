@@ -161,8 +161,11 @@ export class ZepCloudClient implements MemoryClient {
   /**
    * Delete facts (edges) by id. A 404 means already gone and counts as absent, so
    * a retry after a partial failure is idempotent; any other error propagates.
-   * Edge uuids are global in Zep: callers pass only ids read from this user's own
-   * group (the recall/highlight rows are keyed by it).
+   * Ownership is NOT checked here: Zep edge uuids are global and graph.edge.delete
+   * does not take a user, so an id from another user's graph WOULD be deleted. The
+   * MemoryFactSurface contract puts the check on the caller, which must pass only
+   * ids of facts owned by `groupId`; no caller exists in PR-1, and PR-2's remove
+   * path enforces the check before calling this.
    */
   async forgetFacts(
     _groupId: string,

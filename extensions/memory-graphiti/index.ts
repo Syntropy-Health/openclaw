@@ -63,6 +63,8 @@ export const MIN_PEPPER_CHARS = 32;
 
 /** Default budget for the per-turn recall search (A&D §4.6). */
 export const RECALL_TIMEOUT_DEFAULT_MS = 800;
+/** Default MMR lambda when recall.reranker is "mmr" and none is configured. */
+export const RECALL_MMR_LAMBDA_DEFAULT = 0.5;
 
 /** Settles with `fallback` once `ms` pass, whatever `p` does (p's rejection is observed). */
 function within<T, F>(p: Promise<T>, ms: number, fallback: F): Promise<T | F> {
@@ -353,6 +355,9 @@ const memoryPlugin = {
     }
     const recallReranker = cfg.recall?.reranker ?? "rrf";
     const recallTimeoutMs = cfg.recall?.timeoutMs ?? RECALL_TIMEOUT_DEFAULT_MS;
+    // MMR's relevance/diversity balance; sent only when the reranker is mmr.
+    const recallMmrLambda =
+      recallReranker === "mmr" ? (cfg.recall?.mmrLambda ?? RECALL_MMR_LAMBDA_DEFAULT) : undefined;
     if (cfg.autoRecall && !client.capabilities().rerankers.includes(recallReranker)) {
       // Logged ONCE: the backend ranks with its own default (results say server_default).
       api.logger.warn(
@@ -925,6 +930,7 @@ const memoryPlugin = {
           const search = client.searchRanked(groupId, query, {
             reranker: recallReranker,
             limit: cfg.maxFacts,
+            ...(recallMmrLambda !== undefined ? { mmrLambda: recallMmrLambda } : {}),
             signal: ac.signal,
           });
           const ranked: RankedFact[] | typeof TIMED_OUT = await within(

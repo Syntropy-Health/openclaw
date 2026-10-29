@@ -5,7 +5,9 @@
  *
  *   GET only → 405 · same auth as POST /gateway/memory/forget (401 otherwise) ·
  *   the user is the token's VERIFIED sub; its group is derived server-side ·
- *   `turn` omitted = this user's latest turn · another user's turn id = `none`
+ *   `turn` omitted = this user's NEWEST record across ALL their channels and
+ *   devices (may be another conversation: clients should send `turn`) ·
+ *   another user's turn id = `none`
  *   (never 403, so turn ids cannot be probed) · `cache-control: no-store`.
  *
  *   200 { contract: "memory-highlights/1",

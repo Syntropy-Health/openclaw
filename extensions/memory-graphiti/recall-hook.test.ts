@@ -212,6 +212,24 @@ describe("recall: one ranked search, injected and recorded", () => {
     );
   });
 
+  it("mmr: mmrLambda defaults to 0.5, a configured value is passed; rrf sends none", async () => {
+    const searchRanked = vi.spyOn(ZepCloudClient.prototype, "searchRanked").mockResolvedValue([]);
+    const opts = () => (searchRanked.mock.calls.at(-1) as [string, string, SearchRankedOptions])[2];
+    await (
+      await register({ recall: { reranker: "mmr" } })
+    ).hooks.before_agent_start?.({ prompt: "how did I sleep?" }, TURN);
+    expect(opts().mmrLambda).toBe(0.5);
+    await (
+      await register({ recall: { reranker: "mmr", mmrLambda: 0.8 } })
+    ).hooks.before_agent_start?.({ prompt: "how did I sleep?" }, TURN);
+    expect(opts().mmrLambda).toBe(0.8);
+    await (
+      await register({ recall: { mmrLambda: 0.8 } })
+    ).hooks.before_agent_start?.({ prompt: "how did I sleep?" }, TURN);
+    expect(opts().reranker).toBe("rrf");
+    expect(opts().mmrLambda).toBeUndefined();
+  });
+
   it("zero facts: nothing injected; the record is ready with 0 items", async () => {
     vi.spyOn(ZepCloudClient.prototype, "searchRanked").mockResolvedValue([]);
     const { hooks } = await register();
@@ -393,7 +411,20 @@ describe("recall config", () => {
     ).toEqual({ reranker: "cross_encoder", timeoutMs: 1200 });
   });
 
+  it("parses mmrLambda in 0..1", async () => {
+    const { graphitiConfigSchema } = await import("./config.js");
+    for (const mmrLambda of [0, 0.5, 1]) {
+      expect(
+        graphitiConfigSchema.parse({ serverUrl: "http://localhost:8000", recall: { mmrLambda } })
+          .recall,
+      ).toEqual({ mmrLambda });
+    }
+  });
+
   it.each([
+    [{ mmrLambda: -0.1 }, /mmrLambda must be/],
+    [{ mmrLambda: 1.5 }, /mmrLambda must be/],
+    [{ mmrLambda: "0.5" }, /mmrLambda must be/],
     [{ reranker: "bogus" }, /reranker/],
     [{ timeoutMs: 10 }, /timeoutMs/],
     [{ timeoutMs: 60_000 }, /timeoutMs/],
