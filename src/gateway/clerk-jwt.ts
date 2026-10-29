@@ -13,8 +13,12 @@
 //     or failed claim check returns `null`. verifyClerkJwt NEVER throws.
 //
 // JWKS handling: an in-memory, module-level, TTL'd cache keyed by jwksUrl. On
-// an unknown `kid` we force exactly ONE cache-bypassing refresh before giving
-// up — this tolerates Clerk key rotation without hammering the JWKS endpoint.
+// an unknown `kid` we force ONE cache-bypassing refresh before giving up, which
+// tolerates Clerk key rotation. Network fetches are single-flight per URL; the
+// unknown-kid refresh runs at most once per JWKS_REFRESH_COOLDOWN_MS per URL (an
+// unknown kid inside the cooldown is rejected without a fetch); and after a
+// failed fetch, new fetches wait JWKS_FAILURE_BACKOFF_MS. Keys past their TTL are
+// never used to verify.
 // ---------------------------------------------------------------------------
 
 import { createPublicKey, verify as cryptoVerify } from "node:crypto";
@@ -73,11 +77,82 @@ export type VerifiedClerkJwt = {
 // Module-level JWKS cache (keyed by jwksUrl)
 // ---------------------------------------------------------------------------
 
-const JWKS_TTL_MS = 10 * 60 * 1000; // 10 minutes
+export const JWKS_TTL_MS = 10 * 60 * 1000; // 10 minutes
 
 type CacheEntry = { keys: JsonWebKey[]; fetchedAt: number };
 
 const jwksCache = new Map<string, CacheEntry>();
+
+/** Minimum gap between two cache-bypassing (unknown-kid) JWKS refetches for one URL. */
+export const JWKS_REFRESH_COOLDOWN_MS = 30_000;
+/** After a failed JWKS fetch, no new fetch for this URL starts until this has passed. */
+export const JWKS_FAILURE_BACKOFF_MS = 5_000;
+
+/** The network fetch under way per URL: concurrent misses share it (single-flight). */
+const inflight = new Map<string, Promise<JsonWebKey[]>>();
+/** When the last cache-bypassing refetch STARTED per URL (it counts even if it failed). */
+const lastForcedRefresh = new Map<string, number>();
+/** When the last fetch for a URL failed (cleared by a success). */
+const lastFailure = new Map<string, number>();
+
+/** The cached keys for `url` while still within the TTL; otherwise none. */
+function freshCachedKeys(url: string): JsonWebKey[] {
+  const c = jwksCache.get(url);
+  return c && Date.now() - c.fetchedAt < JWKS_TTL_MS ? c.keys : [];
+}
+
+/** Clear the module-level JWKS state (tests only). */
+export function resetClerkJwksStateForTests(): void {
+  jwksCache.clear();
+  inflight.clear();
+  lastForcedRefresh.clear();
+  lastFailure.clear();
+}
+
+/**
+ * One network JWKS fetch for `url`, shared by every concurrent caller. On success
+ * the cache is replaced and the keys returned; on any failure it resolves to []
+ * (fail closed, as before) and the cached entry is left untouched. Within
+ * JWKS_FAILURE_BACKOFF_MS of a failure it resolves to [] without fetching. Never
+ * throws.
+ */
+function fetchJwksShared(url: string): Promise<JsonWebKey[]> {
+  const running = inflight.get(url);
+  if (running) {
+    return running;
+  }
+  const failedAt = lastFailure.get(url);
+  if (failedAt !== undefined && Date.now() - failedAt < JWKS_FAILURE_BACKOFF_MS) {
+    return Promise.resolve([]);
+  }
+  const p = (async (): Promise<JsonWebKey[]> => {
+    try {
+      const res = await fetch(url, {
+        method: "GET",
+        headers: { Accept: "application/json" },
+        signal: AbortSignal.timeout(10_000),
+      });
+      if (!res.ok) {
+        lastFailure.set(url, Date.now());
+        return [];
+      }
+      const jwks = (await res.json()) as Jwks;
+      const keys = Array.isArray(jwks?.keys) ? jwks.keys : [];
+      jwksCache.set(url, { keys, fetchedAt: Date.now() });
+      lastFailure.delete(url);
+      return keys;
+    } catch {
+      lastFailure.set(url, Date.now());
+      return [];
+    }
+  })().finally(() => {
+    if (inflight.get(url) === p) {
+      inflight.delete(url);
+    }
+  });
+  inflight.set(url, p);
+  return p;
+}
 
 /**
  * Resolve JWKS for a url. Fail-closed: any fetch error → empty key set.
@@ -112,24 +187,24 @@ async function resolveJwks(
     if (cached && Date.now() - cached.fetchedAt < JWKS_TTL_MS) {
       return cached.keys;
     }
+    return fetchJwksShared(url);
   }
 
-  try {
-    const res = await fetch(url, {
-      method: "GET",
-      headers: { Accept: "application/json" },
-      signal: AbortSignal.timeout(10_000),
-    });
-    if (!res.ok) {
-      return [];
-    }
-    const jwks = (await res.json()) as Jwks;
-    const keys = Array.isArray(jwks?.keys) ? jwks.keys : [];
-    jwksCache.set(url, { keys, fetchedAt: Date.now() });
-    return keys;
-  } catch {
-    return [];
+  // Cache-bypassing refetch for an unknown kid, limited per URL: a refetch already
+  // under way is shared; otherwise at most one starts per JWKS_REFRESH_COOLDOWN_MS.
+  // Inside the cooldown, only keys still within the TTL are returned, with no
+  // fetch, so an unknown kid is rejected and stale keys are never used. A real
+  // key rotation verifies once the cooldown has passed.
+  const running = inflight.get(url);
+  if (running) {
+    return running;
   }
+  const last = lastForcedRefresh.get(url);
+  if (last !== undefined && Date.now() - last < JWKS_REFRESH_COOLDOWN_MS) {
+    return freshCachedKeys(url);
+  }
+  lastForcedRefresh.set(url, Date.now());
+  return fetchJwksShared(url);
 }
 
 /**
