@@ -18,7 +18,10 @@
  * - forgetGroup erases the group's rows AND blocks writes to it for 11 minutes
  *   (lp_memory_recall_block), so a turn already in flight cannot re-create a
  *   record after a forget. Writes and forgets are serialised per group on the
- *   group's row in that table (see write); no transaction is held.
+ *   group's row in that table (its "gate", see write); no transaction is held.
+ *   A gate row that is not an active block (until <= now()) is not kept forever:
+ *   later writes of OTHER groups sweep it (until < now()), and the group's next
+ *   write recreates it.
  *
  * Rows hold fact text (PHI-grade), in the same database and under the same
  * controls as lp_memory_receipts. forget and remove delete them.
@@ -140,6 +143,18 @@ export function createPgRecallStore(sql: Sql, opts: PgRecallStoreOptions = {}): 
       // (bounded, SKIP LOCKED, oldest first), then keep this turn plus the newest
       // (cap - 1) other turns. The deletes see the pre-statement snapshot, so the
       // eviction subquery excludes this turn explicitly.
+      //
+      // Lock order — RELIED-ON PostgreSQL behaviour (an implementation detail; the
+      // docs only promise that WITH sub-statements run exactly once and leave their
+      // relative order unspecified): data-modifying CTEs that the main query does
+      // not reference (`swept`, `swept_blocks`) are run to completion AFTER the
+      // main query (the executor's post-processing step),
+      // while `gate` runs first because the main query reads it. So the gate's row
+      // lock is always taken before any SKIP LOCKED sweep lock, in every writer,
+      // and writers cannot deadlock on each other. If a PostgreSQL release ever
+      // runs unreferenced CTEs first (or this statement is restructured so the
+      // sweeps are read by the main query), move both sweeps into a SEPARATE
+      // statement issued after this one — they do not need to be atomic with it.
       await sql`
         WITH swept AS (
           DELETE FROM lp_memory_recall WHERE ctid IN (

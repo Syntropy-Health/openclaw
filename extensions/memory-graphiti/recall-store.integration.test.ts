@@ -243,16 +243,47 @@ describeIf("RecallStore (real Postgres)", () => {
 
   describe("OVERLAP: a write statement and a forget run at the same time (both orderings)", () => {
     const D = `ok_recall_d_${run}`;
-    const wait = (ms: number) => new Promise((r) => setTimeout(r, ms));
     const rowsOf = async (sql: Sql, g: string) =>
       (await sql`SELECT turn_id FROM lp_memory_recall WHERE group_id = ${g}`).length;
+
+    /** A connection whose backend is findable in pg_stat_activity by application_name. */
+    const openNamed = async (applicationName: string): Promise<Sql> => {
+      const postgres = (await import("postgres")).default;
+      const sql = postgres(DB_URL!, {
+        ssl: { rejectUnauthorized: false },
+        max: 1,
+        idle_timeout: 5,
+        connection: { application_name: applicationName },
+      }) as unknown as Sql;
+      sqls.push(sql);
+      return sql;
+    };
+
+    /** Wait (on another connection) until that backend is inside its pg_sleep. */
+    const untilPaused = async (applicationName: string, timeoutMs = 5_000) => {
+      const probe = await open();
+      const deadline = Date.now() + timeoutMs;
+      while (Date.now() < deadline) {
+        const hit = await probe`
+          SELECT 1 FROM pg_stat_activity
+          WHERE application_name = ${applicationName} AND wait_event = 'PgSleep'`;
+        if (hit.length > 0) {
+          return;
+        }
+        await new Promise((r) => setTimeout(r, 10));
+      }
+      throw new Error(`the slow write (${applicationName}) never reached its pg_sleep`);
+    };
 
     it("the forget commits while the write is paused BEFORE taking the group: no row survives", async () => {
       const sql = await open();
       await sql`DELETE FROM lp_memory_recall_block WHERE group_id = ${D}`;
-      const slow = createPgRecallStore(await open(), { testWriteDelay: { beforeGateSec: 0.4 } });
+      const app = `mg-slow-write-1-${run}`;
+      const slow = createPgRecallStore(await openNamed(app), {
+        testWriteDelay: { beforeGateSec: 0.5 },
+      });
       const write = slow.write(D, "resp_overlap_1", items(2), "ready");
-      await wait(120); // the write statement has started (its snapshot predates the forget)
+      await untilPaused(app); // the write's snapshot now predates the forget
       await createPgRecallStore(await open()).forgetGroup(D);
       await write;
       expect(await rowsOf(sql, D)).toBe(0);
@@ -261,10 +292,16 @@ describeIf("RecallStore (real Postgres)", () => {
     it("the forget arrives while the write HOLDS the group: it waits, then no row survives", async () => {
       const sql = await open();
       await sql`DELETE FROM lp_memory_recall_block WHERE group_id = ${D}`;
-      const slow = createPgRecallStore(await open(), { testWriteDelay: { afterGateSec: 0.4 } });
+      const app = `mg-slow-write-2-${run}`;
+      const slow = createPgRecallStore(await openNamed(app), {
+        testWriteDelay: { afterGateSec: 0.5 },
+      });
       const write = slow.write(D, "resp_overlap_2", items(2), "ready");
-      await wait(120);
-      await createPgRecallStore(await open()).forgetGroup(D);
+      await untilPaused(app); // the write holds the group's gate row now
+      const forgetter = createPgRecallStore(await open());
+      const t0 = Date.now();
+      await forgetter.forgetGroup(D);
+      expect(Date.now() - t0).toBeGreaterThanOrEqual(250); // it waited on the gate
       await write;
       expect(await rowsOf(sql, D)).toBe(0);
       // and the block stands for the next write
