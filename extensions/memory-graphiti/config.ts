@@ -59,6 +59,23 @@ export type GraphitiConfig = {
    * ONLY IF EVERY live WhatsApp allow-list entry is in this set. Defaults to [].
    */
   qaNumbers?: string[];
+  /**
+   * A RECORDED principal approval that lifts the QA-only PHI tripwire for the
+   * zep-cloud backend, so real users' (minimised) chat may be stored there.
+   * Absent ⇒ the QA-only tripwire applies unchanged. The approval must cite the
+   * ruling verbatim, its approvals-ledger row and its date, so the rail changes
+   * visibly in config and in the boot log — it never just disappears.
+   */
+  phiCloudApproval?: PhiCloudApproval;
+};
+
+export type PhiCloudApproval = {
+  /** The principal's ruling, verbatim. */
+  ruling: string;
+  /** The approvals ledger row that records it. */
+  approvalsRow: number;
+  /** YYYY-MM-DD the ruling was made. */
+  date: string;
 };
 
 export type GroupIdContext = {
@@ -85,6 +102,7 @@ const ALLOWED_KEYS = [
   "autoRecall",
   "maxFacts",
   "qaNumbers",
+  "phiCloudApproval",
 ];
 
 const VALID_STRATEGIES: GroupIdStrategy[] = ["channel-sender", "session", "static", "identity"];
@@ -209,7 +227,13 @@ export const graphitiConfigSchema = {
     // Validate the resolved backend has the credential it needs
     // ------------------------------------------------------------------
     if (backend === "zep-cloud" && !apiKey) {
-      throw new Error("backend 'zep-cloud' requires apiKey (Zep Cloud API key)");
+      // Read the env directly (NOT via ${...} in the shared openclaw.json, where a missing
+      // variable fails the WHOLE gateway's config load). Missing here fails only this plugin.
+      const envKey = process.env.GETZEP_API_KEY?.trim();
+      if (!envKey) {
+        throw new Error("backend 'zep-cloud' requires apiKey (or the GETZEP_API_KEY env var)");
+      }
+      apiKey = envKey;
     }
     if (backend === "self-hosted" && !serverUrl) {
       // Preserve the legacy message when nothing at all was configured, so a
@@ -296,6 +320,37 @@ export const graphitiConfigSchema = {
       qaNumbers = canonical;
     }
 
+    // phiCloudApproval (optional). Every field is REQUIRED when present: a
+    // half-written approval must not lift the tripwire.
+    let phiCloudApproval: PhiCloudApproval | undefined;
+    if (cfg.phiCloudApproval !== undefined) {
+      const a = cfg.phiCloudApproval as Record<string, unknown> | null;
+      if (!a || typeof a !== "object" || Array.isArray(a)) {
+        throw new Error("phiCloudApproval must be an object { ruling, approvalsRow, date }");
+      }
+      assertAllowedKeys(a, ["ruling", "approvalsRow", "date"], "phiCloudApproval");
+      const ruling = typeof a.ruling === "string" ? a.ruling.trim() : "";
+      const approvalsRow = typeof a.approvalsRow === "number" ? a.approvalsRow : NaN;
+      const date = typeof a.date === "string" ? a.date.trim() : "";
+      if (ruling.length < 20) {
+        throw new Error("phiCloudApproval.ruling must quote the principal's ruling (>= 20 chars)");
+      }
+      if (!Number.isInteger(approvalsRow) || approvalsRow < 1) {
+        throw new Error("phiCloudApproval.approvalsRow must be the approvals ledger row number");
+      }
+      if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) {
+        throw new Error("phiCloudApproval.date must be YYYY-MM-DD");
+      }
+      phiCloudApproval = { ruling, approvalsRow, date };
+      // The approval serves REAL users, so it must partition per verified user. A fixed
+      // userId or a static/session/channel strategy would pool or mis-key their memory.
+      if (groupIdStrategy !== "identity" || userId !== undefined || staticGroupId) {
+        throw new Error(
+          "phiCloudApproval requires groupIdStrategy 'identity' with no userId/staticGroupId (per-user memory)",
+        );
+      }
+    }
+
     return {
       backend,
       deprecationWarning,
@@ -310,6 +365,7 @@ export const graphitiConfigSchema = {
       autoRecall: cfg.autoRecall !== false,
       maxFacts,
       qaNumbers,
+      phiCloudApproval,
     };
   },
 
@@ -362,6 +418,11 @@ export const graphitiConfigSchema = {
     maxFacts: {
       label: "Max Facts",
       placeholder: "10",
+      advanced: true,
+    },
+    phiCloudApproval: {
+      label: "PHI cloud approval (lifts the QA-only tripwire)",
+      help: "Recorded principal approval { ruling (verbatim), approvalsRow, date }. When present, the zep-cloud backend may store real users' minimised chat. Absent: QA-only.",
       advanced: true,
     },
     qaNumbers: {

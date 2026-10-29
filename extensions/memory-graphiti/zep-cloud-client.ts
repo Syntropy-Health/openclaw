@@ -4,7 +4,20 @@
  */
 
 import { ZepClient } from "@getzep/zep-cloud";
-import type { MemoryClient, FactResult, EpisodeResult, GraphitiMessage } from "./client.js";
+import {
+  batchText,
+  type MemoryClient,
+  type FactResult,
+  type EpisodeResult,
+  type GraphitiMessage,
+} from "./client.js";
+import {
+  IngestNotConfirmedError,
+  textHash,
+  type ConfirmResult,
+  type IngestItem,
+  type Submission,
+} from "./receipts.js";
 
 /**
  * Maps Zep Cloud userId concept to our groupId.
@@ -38,6 +51,73 @@ export class ZepCloudClient implements MemoryClient {
       type: "message",
       sourceDescription: messages[0]?.source_description ?? "openclaw",
     });
+  }
+
+  /** graph.add returns the Episode it created; its uuid is the submission ref. */
+  async submit(groupId: string, items: IngestItem[]): Promise<Submission> {
+    let uuid: string | undefined;
+    try {
+      await this.ensureUser(groupId);
+      const ep = await this.zep.graph.add({
+        userId: groupId,
+        data: batchText(items),
+        type: "message",
+        sourceDescription: "openclaw",
+      });
+      uuid = ep?.uuid;
+    } catch (err) {
+      throw new IngestNotConfirmedError(`zep graph.add failed: ${String(err)}`, "store_error");
+    }
+    if (!uuid) {
+      throw new IngestNotConfirmedError("zep graph.add returned no episode uuid", "store_error");
+    }
+    return { ref: uuid };
+  }
+
+  /**
+   * Read the episode back by uuid. Confirmed only when its content is exactly
+   * what was sent (sha256) AND Zep reports it processed (graph extraction done);
+   * a still-processing episode is "pending" and is re-checked later, never re-sent.
+   */
+  async confirm(
+    _groupId: string,
+    items: IngestItem[],
+    submission: Submission,
+  ): Promise<ConfirmResult> {
+    let ep: { content?: string; processed?: boolean } | undefined;
+    try {
+      ep = await this.zep.graph.episode.get(submission.ref);
+    } catch (err) {
+      if ((err as { statusCode?: number }).statusCode === 404) {
+        return { status: "pending" }; // not visible yet
+      }
+      throw new IngestNotConfirmedError(
+        `zep episode read-back failed: ${String(err)}`,
+        "store_error",
+      );
+    }
+    if (typeof ep?.content !== "string" || textHash(ep.content) !== textHash(batchText(items))) {
+      throw new IngestNotConfirmedError(
+        "zep episode read-back content does not match what was sent",
+        "readback_mismatch",
+      );
+    }
+    return ep.processed === true
+      ? { status: "confirmed", episodeIds: [submission.ref] }
+      : { status: "pending" };
+  }
+
+  /** Delete the Zep user and with it the user's graph. A missing user is already forgotten. */
+  async forget(groupId: string): Promise<boolean> {
+    try {
+      await this.zep.user.delete(groupId);
+      return true;
+    } catch (err: unknown) {
+      if ((err as { statusCode?: number }).statusCode === 404) {
+        return false;
+      }
+      throw err;
+    }
   }
 
   /**

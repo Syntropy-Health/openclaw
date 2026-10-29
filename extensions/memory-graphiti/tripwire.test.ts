@@ -19,6 +19,17 @@ import { graphitiConfigSchema } from "./config.js";
 import { computeIsQaOnly, isCanonicalE164, senderZepAllowed } from "./tripwire.js";
 import { ZepCloudClient } from "./zep-cloud-client.js";
 
+/** Capture is fire-and-forget (ingest after a ledger lookup): let it run before asserting. */
+const flushCapture = () => new Promise((r) => setTimeout(r, 0));
+/**
+ * Capture reaches the store through submit (then confirm). Stub both at the
+ * network edge and return the submit spy: "not called" means nothing was sent.
+ */
+function spyCapture(C: typeof ZepCloudClient | typeof GraphitiRestClient) {
+  vi.spyOn(C.prototype, "confirm").mockResolvedValue({ status: "confirmed", episodeIds: ["ep-1"] });
+  return vi.spyOn(C.prototype, "submit").mockResolvedValue({ ref: "ep-1" });
+}
+
 // ============================================================================
 // senderZepAllowed — the PRIMARY per-sender gate (exact truth conditions).
 //
@@ -455,7 +466,7 @@ describe("NEW-5: cloud gate tracks the constructed client, not cfg.backend", () 
   });
 
   it("legacy apiKey-inference cloud client: per-call capture gate ACTIVE — NON-QA sender's addMessages NOT called", async () => {
-    const addSpy = vi.spyOn(ZepCloudClient.prototype, "addMessages").mockResolvedValue(undefined);
+    const addSpy = spyCapture(ZepCloudClient);
     try {
       const { hooks, logger } = await registerWith({
         pluginConfig: {
@@ -471,6 +482,7 @@ describe("NEW-5: cloud gate tracks the constructed client, not cfg.backend", () 
         { success: true, messages: [{ role: "user", content: "Hello, my BP is 140/90" }] },
         REAL_SENDER_CTX,
       );
+      await flushCapture();
 
       expect(addSpy).not.toHaveBeenCalled();
       const breachLogged = logger.error.mock.calls.some((c) =>
@@ -483,7 +495,7 @@ describe("NEW-5: cloud gate tracks the constructed client, not cfg.backend", () 
   });
 
   it("legacy apiKey-inference cloud client: per-call capture gate ALLOWS a QA sender", async () => {
-    const addSpy = vi.spyOn(ZepCloudClient.prototype, "addMessages").mockResolvedValue(undefined);
+    const addSpy = spyCapture(ZepCloudClient);
     try {
       const { hooks } = await registerWith({
         pluginConfig: {
@@ -498,6 +510,7 @@ describe("NEW-5: cloud gate tracks the constructed client, not cfg.backend", () 
         { success: true, messages: [{ role: "user", content: "Hello" }] },
         QA_SENDER_CTX,
       );
+      await flushCapture();
 
       expect(addSpy).toHaveBeenCalledOnce();
     } finally {
@@ -514,7 +527,7 @@ describe("NEW-5: cloud gate tracks the constructed client, not cfg.backend", () 
 
 describe("per-sender gate: capture (agent_end)", () => {
   it("cloud + NON-QA sender: addMessages NOT called, breach logged (no PHI write)", async () => {
-    const addSpy = vi.spyOn(ZepCloudClient.prototype, "addMessages").mockResolvedValue(undefined);
+    const addSpy = spyCapture(ZepCloudClient);
     try {
       const { hooks, logger } = await registerWith({
         pluginConfig: {
@@ -530,6 +543,7 @@ describe("per-sender gate: capture (agent_end)", () => {
         { success: true, messages: [{ role: "user", content: "Hello, my BP is 140/90" }] },
         REAL_SENDER_CTX,
       );
+      await flushCapture();
 
       expect(addSpy).not.toHaveBeenCalled();
       const breachLogged = logger.error.mock.calls.some((c) =>
@@ -547,7 +561,7 @@ describe("per-sender gate: capture (agent_end)", () => {
   });
 
   it("cloud + QA sender: addMessages IS called (PHI write allowed for QA)", async () => {
-    const addSpy = vi.spyOn(ZepCloudClient.prototype, "addMessages").mockResolvedValue(undefined);
+    const addSpy = spyCapture(ZepCloudClient);
     try {
       const { hooks } = await registerWith({
         pluginConfig: {
@@ -563,6 +577,7 @@ describe("per-sender gate: capture (agent_end)", () => {
         { success: true, messages: [{ role: "user", content: "Hello" }] },
         QA_SENDER_CTX,
       );
+      await flushCapture();
 
       expect(addSpy).toHaveBeenCalledOnce();
     } finally {
@@ -571,9 +586,7 @@ describe("per-sender gate: capture (agent_end)", () => {
   });
 
   it("SELF-HOSTED + non-QA sender: NOT gated — addMessages still called (PHI in-house sanctioned)", async () => {
-    const addSpy = vi
-      .spyOn(GraphitiRestClient.prototype, "addMessages")
-      .mockResolvedValue(undefined);
+    const addSpy = spyCapture(GraphitiRestClient);
     try {
       const { hooks } = await registerWith({
         pluginConfig: {
@@ -588,6 +601,7 @@ describe("per-sender gate: capture (agent_end)", () => {
         { success: true, messages: [{ role: "user", content: "Hello" }] },
         REAL_SENDER_CTX,
       );
+      await flushCapture();
 
       expect(addSpy).toHaveBeenCalledOnce();
     } finally {

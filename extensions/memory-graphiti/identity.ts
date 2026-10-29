@@ -8,6 +8,7 @@
 
 import type postgres from "postgres";
 import { deriveScopeKey } from "../shared/scope-key.js";
+import { deriveIdentityPeer } from "../shared/session-key.js";
 import type { GroupIdContext } from "./config.js";
 
 // ---------------------------------------------------------------------------
@@ -84,6 +85,44 @@ export function externalIdScopeKey(ctx: GroupIdContext): string | null {
  * otherwise falls back to the internal `user_id` UUID.
  * Returns null when the peer is not registered in the identity tables.
  */
+/**
+ * The VERIFIED identity behind a turn, mirroring auth-memory-gate exactly (so
+ * memory can never serve a turn the gate would block): the peer is derived the
+ * SAME way the gate derives it (deriveIdentityPeer: device id when threaded, else
+ * the session key), the row must carry an external_id (a verified Clerk link —
+ * self-registered, unverified peers do not count), and when the turn carries a
+ * verified Clerk sub it must equal that row's external_id (reconcile).
+ * Returns the external_id, or null.
+ */
+export async function resolveVerifiedExternalId(
+  sql: postgres.Sql,
+  ctx: GroupIdContext & { deviceId?: string | null },
+): Promise<string | null> {
+  const sessionKey = ctx.sessionKey ?? "";
+  const channel = ctx.messageProvider ?? deriveChannel(sessionKey);
+  const peerId = deriveIdentityPeer(ctx);
+  if (!peerId || peerId === "main" || peerId === "unknown") {
+    return null;
+  }
+  const rows = await sql`
+    SELECT u.external_id
+    FROM lp_users u
+    JOIN lp_user_channels uc ON uc.user_id = u.id
+    WHERE uc.channel = ${channel}
+      AND uc.channel_peer_id = ${peerId}
+    LIMIT 1
+  `;
+  const externalId = (rows[0]?.external_id as string | null | undefined) ?? null;
+  if (!externalId) {
+    return null;
+  }
+  const sub = typeof ctx.externalId === "string" ? ctx.externalId.trim() : "";
+  if (sub && sub !== externalId) {
+    return null;
+  }
+  return externalId;
+}
+
 export async function resolveIdentityScopeKey(
   sql: postgres.Sql,
   ctx: GroupIdContext,

@@ -83,6 +83,12 @@
       "memory-graphiti": {
         "enabled": true,
         "config": {
+          "backend": "zep-cloud",
+          "phiCloudApproval": {
+            "ruling": "use Zep now, zep is accepted as BAA. productionize GCP Graphiti in parallel",
+            "approvalsRow": 42,
+            "date": "2026-10-26"
+          },
           "groupIdStrategy": "identity",
           "autoCapture": true,
           "autoRecall": true,
