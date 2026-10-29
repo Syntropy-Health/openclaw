@@ -611,16 +611,20 @@ describe("per-sender gate: capture (agent_end)", () => {
 });
 
 describe("per-sender gate: recall (before_agent_start)", () => {
-  it("cloud + NON-QA sender: searchFacts NOT called, no prependContext, breach logged", async () => {
-    const searchSpy = vi.spyOn(ZepCloudClient.prototype, "searchFacts").mockResolvedValue([
+  it("cloud + NON-QA sender: no search (ranked or plain), no prependContext, breach logged", async () => {
+    const plainSpy = vi.spyOn(ZepCloudClient.prototype, "searchFacts").mockResolvedValue([]);
+    const searchSpy = vi.spyOn(ZepCloudClient.prototype, "searchRanked").mockResolvedValue([
       {
-        uuid: "f1",
+        id: "f1",
         name: "pref",
         fact: "leaked",
-        valid_at: null,
-        invalid_at: null,
-        created_at: "2026-01-01",
-        expired_at: null,
+        validAt: null,
+        invalidAt: null,
+        createdAt: "2026-01-01",
+        expiredAt: null,
+        episodeIds: [],
+        rank: 1,
+        score: null,
       },
     ]);
     try {
@@ -640,6 +644,7 @@ describe("per-sender gate: recall (before_agent_start)", () => {
       )) as { prependContext?: string } | undefined;
 
       expect(searchSpy).not.toHaveBeenCalled();
+      expect(plainSpy).not.toHaveBeenCalled();
       expect(result?.prependContext).toBeUndefined();
       const breachLogged = logger.error.mock.calls.some((c) =>
         String(c[0]).includes("phi_tripwire_breach"),
@@ -647,11 +652,12 @@ describe("per-sender gate: recall (before_agent_start)", () => {
       expect(breachLogged).toBe(true);
     } finally {
       searchSpy.mockRestore();
+      plainSpy.mockRestore();
     }
   });
 
-  it("cloud + QA sender: searchFacts IS called", async () => {
-    const searchSpy = vi.spyOn(ZepCloudClient.prototype, "searchFacts").mockResolvedValue([]);
+  it("cloud + QA sender: searchRanked IS called", async () => {
+    const searchSpy = vi.spyOn(ZepCloudClient.prototype, "searchRanked").mockResolvedValue([]);
     try {
       const { hooks } = await registerWith({
         pluginConfig: {
@@ -671,8 +677,8 @@ describe("per-sender gate: recall (before_agent_start)", () => {
     }
   });
 
-  it("SELF-HOSTED + non-QA sender: NOT gated — searchFacts still called", async () => {
-    const searchSpy = vi.spyOn(GraphitiRestClient.prototype, "searchFacts").mockResolvedValue([]);
+  it("SELF-HOSTED + non-QA sender: NOT gated — searchRanked still called", async () => {
+    const searchSpy = vi.spyOn(GraphitiRestClient.prototype, "searchRanked").mockResolvedValue([]);
     try {
       const { hooks } = await registerWith({
         pluginConfig: {

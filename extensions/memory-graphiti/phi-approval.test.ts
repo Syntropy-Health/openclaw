@@ -217,7 +217,8 @@ describe("capture under the approval", () => {
   ])("%s: nothing is sent and nothing is recalled", async (_label, setup, ctx) => {
     setup();
     const submit = spyStore();
-    const search = vi.spyOn(ZepCloudClient.prototype, "searchFacts").mockResolvedValue([]);
+    const search = vi.spyOn(ZepCloudClient.prototype, "searchRanked").mockResolvedValue([]);
+    const plainSearch = vi.spyOn(ZepCloudClient.prototype, "searchFacts").mockResolvedValue([]);
     const { hooks } = await register(cloudCfg({ phiCloudApproval: APPROVAL }));
     await hooks.before_agent_start?.({ prompt: "what do you know about me?" }, ctx);
     await hooks.agent_end?.(
@@ -226,6 +227,7 @@ describe("capture under the approval", () => {
     );
     await flush();
     expect(search).not.toHaveBeenCalled();
+    expect(plainSearch).not.toHaveBeenCalled();
     expect(submit).not.toHaveBeenCalled();
   });
 });
@@ -242,7 +244,8 @@ describe("the group-id pepper is REQUIRED under the approval (CTO #16929)", () =
     }
     db.peers.set("u1", CLERK);
     const submit = spyStore();
-    const search = vi.spyOn(ZepCloudClient.prototype, "searchFacts").mockResolvedValue([]);
+    const search = vi.spyOn(ZepCloudClient.prototype, "searchRanked").mockResolvedValue([]);
+    const plainSearch = vi.spyOn(ZepCloudClient.prototype, "searchFacts").mockResolvedValue([]);
     const { hooks, logger } = await register(cloudCfg({ phiCloudApproval: APPROVAL }));
     await hooks.before_agent_start?.({ prompt: "what do you know about me?" }, VERIFIED);
     await hooks.agent_end?.(
@@ -251,6 +254,7 @@ describe("the group-id pepper is REQUIRED under the approval (CTO #16929)", () =
     );
     await flush();
     expect(search).not.toHaveBeenCalled();
+    expect(plainSearch).not.toHaveBeenCalled();
     expect(submit).not.toHaveBeenCalled();
     expect(logger.error.mock.calls.map((c) => String(c[0])).join("\n")).toMatch(
       /OPENCLAW_MEMORY_GROUP_KEY.*REFUSED/,
@@ -274,12 +278,14 @@ describe("the group-id pepper is REQUIRED under the approval (CTO #16929)", () =
 describe("recall and tools under the approval", () => {
   it("recall runs for a verified user, keyed by the opaque group, with a minimised query", async () => {
     db.peers.set("u1", CLERK);
-    const search = vi.spyOn(ZepCloudClient.prototype, "searchFacts").mockResolvedValue([]);
+    const search = vi.spyOn(ZepCloudClient.prototype, "searchRanked").mockResolvedValue([]);
+    const plainSearch = vi.spyOn(ZepCloudClient.prototype, "searchFacts").mockResolvedValue([]);
     const { hooks } = await register(cloudCfg({ phiCloudApproval: APPROVAL }));
     await hooks.before_agent_start?.({ prompt: `my id is ${CLERK}, what do you know?` }, VERIFIED);
     expect(search).toHaveBeenCalledOnce();
-    expect(search.mock.calls[0][1]).toEqual([opaqueGroupId(CLERK, PEPPER)]);
-    expect(search.mock.calls[0][0]).not.toContain(CLERK);
+    expect(plainSearch).not.toHaveBeenCalled();
+    expect(search.mock.calls[0][0]).toBe(opaqueGroupId(CLERK, PEPPER));
+    expect(search.mock.calls[0][1]).not.toContain(CLERK);
   });
 
   it("the graphiti_* tools stay QA-only: no per-call identity, so no cross-user read", async () => {

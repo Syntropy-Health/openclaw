@@ -59,6 +59,11 @@
       "help": "Known-synthetic/QA WhatsApp numbers (E.164).",
       "advanced": true
     },
+    "recall": {
+      "label": "Recall tuning",
+      "help": "{ reranker: rrf | mmr | cross_encoder (default rrf), timeoutMs (default 800 ms; past it the turn gets no facts — previously recall waited up to ~60 s on Zep, 5 s on REST), mmrLambda (0..1, default 0.5, mmr only) }.",
+      "advanced": true
+    },
     "phiCloudApproval": {
       "label": "PHI cloud approval",
       "help": "Recorded principal approval { ruling (verbatim), approvalsRow, date } that lets zep-cloud store identified real users' minimised chat. Absent: QA-only.",
@@ -107,6 +112,26 @@
         "type": "array",
         "items": {
           "type": "string"
+        }
+      },
+      "recall": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "reranker": {
+            "type": "string",
+            "enum": ["rrf", "mmr", "cross_encoder"]
+          },
+          "timeoutMs": {
+            "type": "integer",
+            "minimum": 50,
+            "maximum": 10000
+          },
+          "mmrLambda": {
+            "type": "number",
+            "minimum": 0,
+            "maximum": 1
+          }
         }
       },
       "phiCloudApproval": {

@@ -212,6 +212,8 @@ export async function runEmbeddedPiAgent(
       // before it gets resolved. The hook result is passed downstream to
       // attempt.ts to avoid double-firing.
       let earlyHookResult: PluginHookBeforeAgentStartResult | undefined;
+      // "Ran and returned nothing" is distinct from "did not run": see run/before-agent-start.ts.
+      let earlyHookRan = false;
       const hookRunner = getGlobalHookRunner();
       if (hookRunner?.hasHooks("before_agent_start")) {
         try {
@@ -221,6 +223,7 @@ export async function runEmbeddedPiAgent(
               agentId: params.agentId,
               sessionKey: params.sessionKey,
               sessionId: params.sessionId,
+              runId: params.runId,
               workspaceDir: params.workspaceDir,
               messageProvider: resolveHookChannel(params),
               senderE164: params.senderE164,
@@ -228,6 +231,7 @@ export async function runEmbeddedPiAgent(
               deviceId: params.deviceId,
             },
           );
+          earlyHookRan = true;
           if (earlyHookResult?.providerOverride) {
             provider = earlyHookResult.providerOverride;
             log.info(`[hooks] provider overridden to ${provider}`);
@@ -543,6 +547,7 @@ export async function runEmbeddedPiAgent(
             ownerNumbers: params.ownerNumbers,
             enforceFinalTag: params.enforceFinalTag,
             earlyHookResult,
+            earlyHookRan,
           });
 
           const {

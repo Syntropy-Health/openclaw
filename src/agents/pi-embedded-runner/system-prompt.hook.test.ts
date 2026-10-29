@@ -1,5 +1,6 @@
 import fs from "node:fs";
 import path from "node:path";
+import ts from "typescript";
 import { describe, expect, it } from "vitest";
 import { buildEmbeddedSystemPrompt, mergeHookSystemPrompt } from "./system-prompt.js";
 
@@ -36,7 +37,11 @@ describe("mergeHookSystemPrompt (before_agent_start systemPrompt)", () => {
 // pinned at the source: the build uses the early hook's systemPrompt, and the fallback path
 // (early hook threw) rebuilds and re-applies with the late hook's systemPrompt.
 describe("attempt.ts wiring (source pin)", () => {
-  const src = fs.readFileSync(path.join(import.meta.dirname, "run", "attempt.ts"), "utf8");
+  // Comments stripped: a commented-out line must not satisfy a pin.
+  const file = path.join(import.meta.dirname, "run", "attempt.ts");
+  const src = ts
+    .createPrinter({ removeComments: true })
+    .printFile(ts.createSourceFile(file, fs.readFileSync(file, "utf8"), ts.ScriptTarget.Latest));
 
   it("builds the system prompt with the early hook's systemPrompt", () => {
     expect(src).toMatch(
@@ -46,7 +51,7 @@ describe("attempt.ts wiring (source pin)", () => {
 
   it("re-applies a late hook systemPrompt only on the fallback path", () => {
     expect(src).toMatch(
-      /if \(!params\.earlyHookResult\) \{[\s\S]{0,400}mergeHookSystemPrompt\([\s\S]{0,120}hookResult\?\.systemPrompt[\s\S]{0,300}systemPromptText = buildPromptWith\(lateSystemPrompt\);\s*applySystemPromptOverrideToSession\(activeSession, systemPromptText\)/,
+      /if \(hookFallback\) \{[\s\S]{0,400}mergeHookSystemPrompt\([\s\S]{0,120}hookResult\?\.systemPrompt[\s\S]{0,300}systemPromptText = buildPromptWith\(lateSystemPrompt\);\s*applySystemPromptOverrideToSession\(activeSession, systemPromptText\)/,
     );
   });
 });

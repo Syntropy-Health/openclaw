@@ -10,6 +10,12 @@ import {
   type FactResult,
   type EpisodeResult,
   type GraphitiMessage,
+  type ListFactsOptions,
+  type ListFactsResult,
+  type MemoryCapabilities,
+  type MemoryFact,
+  type RankedFact,
+  type SearchRankedOptions,
 } from "./client.js";
 import {
   IngestNotConfirmedError,
@@ -19,6 +25,43 @@ import {
   type Submission,
 } from "./receipts.js";
 
+/** Page size for graph.edge.getByUserId. */
+export const ZEP_EDGE_PAGE = 50;
+/** Zep's per-search result cap. */
+export const ZEP_SEARCH_MAX = 50;
+/** Most edges one listFacts call reads (40 pages): bounded cost per user. */
+export const ZEP_LIST_CEILING = 2_000;
+
+type ZepEdge = {
+  uuid: string;
+  fact: string;
+  name: string;
+  createdAt: string;
+  validAt?: string;
+  invalidAt?: string;
+  expiredAt?: string;
+  episodes?: string[];
+  score?: number;
+};
+
+/** SDK EntityEdge → MemoryFact (absent optional fields become null / []). */
+function toMemoryFact(e: ZepEdge): MemoryFact {
+  return {
+    id: e.uuid,
+    fact: e.fact,
+    name: e.name,
+    validAt: e.validAt ?? null,
+    invalidAt: e.invalidAt ?? null,
+    createdAt: e.createdAt,
+    expiredAt: e.expiredAt ?? null,
+    episodeIds: e.episodes ?? [],
+  };
+}
+
+export type ZepCloudClientOptions = {
+  logger?: { warn: (message: string) => void };
+};
+
 /**
  * Maps Zep Cloud userId concept to our groupId.
  * In cloud mode, groupId IS the userId.
@@ -26,10 +69,122 @@ import {
 export class ZepCloudClient implements MemoryClient {
   readonly label: string;
   private readonly zep: ZepClient;
+  private readonly logger: ZepCloudClientOptions["logger"];
 
-  constructor(apiKey: string) {
+  constructor(apiKey: string, opts: ZepCloudClientOptions = {}) {
     this.zep = new ZepClient({ apiKey });
     this.label = "zep-cloud";
+    this.logger = opts.logger;
+  }
+
+  capabilities(): MemoryCapabilities {
+    return {
+      listFacts: true,
+      forgetFacts: true,
+      rerankers: ["rrf", "mmr", "cross_encoder"],
+      scores: true,
+    };
+  }
+
+  /**
+   * Every fact of a user, paged with graph.edge.getByUserId (a bare page, no next
+   * cursor: the cursor is the uuid of the last item read). Pages until a short or
+   * empty page. Invalidated or expired facts are dropped unless includeInvalid.
+   * At most ZEP_LIST_CEILING edges are read per call; stopping there with more
+   * left is logged as truncated and returns a cursor to continue from.
+   */
+  async listFacts(groupId: string, opts: ListFactsOptions = {}): Promise<ListFactsResult> {
+    const target = Math.min(opts.limit ?? ZEP_LIST_CEILING, ZEP_LIST_CEILING);
+    const since = opts.since ? Date.parse(opts.since) : null;
+    const facts: MemoryFact[] = [];
+    let cursor = opts.cursor;
+    let read = 0;
+    while (facts.length < target && read < ZEP_LIST_CEILING) {
+      const pageSize = Math.min(ZEP_EDGE_PAGE, target - facts.length, ZEP_LIST_CEILING - read);
+      const page = (await this.zep.graph.edge.getByUserId(
+        groupId,
+        cursor ? { limit: pageSize, uuidCursor: cursor } : { limit: pageSize },
+      )) as ZepEdge[];
+      read += page.length;
+      for (const edge of page) {
+        cursor = edge.uuid;
+        if (!opts.includeInvalid && (edge.invalidAt || edge.expiredAt)) {
+          continue;
+        }
+        if (since !== null && Date.parse(edge.createdAt) < since) {
+          continue;
+        }
+        facts.push(toMemoryFact(edge));
+      }
+      if (page.length < pageSize) {
+        return { facts, nextCursor: null };
+      }
+    }
+    // Stopped by the ceiling (not by the caller's own, lower limit): more may remain.
+    const truncated = read >= ZEP_LIST_CEILING || target === ZEP_LIST_CEILING;
+    if (truncated) {
+      this.logger?.warn(
+        `memory-graphiti: listFacts truncated at the ${ZEP_LIST_CEILING}-fact ceiling (facts=${facts.length})`,
+      );
+    }
+    return { facts, nextCursor: cursor ?? null, ...(truncated ? { truncated } : {}) };
+  }
+
+  /**
+   * One ranked edge search for the user. The SDK's order IS the rank (rank =
+   * index + 1); it is never re-sorted here. `score` is Zep's reranker output (the
+   * ordinal for rrf). The abort signal goes through the SDK request options.
+   */
+  async searchRanked(
+    groupId: string,
+    query: string,
+    opts: SearchRankedOptions,
+  ): Promise<RankedFact[]> {
+    const results = await this.zep.graph.search(
+      {
+        userId: groupId,
+        query,
+        scope: "edges",
+        reranker: opts.reranker,
+        limit: Math.min(opts.limit, ZEP_SEARCH_MAX),
+        ...(opts.mmrLambda !== undefined ? { mmrLambda: opts.mmrLambda } : {}),
+      },
+      opts.signal ? { abortSignal: opts.signal } : undefined,
+    );
+    return ((results.edges ?? []) as ZepEdge[]).map((edge, i) => ({
+      ...toMemoryFact(edge),
+      rank: i + 1,
+      score: typeof edge.score === "number" ? edge.score : null,
+    }));
+  }
+
+  /**
+   * Delete facts (edges) by id. A 404 means already gone and counts as absent, so
+   * a retry after a partial failure is idempotent; any other error propagates.
+   * Ownership is NOT checked here: Zep edge uuids are global and graph.edge.delete
+   * does not take a user, so an id from another user's graph WOULD be deleted. The
+   * MemoryFactSurface contract puts the check on the caller, which must pass only
+   * ids of facts owned by `groupId`; no caller exists in PR-1, and PR-2's remove
+   * path enforces the check before calling this.
+   */
+  async forgetFacts(
+    _groupId: string,
+    factIds: string[],
+  ): Promise<{ deleted: number; absent: number }> {
+    let deleted = 0;
+    let absent = 0;
+    for (const id of new Set(factIds)) {
+      try {
+        await this.zep.graph.edge.delete(id);
+        deleted++;
+      } catch (err) {
+        if ((err as { statusCode?: number }).statusCode !== 404) {
+          throw err;
+        }
+        absent++;
+      }
+    }
+    return { deleted, absent };
   }
 
   /**

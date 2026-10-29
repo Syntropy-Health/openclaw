@@ -83,6 +83,7 @@ export async function runCliAgent(params: {
           agentId: params.agentId,
           sessionKey: params.sessionKey,
           sessionId: params.sessionId,
+          runId: params.runId,
           workspaceDir,
         },
       );

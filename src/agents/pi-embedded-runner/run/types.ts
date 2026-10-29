@@ -22,6 +22,11 @@ export type EmbeddedRunAttemptParams = EmbeddedRunAttemptBase & {
   thinkLevel: ThinkLevel;
   /** Pre-computed hook result from run.ts to avoid double-firing before_agent_start. */
   earlyHookResult?: PluginHookBeforeAgentStartResult;
+  /**
+   * True when run.ts called before_agent_start and the call did not throw, even if
+   * every hook returned nothing. The attempt then never runs the hook again.
+   */
+  earlyHookRan?: boolean;
 };
 
 export type EmbeddedRunAttemptResult = {

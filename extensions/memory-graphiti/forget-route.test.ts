@@ -50,6 +50,7 @@ const ok = (over: Partial<ForgetResult> = {}): ForgetResult => ({
   sharedSkipped: 0,
   lockedSkipped: 0,
   vanished: 0,
+  recall: 0,
   ...over,
 });
 
@@ -191,6 +192,95 @@ describe("forgetByExternalId + tombstones (end to end, real files)", () => {
   afterEach(() => fs.rmSync(stateDir, { recursive: true, force: true }));
 
   const noRows = (async () => []) as unknown as Parameters<typeof forgetByExternalId>[0]["sql"];
+
+  /** Recall rows per group (the lp_memory_recall erase set; storage is tested elsewhere). */
+  const recallRows = () => {
+    const rows = new Map<string, number>();
+    return {
+      rows,
+      forgetGroup: vi.fn(async (group: string) => {
+        const n = rows.get(group) ?? 0;
+        rows.delete(group);
+        return n;
+      }),
+    };
+  };
+
+  it("also deletes the user's recall records (lp_memory_recall), and only theirs", async () => {
+    const ledger = createMemoryReceiptLedger();
+    const recall = recallRows();
+    recall.rows.set(opaque(SUB), 3);
+    recall.rows.set(opaque("user_someoneElse"), 2);
+    const r = await forgetByExternalId({
+      sql: noRows,
+      client: { forget: vi.fn(async () => true) },
+      ledger,
+      recall,
+      opaque,
+      externalId: SUB,
+      stateDir,
+    });
+    expect(r.recall).toBe(3);
+    expect(recall.forgetGroup).toHaveBeenCalledWith(opaque(SUB));
+    expect(recall.rows.get(opaque(SUB))).toBeUndefined();
+    expect(recall.rows.get(opaque("user_someoneElse"))).toBe(2);
+    expect(forgetOutcome(r).status).toBe("SUCCEEDED");
+    // idempotent: a repeat finds nothing more
+    expect(
+      (
+        await forgetByExternalId({
+          sql: noRows,
+          client: { forget: vi.fn(async () => false) },
+          ledger,
+          recall,
+          opaque,
+          externalId: SUB,
+          stateDir,
+        })
+      ).recall,
+    ).toBe(0);
+  });
+
+  it("recall is blocked and erased FIRST: a store failure afterwards still leaves no recall rows", async () => {
+    const recall = recallRows();
+    recall.rows.set(opaque(SUB), 2);
+    await expect(
+      forgetByExternalId({
+        sql: noRows,
+        client: {
+          forget: vi.fn(async () => {
+            throw new Error("zep 503");
+          }),
+        },
+        ledger: createMemoryReceiptLedger(),
+        recall,
+        opaque,
+        externalId: SUB,
+        stateDir,
+      }),
+    ).rejects.toThrow("zep 503");
+    expect(recall.forgetGroup).toHaveBeenCalledWith(opaque(SUB));
+    expect(recall.rows.get(opaque(SUB))).toBeUndefined();
+  });
+
+  it("a recall delete failure fails the erase (never a SUCCEEDED with records left)", async () => {
+    const recall = {
+      forgetGroup: vi.fn(async () => {
+        throw new Error("db down");
+      }),
+    };
+    await expect(
+      forgetByExternalId({
+        sql: noRows,
+        client: { forget: vi.fn(async () => true) },
+        ledger: createMemoryReceiptLedger(),
+        recall,
+        opaque,
+        externalId: SUB,
+        stateDir,
+      }),
+    ).rejects.toThrow("db down");
+  });
 
   it("clears the user's group, receipts and transcripts — then a live-session replay re-sends NOTHING", async () => {
     const ledger = createMemoryReceiptLedger();
