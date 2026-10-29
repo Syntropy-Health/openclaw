@@ -21,6 +21,7 @@ import {
   type FactResult,
   type GraphitiMessage,
   type MemoryClient,
+  type RankedFact,
 } from "./client.js";
 import {
   deriveGroupId,
@@ -39,6 +40,13 @@ import { createGroupLock } from "./lock.js";
 import { extractMessages } from "./messages.js";
 import { minimiseForMemory } from "./minimise.js";
 import {
+  createPgRecallStore,
+  toRecallItems,
+  type RecallItem,
+  type RecallState,
+  type RecallStore,
+} from "./recall-store.js";
+import {
   createMemoryReceiptLedger,
   createPgReceiptLedger,
   ensureReceiptSchema,
@@ -51,6 +59,19 @@ import { ZepCloudClient } from "./zep-cloud-client.js";
 
 /** Minimum pepper length: 32 random bytes as hex is 64 chars; anything under 32 is refused. */
 export const MIN_PEPPER_CHARS = 32;
+
+/** Default budget for the per-turn recall search (A&D §4.6). */
+export const RECALL_TIMEOUT_DEFAULT_MS = 800;
+
+/** Settles with `fallback` once `ms` pass, whatever `p` does (p's rejection is observed). */
+function within<T, F>(p: Promise<T>, ms: number, fallback: F): Promise<T | F> {
+  p.catch(() => {}); // a late rejection must never become unhandled
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const deadline = new Promise<F>((resolve) => {
+    timer = setTimeout(() => resolve(fallback), Math.max(0, ms));
+  });
+  return Promise.race([p, deadline]).finally(() => clearTimeout(timer));
+}
 
 // ============================================================================
 // Client factory
@@ -96,6 +117,19 @@ const PROMPT_ESCAPE_MAP: Record<string, string> = {
 
 function escapeForPrompt(text: string): string {
   return text.replace(/[&<>"']/g, (char) => PROMPT_ESCAPE_MAP[char] ?? char);
+}
+
+/** A ranked fact in the FactResult shape formatGraphitiFacts reads. */
+function rankedToFactResult(f: RankedFact): FactResult {
+  return {
+    uuid: f.id,
+    name: f.name,
+    fact: f.fact,
+    valid_at: f.validAt,
+    invalid_at: f.invalidAt,
+    created_at: f.createdAt,
+    expired_at: f.expiredAt,
+  };
 }
 
 function formatGraphitiFacts(facts: FactResult[]): string {
@@ -257,18 +291,19 @@ const memoryPlugin = {
     // in-memory ledger (receipts then do not survive a restart, so the sweep holds
     // and re-ingest is de-duplicated only per process — fail closed, logged).
     let ledger: ReceiptLedger;
+    // The plugin's lp_memory_* tables, created once on first use (retried on failure).
+    let schema: Promise<void> | null = null;
+    const ready = () =>
+      (schema ??= ensureReceiptSchema(
+        identitySql as unknown as Parameters<typeof ensureReceiptSchema>[0],
+      ).catch((err) => {
+        schema = null;
+        throw err;
+      }));
     if (identitySql) {
       const pg = createPgReceiptLedger(
         identitySql as unknown as Parameters<typeof createPgReceiptLedger>[0],
       );
-      let schema: Promise<void> | null = null;
-      const ready = () =>
-        (schema ??= ensureReceiptSchema(
-          identitySql as unknown as Parameters<typeof ensureReceiptSchema>[0],
-        ).catch((err) => {
-          schema = null;
-          throw err;
-        }));
       ledger = {
         covered: async (g, h) => (await ready(), pg.covered(g, h)),
         record: async (r) => (await ready(), pg.record(r)),
@@ -298,6 +333,31 @@ const memoryPlugin = {
       ledger = createMemoryReceiptLedger();
     }
     const inFlight = new Set<string>();
+
+    // Per-turn recall records (A&D §4.6): Postgres only, so any gateway instance
+    // can serve the panel. Without the identity database no record is kept.
+    let recallStore: RecallStore | null = null;
+    if (identitySql) {
+      const pgRecall = createPgRecallStore(
+        identitySql as unknown as Parameters<typeof createPgRecallStore>[0],
+      );
+      recallStore = {
+        write: async (g, t, items, state) => (await ready(), pgRecall.write(g, t, items, state)),
+        read: async (g, t) => (await ready(), pgRecall.read(g, t)),
+        latest: async (g) => (await ready(), pgRecall.latest(g)),
+        deleteGroup: async (g) => (await ready(), pgRecall.deleteGroup(g)),
+        deleteCitingFacts: async (g, ids) => (await ready(), pgRecall.deleteCitingFacts(g, ids)),
+      };
+    }
+    const recallReranker = cfg.recall?.reranker ?? "rrf";
+    const recallTimeoutMs = cfg.recall?.timeoutMs ?? RECALL_TIMEOUT_DEFAULT_MS;
+    if (cfg.autoRecall && !client.capabilities().rerankers.includes(recallReranker)) {
+      // Logged ONCE: the backend ranks with its own default (results say server_default).
+      api.logger.warn(
+        `memory-graphiti: recall reranker "${recallReranker}" is not supported by ${client.label}; ` +
+          "results are ranked by the backend default (rerankerApplied=server_default)",
+      );
+    }
 
     // One lock per memory group, shared by capture and forget (see lock.ts).
     const withGroups: GroupLock = createGroupLock();
@@ -762,6 +822,40 @@ const memoryPlugin = {
     // Lifecycle Hooks
     // ========================================================================
 
+    /**
+     * Write this turn's recall record within `budgetMs`. Never throws and never
+     * holds the turn past the budget: a failed or slow write logs WARN (the panel
+     * then answers `none`, which is honest — it never shows facts the agent did
+     * not get). No run id or no store: nothing is written.
+     */
+    const recordRecall = async (
+      groupId: string,
+      turnId: string | undefined,
+      items: RecallItem[],
+      state: RecallState,
+      budgetMs: number,
+    ): Promise<void> => {
+      if (!recallStore || !turnId) {
+        return;
+      }
+      const write = recallStore.write(groupId, turnId, items, state).then(
+        () => "written" as const,
+        (err: unknown) => {
+          api.logger.warn(
+            `memory-graphiti: recall record not written (${(err as { code?: string }).code ?? "error"})`,
+          );
+          return "failed" as const;
+        },
+      );
+      if (state === "timed_out") {
+        await write;
+        return;
+      }
+      if ((await within(write, budgetMs, "late" as const)) === "late") {
+        api.logger.warn("memory-graphiti: recall record not written within the recall budget");
+      }
+    };
+
     // Auto-recall: inject relevant facts before agent starts
     if (cfg.autoRecall) {
       api.on("before_agent_start", async (event, ctx) => {
@@ -795,16 +889,48 @@ const memoryPlugin = {
           if (!query) {
             return;
           }
-          const facts = await client.searchFacts(query, [groupId], cfg.maxFacts);
 
-          if (facts.length === 0) {
+          // ONE ranked search per turn, inside the budget (A&D §4.6). The abort
+          // reaches the backend; the race holds the budget even if it ignores it.
+          const turnId = ctx.runId;
+          const started = Date.now();
+          const ac = new AbortController();
+          const TIMED_OUT = Symbol("timed_out");
+          const search = client.searchRanked(groupId, query, {
+            reranker: recallReranker,
+            limit: cfg.maxFacts,
+            signal: ac.signal,
+          });
+          const ranked: RankedFact[] | typeof TIMED_OUT = await within(
+            search,
+            recallTimeoutMs,
+            TIMED_OUT,
+          );
+          if (ranked === TIMED_OUT) {
+            ac.abort();
+            api.logger.warn(`memory-graphiti: recall timed out after ${recallTimeoutMs}ms`);
+            // Never delays the turn further: the record is written in the background.
+            void recordRecall(groupId, turnId, [], "timed_out", 0);
             return;
           }
 
-          api.logger.info?.(`memory-graphiti: injecting ${facts.length} facts`);
+          // The SAME array is injected and recorded, so the panel shows exactly it.
+          const items = toRecallItems(ranked);
+          await recordRecall(
+            groupId,
+            turnId,
+            items,
+            "ready",
+            recallTimeoutMs - (Date.now() - started),
+          );
+          if (ranked.length === 0) {
+            return;
+          }
+
+          api.logger.info?.(`memory-graphiti: injecting ${ranked.length} facts`);
 
           return {
-            prependContext: formatGraphitiFacts(facts),
+            prependContext: formatGraphitiFacts(ranked.map(rankedToFactResult)),
           };
         } catch (err) {
           api.logger.warn(`memory-graphiti: recall failed: ${String(err)}`);

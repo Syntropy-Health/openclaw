@@ -67,7 +67,22 @@ export type GraphitiConfig = {
    * visibly in config and in the boot log — it never just disappears.
    */
   phiCloudApproval?: PhiCloudApproval;
+  /** Auto-recall tuning (A&D §4.6). Absent: reranker "rrf", a 800 ms budget. */
+  recall?: RecallConfig;
 };
+
+export type RecallReranker = "rrf" | "mmr" | "cross_encoder";
+
+export type RecallConfig = {
+  /** Reranker for the one ranked search per turn. Default "rrf". */
+  reranker?: RecallReranker;
+  /** Budget for that search; past it, nothing is injected. Default 800. */
+  timeoutMs?: number;
+};
+
+export const RECALL_TIMEOUT_MIN_MS = 50;
+export const RECALL_TIMEOUT_MAX_MS = 10_000;
+const VALID_RERANKERS: RecallReranker[] = ["rrf", "mmr", "cross_encoder"];
 
 export type PhiCloudApproval = {
   /** The principal's ruling, verbatim. */
@@ -103,6 +118,7 @@ const ALLOWED_KEYS = [
   "maxFacts",
   "qaNumbers",
   "phiCloudApproval",
+  "recall",
 ];
 
 const VALID_STRATEGIES: GroupIdStrategy[] = ["channel-sender", "session", "static", "identity"];
@@ -351,6 +367,37 @@ export const graphitiConfigSchema = {
       }
     }
 
+    // recall (optional): reranker + timeout budget for the per-turn ranked search.
+    let recall: RecallConfig | undefined;
+    if (cfg.recall !== undefined) {
+      const r = cfg.recall as Record<string, unknown> | null;
+      if (!r || typeof r !== "object" || Array.isArray(r)) {
+        throw new Error("recall must be an object { reranker?, timeoutMs? }");
+      }
+      assertAllowedKeys(r, ["reranker", "timeoutMs"], "recall");
+      recall = {};
+      if (r.reranker !== undefined) {
+        if (!VALID_RERANKERS.includes(r.reranker as RecallReranker)) {
+          throw new Error(`recall.reranker must be one of: ${VALID_RERANKERS.join(", ")}`);
+        }
+        recall.reranker = r.reranker as RecallReranker;
+      }
+      if (r.timeoutMs !== undefined) {
+        const t = r.timeoutMs;
+        if (
+          typeof t !== "number" ||
+          !Number.isInteger(t) ||
+          t < RECALL_TIMEOUT_MIN_MS ||
+          t > RECALL_TIMEOUT_MAX_MS
+        ) {
+          throw new Error(
+            `recall.timeoutMs must be an integer between ${RECALL_TIMEOUT_MIN_MS} and ${RECALL_TIMEOUT_MAX_MS}`,
+          );
+        }
+        recall.timeoutMs = t;
+      }
+    }
+
     return {
       backend,
       deprecationWarning,
@@ -366,6 +413,7 @@ export const graphitiConfigSchema = {
       maxFacts,
       qaNumbers,
       phiCloudApproval,
+      recall,
     };
   },
 
@@ -423,6 +471,11 @@ export const graphitiConfigSchema = {
     phiCloudApproval: {
       label: "PHI cloud approval (lifts the QA-only tripwire)",
       help: "Recorded principal approval { ruling (verbatim), approvalsRow, date }. When present, the zep-cloud backend may store real users' minimised chat. Absent: QA-only.",
+      advanced: true,
+    },
+    recall: {
+      label: "Recall tuning",
+      help: "{ reranker: rrf | mmr | cross_encoder (default rrf), timeoutMs (default 800) }. Past the budget nothing is injected.",
       advanced: true,
     },
     qaNumbers: {

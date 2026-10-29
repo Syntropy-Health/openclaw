@@ -6,7 +6,8 @@
  * test here must PASS against the unchanged production code. They deliberately
  * exercise the four areas later phases will touch:
  *   (a) createClient backend selection
- *   (b) the before_agent_start recall hook (searchFacts + prependContext escaping)
+ *   (b) the before_agent_start recall hook (searchRanked + prependContext escaping;
+ *       one ranked search replaced searchFacts in PR-1 of memory-highlights)
  *   (c) the agent_end capture hook (extractMessages role filtering + addMessages)
  *   (d) resolveIdentityScopeKey external_id -> user_id fallback
  *
@@ -145,6 +146,7 @@ describe("characterization: createClient backend precedence", () => {
 // ============================================================================
 
 const searchFactsSpy = vi.spyOn(GraphitiRestClient.prototype, "searchFacts");
+const searchRankedSpy = vi.spyOn(GraphitiRestClient.prototype, "searchRanked");
 const addMessagesSpy = vi.spyOn(GraphitiRestClient.prototype, "addMessages");
 // Capture's read-back goes through getEpisodes: stub it so no fetch ever fires.
 const getEpisodesSpy = vi.spyOn(GraphitiRestClient.prototype, "getEpisodes");
@@ -154,6 +156,7 @@ const flush = () => new Promise((r) => setTimeout(r, 0));
 describe("characterization: before_agent_start recall hook", () => {
   beforeEach(() => {
     searchFactsSpy.mockReset().mockResolvedValue([]);
+    searchRankedSpy.mockReset().mockResolvedValue([]);
     addMessagesSpy.mockReset().mockResolvedValue(undefined);
     getEpisodesSpy.mockReset().mockResolvedValue([]);
   });
@@ -162,16 +165,19 @@ describe("characterization: before_agent_start recall hook", () => {
     vi.clearAllMocks();
   });
 
-  it("calls searchFacts(prompt, [groupId], maxFacts) and injects escaped facts via prependContext", async () => {
-    searchFactsSpy.mockResolvedValueOnce([
+  it("calls searchRanked(groupId, prompt, {limit: maxFacts}) and injects escaped facts via prependContext", async () => {
+    searchRankedSpy.mockResolvedValueOnce([
       {
-        uuid: "u1",
+        id: "u1",
         name: "pref",
         fact: 'User said <b>"hi"</b> & smiled',
-        valid_at: "2026-01-15T10:00:00Z",
-        invalid_at: null,
-        created_at: "2026-01-15T10:00:00Z",
-        expired_at: null,
+        validAt: "2026-01-15T10:00:00Z",
+        invalidAt: null,
+        createdAt: "2026-01-15T10:00:00Z",
+        expiredAt: null,
+        episodeIds: [],
+        rank: 1,
+        score: null,
       },
     ]);
 
@@ -190,12 +196,14 @@ describe("characterization: before_agent_start recall hook", () => {
       ctx,
     )) as { prependContext?: string } | undefined;
 
-    // searchFacts called with prompt, derived groupId in an array, and maxFacts
-    expect(searchFactsSpy).toHaveBeenCalledOnce();
-    const [query, groupIds, maxFacts] = searchFactsSpy.mock.calls[0];
+    // ONE searchRanked call with the derived groupId, the prompt, and maxFacts
+    expect(searchRankedSpy).toHaveBeenCalledOnce();
+    expect(searchFactsSpy).not.toHaveBeenCalled();
+    const [groupId, query, opts] = searchRankedSpy.mock.calls[0];
     expect(query).toBe("what do you know about me?");
-    expect(groupIds).toEqual([opaqueGroupId("telegram:7550356539")]);
-    expect(maxFacts).toBe(7);
+    expect(groupId).toBe(opaqueGroupId("telegram:7550356539"));
+    expect(opts.limit).toBe(7);
+    expect(opts.reranker).toBe("rrf");
 
     // facts injected via prependContext, HTML-escaped, wrapped, with date suffix
     expect(result?.prependContext).toContain("<graphiti-facts>");
@@ -204,8 +212,8 @@ describe("characterization: before_agent_start recall hook", () => {
     expect(result?.prependContext).toContain("(since: 2026-01-15)");
   });
 
-  it("returns undefined (no injection) when searchFacts yields no facts", async () => {
-    searchFactsSpy.mockResolvedValueOnce([]);
+  it("returns undefined (no injection) when searchRanked yields no facts", async () => {
+    searchRankedSpy.mockResolvedValueOnce([]);
     const { hooks } = await registerPlugin({
       serverUrl: "http://localhost:8000",
       groupIdStrategy: "channel-sender",
@@ -215,10 +223,10 @@ describe("characterization: before_agent_start recall hook", () => {
       { sessionKey: "agent:main:cli:main" },
     );
     expect(result).toBeUndefined();
-    expect(searchFactsSpy).toHaveBeenCalledOnce();
+    expect(searchRankedSpy).toHaveBeenCalledOnce();
   });
 
-  it("skips recall entirely for prompts shorter than 5 chars (searchFacts not called)", async () => {
+  it("skips recall entirely for prompts shorter than 5 chars (no search at all)", async () => {
     const { hooks } = await registerPlugin({
       serverUrl: "http://localhost:8000",
       groupIdStrategy: "channel-sender",
@@ -226,6 +234,7 @@ describe("characterization: before_agent_start recall hook", () => {
     const result = await hooks.before_agent_start?.({ prompt: "hi" }, {});
     expect(result).toBeUndefined();
     expect(searchFactsSpy).not.toHaveBeenCalled();
+    expect(searchRankedSpy).not.toHaveBeenCalled();
   });
 });
 

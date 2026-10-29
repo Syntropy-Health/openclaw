@@ -32,6 +32,18 @@ describe("memory-graphiti manifest configSchema", () => {
     expect(validate({ groupIdStrategy: "identity", notAKey: 1 }).ok).toBe(false);
   });
 
+  it("accepts the recall block (reranker, timeoutMs)", () => {
+    expect(validate({ recall: { reranker: "rrf", timeoutMs: 800 } })).toEqual({ ok: true });
+    expect(validate({ recall: { reranker: "cross_encoder" } })).toEqual({ ok: true });
+  });
+
+  it("rejects an unknown recall key, an unknown reranker and an out-of-range timeout", () => {
+    expect(validate({ recall: { reranker: "rrf", extra: 1 } }).ok).toBe(false);
+    expect(validate({ recall: { reranker: "bogus" } }).ok).toBe(false);
+    expect(validate({ recall: { timeoutMs: 10 } }).ok).toBe(false);
+    expect(validate({ recall: { timeoutMs: 1.5 } }).ok).toBe(false);
+  });
+
   it("rejects a half-written phiCloudApproval at the schema layer too", () => {
     expect(validate({ phiCloudApproval: { ruling: "x".repeat(25), date: "2026-10-26" } }).ok).toBe(
       false,
