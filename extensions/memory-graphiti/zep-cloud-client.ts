@@ -13,6 +13,8 @@ import {
   type ListFactsOptions,
   type ListFactsResult,
   type MemoryFact,
+  type RankedFact,
+  type SearchRankedOptions,
 } from "./client.js";
 import {
   IngestNotConfirmedError,
@@ -24,6 +26,8 @@ import {
 
 /** Page size for graph.edge.getByUserId. */
 export const ZEP_EDGE_PAGE = 50;
+/** Zep's per-search result cap. */
+export const ZEP_SEARCH_MAX = 50;
 /** Most edges one listFacts call reads (40 pages): bounded cost per user. */
 export const ZEP_LIST_CEILING = 2_000;
 
@@ -114,6 +118,34 @@ export class ZepCloudClient implements MemoryClient {
       );
     }
     return { facts, nextCursor: cursor ?? null, ...(truncated ? { truncated } : {}) };
+  }
+
+  /**
+   * One ranked edge search for the user. The SDK's order IS the rank (rank =
+   * index + 1); it is never re-sorted here. `score` is Zep's reranker output (the
+   * ordinal for rrf). The abort signal goes through the SDK request options.
+   */
+  async searchRanked(
+    groupId: string,
+    query: string,
+    opts: SearchRankedOptions,
+  ): Promise<RankedFact[]> {
+    const results = await this.zep.graph.search(
+      {
+        userId: groupId,
+        query,
+        scope: "edges",
+        reranker: opts.reranker,
+        limit: Math.min(opts.limit, ZEP_SEARCH_MAX),
+        ...(opts.mmrLambda !== undefined ? { mmrLambda: opts.mmrLambda } : {}),
+      },
+      opts.signal ? { abortSignal: opts.signal } : undefined,
+    );
+    return ((results.edges ?? []) as ZepEdge[]).map((edge, i) => ({
+      ...toMemoryFact(edge),
+      rank: i + 1,
+      score: typeof edge.score === "number" ? edge.score : null,
+    }));
   }
 
   /**

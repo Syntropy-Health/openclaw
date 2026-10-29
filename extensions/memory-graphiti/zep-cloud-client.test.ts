@@ -96,3 +96,74 @@ describe("ZepCloudClient.listFacts", () => {
     await expect(client.listFacts(G)).rejects.toThrow("503");
   });
 });
+
+describe("ZepCloudClient.searchRanked", () => {
+  it("one graph.search on edges for the group, with reranker, limit and mmrLambda", async () => {
+    const { client, zep } = zepClient();
+    await client.searchRanked(G, "sleep", { reranker: "mmr", limit: 7, mmrLambda: 0.4 });
+    expect(zep.graph.search).toHaveBeenCalledOnce();
+    expect(zep.graph.search.mock.calls[0][0]).toEqual({
+      userId: G,
+      query: "sleep",
+      scope: "edges",
+      reranker: "mmr",
+      limit: 7,
+      mmrLambda: 0.4,
+    });
+  });
+
+  it("caps the limit at 50 and omits mmrLambda when not given", async () => {
+    const { client, zep } = zepClient();
+    await client.searchRanked(G, "sleep", { reranker: "rrf", limit: 80 });
+    expect(zep.graph.search.mock.calls[0][0]).toEqual({
+      userId: G,
+      query: "sleep",
+      scope: "edges",
+      reranker: "rrf",
+      limit: 50,
+    });
+  });
+
+  it("keeps the SDK order — a reversed-score recording is NOT re-sorted — and maps score", async () => {
+    const { client, state } = zepClient();
+    state.searchResult = [
+      toSdkEdge(factFixture(1), 0.1),
+      toSdkEdge(factFixture(2), 0.5),
+      toSdkEdge(factFixture(3), 0.9),
+    ];
+    const r = await client.searchRanked(G, "anything", { reranker: "cross_encoder", limit: 3 });
+    expect(r.map((x) => [x.id, x.rank, x.score])).toEqual([
+      ["e_0001", 1, 0.1],
+      ["e_0002", 2, 0.5],
+      ["e_0003", 3, 0.9],
+    ]);
+    expect(r[0]).toMatchObject({ ...factFixture(1), rank: 1, score: 0.1 });
+  });
+
+  it("a missing score maps to null", async () => {
+    const { client, state } = zepClient();
+    state.searchResult = [toSdkEdge(factFixture(1))];
+    expect((await client.searchRanked(G, "q", { reranker: "rrf", limit: 1 }))[0].score).toBeNull();
+  });
+
+  it("passes the abort signal through the SDK request options", async () => {
+    const { client, zep } = zepClient();
+    const ac = new AbortController();
+    await client.searchRanked(G, "sleep", { reranker: "rrf", limit: 5, signal: ac.signal });
+    expect(zep.graph.search.mock.calls[0][1]).toEqual({ abortSignal: ac.signal });
+  });
+
+  it("an aborted search rejects (the caller injects nothing)", async () => {
+    const { client, zep } = zepClient();
+    zep.graph.search.mockImplementationOnce(
+      (_req: unknown, opts?: { abortSignal?: AbortSignal }) =>
+        new Promise((_res, rej) =>
+          opts?.abortSignal?.addEventListener("abort", () => rej(new Error("aborted"))),
+        ),
+    );
+    const ac = new AbortController();
+    const p = client.searchRanked(G, "sleep", { reranker: "rrf", limit: 5, signal: ac.signal });
+    ac.abort();
+    await expect(p).rejects.toThrow("aborted");
+  });
+});
