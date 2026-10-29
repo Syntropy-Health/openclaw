@@ -61,7 +61,7 @@ export type DropCounts = {
 };
 
 export type GenerateResult =
-  | { state: "empty"; highlights: [] }
+  | { state: "empty"; highlights: []; dropped: DropCounts }
   | { state: "ready"; highlights: Highlight[]; dropped: DropCounts }
   | {
       state: "unavailable";
@@ -170,7 +170,7 @@ export async function generateHighlights(
     .filter(isValid)
     .toSorted((a, b) => Date.parse(seenAt(b)) - Date.parse(seenAt(a)) || (a.id < b.id ? -1 : 1));
   if (valid.length === 0) {
-    return { state: "empty", highlights: [] };
+    return { state: "empty", highlights: [], dropped };
   }
   const unavailable = (why: string): GenerateResult => {
     opts.logger.warn(`memory-highlights: generation unavailable (${why})`);

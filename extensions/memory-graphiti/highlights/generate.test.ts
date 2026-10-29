@@ -68,7 +68,10 @@ function opts(run: HighlightRunner, over: Partial<GenerateOptions> = {}): Genera
 describe("generateHighlights", () => {
   it("no facts: state empty and the runner is never called", async () => {
     const { run } = runnerReturning([ok()]);
-    expect(await generateHighlights([], opts(run))).toEqual({ state: "empty", highlights: [] });
+    expect(await generateHighlights([], opts(run))).toMatchObject({
+      state: "empty",
+      highlights: [],
+    });
     expect(run).not.toHaveBeenCalled();
   });
 
