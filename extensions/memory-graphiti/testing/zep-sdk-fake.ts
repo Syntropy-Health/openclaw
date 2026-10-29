@@ -3,7 +3,7 @@
  * adapter runs against recorded-shape fixtures and never the network. Shapes
  * follow @getzep/zep-cloud 3.18.0 (EntityEdge, GraphSearchResults, GraphEdgesRequest).
  */
-import { vi } from "vitest";
+import { vi, type Mock } from "vitest";
 import type { MemoryFact } from "../client.js";
 
 /** EntityEdge as the SDK returns it (camelCase, optional fields absent, not null). */
@@ -41,6 +41,34 @@ const notFound = () => Object.assign(new Error("Not found"), { statusCode: 404 }
 
 const tokens = (s: string) => new Set(s.toLowerCase().match(/[a-z0-9]+/g) ?? []);
 
+type EdgePageRequest = { limit?: number; uuidCursor?: string };
+type SearchRequest = { userId?: string; query: string; limit?: number; scope?: string };
+
+/** The SDK surface the fake provides (explicit so declaration emit stays portable). */
+export type ZepSdkFakeSdk = {
+  user: { add: Mock<() => Promise<object>>; delete: Mock<() => Promise<object>> };
+  graph: {
+    add: Mock<() => Promise<{ uuid: string }>>;
+    episode: {
+      get: Mock<(...args: unknown[]) => unknown>;
+      getByUserId: Mock<() => Promise<{ episodes: unknown[] }>>;
+    };
+    edge: {
+      getByUserId: Mock<(userId: string, req?: EdgePageRequest) => Promise<SdkEdge[]>>;
+      delete: Mock<(uuid: string) => Promise<{ message: string }>>;
+    };
+    search: Mock<
+      (req: SearchRequest, opts?: { abortSignal?: AbortSignal }) => Promise<{ edges: SdkEdge[] }>
+    >;
+  };
+};
+
+export type ZepSdkFake = {
+  zep: ZepSdkFakeSdk;
+  state: { searchResult: SdkEdge[] | null };
+  seed: (userId: string, facts: MemoryFact[]) => void;
+};
+
 /**
  * An in-memory Zep "server" behind the SDK's method shapes:
  *   - graph.edge.getByUserId(userId, {limit, uuidCursor}) → a bare EntityEdge[] page
@@ -49,10 +77,10 @@ const tokens = (s: string) => new Set(s.toLowerCase().match(/[a-z0-9]+/g) ?? [])
  *   - graph.search({userId, query, scope:"edges", limit, ...}, requestOptions)
  *     → {edges} ranked by token overlap, or `searchResult` when set (a recording).
  */
-export function createZepSdkFake() {
+export function createZepSdkFake(): ZepSdkFake {
   const users = new Map<string, SdkEdge[]>();
   const state: { searchResult: SdkEdge[] | null } = { searchResult: null };
-  const zep = {
+  const zep: ZepSdkFakeSdk = {
     user: { add: vi.fn(async () => ({})), delete: vi.fn(async () => ({})) },
     graph: {
       add: vi.fn(async () => ({ uuid: "ep-1" })),
