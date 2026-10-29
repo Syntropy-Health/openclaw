@@ -8,7 +8,7 @@
  * Run: DATABASE_URL=<url> pnpm vitest run extensions/memory-graphiti/recall-store.integration.test.ts
  */
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { createPgRecallStore, type RecallItem } from "./recall-store.js";
+import { createPgRecallStore, sweepExpiredRecall, type RecallItem } from "./recall-store.js";
 import { ensureReceiptSchema } from "./receipts.js";
 
 const DB_URL = process.env.DATABASE_URL;
@@ -177,6 +177,20 @@ describeIf("RecallStore (real Postgres)", () => {
     const left = await sql`SELECT 1 FROM lp_memory_recall WHERE group_id = ${C}`;
     expect(left.length).toBe(0);
     await store.deleteGroup(B);
+  });
+
+  it("sweepExpiredRecall: deletes expired rows with NO write happening; unexpired rows stay", async () => {
+    const sql = await open();
+    const store = createPgRecallStore(sql);
+    await store.write(C, "resp_quiet_old", items(1), "ready");
+    await store.write(C, "resp_quiet_new", items(1), "ready");
+    await sql`UPDATE lp_memory_recall SET at = now() - interval '11 minutes'
+              WHERE group_id = ${C} AND turn_id = 'resp_quiet_old'`;
+    expect(await sweepExpiredRecall(sql)).toBeGreaterThanOrEqual(1);
+    const left = await sql<{ turn_id: string }>`
+      SELECT turn_id FROM lp_memory_recall WHERE group_id = ${C}`;
+    expect(left.map((r) => r.turn_id)).toEqual(["resp_quiet_new"]);
+    await store.deleteGroup(C);
   });
 
   it("forget blocks: a write after forgetGroup is refused (no row)", async () => {
