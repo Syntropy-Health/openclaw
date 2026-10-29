@@ -86,6 +86,7 @@ export function createForgetHandler(deps: ForgetRouteDeps) {
       storeGroupsAbsent: r.storeGroupsAbsent,
       receipts: r.receipts,
       transcripts: r.transcripts,
+      highlights: r.highlights,
     };
     deps.logger?.info?.(
       `memory-forget: ${outcome.status} reasons=${outcome.reasons.join(",") || "-"} ` +

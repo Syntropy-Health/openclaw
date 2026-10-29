@@ -205,3 +205,26 @@ describe("forgetUser", () => {
     expect(fs.readdirSync(sessions)).toHaveLength(11);
   });
 });
+
+describe("forget erases highlights for EVERY group of the identity (QG)", () => {
+  it("external id, internal id and channel groups all lose their highlight rows", async () => {
+    const { forget } = store();
+    const groups = [opaque(A_SUB), opaque("uuid-A"), opaque("whatsapp:+15550000001")];
+    const rows = new Set([...groups, opaque(B_SUB)]);
+    const highlights = { deleteGroup: vi.fn(async (g: string) => (rows.delete(g) ? 1 : 0)) };
+    const r = await forgetUser({
+      sql: fakeSql,
+      client: { forget },
+      ledger: createMemoryReceiptLedger(),
+      highlights,
+      opaque,
+      userId: "uuid-A",
+      stateDir,
+    });
+    expect(r.highlights).toBe(3);
+    for (const g of groups) {
+      expect(rows.has(g)).toBe(false);
+    }
+    expect(rows.has(opaque(B_SUB))).toBe(true);
+  });
+});

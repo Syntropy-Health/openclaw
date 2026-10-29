@@ -12,7 +12,10 @@ import { Command } from "commander";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { RankedFact, SearchRankedOptions } from "./client.js";
 
-const db = vi.hoisted(() => ({ peers: new Map<string, string | null>() }));
+const db = vi.hoisted(() => ({
+  peers: new Map<string, string | null>(),
+  highlightDeletes: [] as string[],
+}));
 vi.mock("postgres", () => {
   const sql = Object.assign(
     (strings: TemplateStringsArray, ...values: unknown[]) => {
@@ -24,6 +27,11 @@ vi.mock("postgres", () => {
             ? [{ id: "uuid-u1", external_id: "user_2abcDEF345ghiJKL678mnoPQR" }]
             : [],
         );
+      }
+      // The highlight cache's forget delete: recorded, and one row "existed".
+      if (q.includes("DELETE FROM lp_memory_highlights")) {
+        db.highlightDeletes.push(values[0] as string);
+        return Promise.resolve([{ group_id: values[0] }]);
       }
       if (q.includes("lp_user_channels") && q.includes("WHERE user_id")) {
         return Promise.resolve([]);
@@ -179,6 +187,7 @@ const flush = () => new Promise((r) => setTimeout(r, 0));
 beforeEach(() => {
   process.env.OPENCLAW_MEMORY_GROUP_KEY = PEPPER;
   db.peers.set("u1", CLERK);
+  db.highlightDeletes.length = 0;
   recall.writes.length = 0;
   recall.write = null;
   recall.reads = 0;
@@ -623,6 +632,9 @@ describe("forget erases recall through the plugin's own wiring", () => {
     expect(status).toBe(200);
     expect(JSON.parse(body).status).toBe("SUCCEEDED");
     expect(recall.forgotten).toContain(GROUP);
+    // Forget is total for highlights through the plugin's own wiring (P7.1).
+    expect(db.highlightDeletes).toContain(GROUP);
+    expect(JSON.parse(body).counts.highlights).toBeGreaterThanOrEqual(1);
     expect((await getRecall(routes["/gateway/memory/recall"], "good", RUN_ID)).json.state).toBe(
       "none",
     );
@@ -644,7 +656,8 @@ describe("forget erases recall through the plugin's own wiring", () => {
     });
     expect(recall.forgotten).toContain(GROUP);
     const printed = log.mock.calls.map((c) => String(c[0])).join("\n");
-    expect(printed).toMatch(/graphiti forget: userFound=true .*recall=1 /);
+    expect(printed).toMatch(/graphiti forget: userFound=true .*recall=1 highlights=[1-9]/);
+    expect(db.highlightDeletes).toContain(GROUP);
     expect(recall.writes.filter((w) => w.group === GROUP)).toHaveLength(0);
   });
 });

@@ -12,7 +12,11 @@ import { captureWithReceipts } from "./capture.js";
 import type { MemoryClient } from "./client.js";
 import { createForgetHandler, type ForgetRouteDeps } from "./forget-route.js";
 import { forgetByExternalId, forgetOutcome, type ForgetResult } from "./forget.js";
+import { createHighlightsHandler } from "./highlights/routes.js";
+import { createHighlightScheduler } from "./highlights/scheduler.js";
+import { createGroupLock } from "./lock.js";
 import { createMemoryReceiptLedger, opaqueGroupId } from "./receipts.js";
+import { FakeHighlightStore } from "./testing/fake-highlight-store.js";
 
 const CLERK = { issuer: "i" } as unknown as NonNullable<
   ReturnType<ForgetRouteDeps["resolveClerk"]>
@@ -51,6 +55,7 @@ const ok = (over: Partial<ForgetResult> = {}): ForgetResult => ({
   lockedSkipped: 0,
   vanished: 0,
   recall: 0,
+  highlights: 0,
   ...over,
 });
 
@@ -117,7 +122,13 @@ describe("POST /gateway/memory/forget — definite outcome", () => {
         status: "SUCCEEDED",
         retryable: false,
         reasons: [],
-        counts: { storeGroupsDeleted: 1, storeGroupsAbsent: 0, receipts: 3, transcripts: 2 },
+        counts: {
+          storeGroupsDeleted: 1,
+          storeGroupsAbsent: 0,
+          receipts: 3,
+          transcripts: 2,
+          highlights: 0,
+        },
       },
     });
   });
@@ -205,6 +216,95 @@ describe("forgetByExternalId + tombstones (end to end, real files)", () => {
       }),
     };
   };
+
+  it("forget is total for highlights (P7.1): row gone, GET shows nothing, other users kept", async () => {
+    const ledger = createMemoryReceiptLedger();
+    const recall = recallRows();
+    recall.rows.set(opaque(SUB), 2);
+    const highlights = new FakeHighlightStore();
+    const other = opaque("user_someoneElse");
+    for (const g of [opaque(SUB), other]) {
+      await highlights.claimOnDemand(g, 3, { create: true });
+      await highlights.put(
+        g,
+        {
+          state: "ready",
+          payload: [
+            {
+              id: `hl_${"b".repeat(24)}`,
+              category: "sleep",
+              title: "t",
+              body: "b.",
+              first_seen: "2026-10-20",
+              last_seen: "2026-10-20",
+              occurrences: 1,
+              recurring: false,
+              score: 1,
+              sources: [{ fact_id: "e_1", fact: "I slept badly", last_seen: "2026-10-20" }],
+            },
+          ],
+        },
+        await highlights.clock(),
+        (await highlights.get(g))!.epoch,
+      );
+    }
+    const r = await forgetByExternalId({
+      sql: noRows,
+      client: { forget: vi.fn(async () => true) },
+      ledger,
+      recall,
+      highlights,
+      opaque,
+      externalId: SUB,
+      stateDir,
+    });
+    expect(forgetOutcome(r).status).toBe("SUCCEEDED");
+    expect(r.highlights).toBe(1);
+    expect(r.recall).toBe(2);
+    expect(highlights.rows.has(opaque(SUB))).toBe(false);
+    expect(highlights.rows.has(other)).toBe(true);
+    // The user's next GET is a fresh first read through the REAL scheduler: it may
+    // create a placeholder (the user starts over), but nothing of the old memory.
+    const scheduler = createHighlightScheduler({
+      store: highlights,
+      lock: createGroupLock(),
+      regenerate: async () => "empty",
+      logger: { info: () => undefined, warn: () => undefined },
+      now: () => new Date(),
+    });
+    const get = createHighlightsHandler({
+      resolveClerk: () => CLERK,
+      verifyJwt: async () => ({ ok: true, externalId: SUB }),
+      highlights: {
+        groupFor: opaque,
+        store: highlights,
+        client: {
+          listFacts: async () => ({ facts: [], nextCursor: null }),
+          capabilities: () => ({
+            listFacts: true,
+            forgetFacts: true,
+            rerankers: ["rrf"],
+            scores: true,
+          }),
+        },
+        requestNow: (g: string) => scheduler.requestNow(g),
+      },
+    });
+    let body = "";
+    await get(
+      { method: "GET", headers: { authorization: "Bearer t" }, url: "/" } as never,
+      { writeHead: () => undefined, end: (b: string) => (body = b) } as never,
+    );
+    expect(JSON.parse(body)).toMatchObject({
+      state: "unavailable",
+      highlights: [],
+      fallback_facts: [],
+    });
+    const after = await highlights.get(opaque(SUB));
+    expect(after?.payload ?? []).toEqual([]);
+    expect(after?.sourceFactIds ?? []).toEqual([]);
+    await scheduler.stop();
+  });
 
   it("also deletes the user's recall records (lp_memory_recall), and only theirs", async () => {
     const ledger = createMemoryReceiptLedger();

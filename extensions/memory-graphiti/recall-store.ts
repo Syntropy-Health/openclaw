@@ -121,6 +121,32 @@ export type PgRecallStoreOptions = {
   testWriteDelay?: { beforeGateSec?: number; afterGateSec?: number };
 };
 
+/**
+ * Delete expired recall rows and expired write blocks, bounded and lock-friendly
+ * (SKIP LOCKED, oldest first). Writes already sweep; this is for quiet periods,
+ * so fact text does not stay at rest past the TTL when nobody writes. It takes
+ * no gate lock, so it cannot deadlock with a writer. Returns recall rows removed.
+ */
+export async function sweepExpiredRecall(sql: Sql): Promise<number> {
+  const rows = await sql<{ n: number }>`
+    WITH swept AS (
+      DELETE FROM lp_memory_recall WHERE ctid IN (
+        SELECT ctid FROM lp_memory_recall
+        WHERE at < now() - make_interval(mins => ${RECALL_TTL_MINUTES})
+        ORDER BY at LIMIT ${RECALL_SWEEP_BATCH} FOR UPDATE SKIP LOCKED
+      ) RETURNING 1
+    ),
+    swept_blocks AS (
+      DELETE FROM lp_memory_recall_block WHERE ctid IN (
+        SELECT ctid FROM lp_memory_recall_block
+        WHERE until < now()
+        ORDER BY until LIMIT ${RECALL_SWEEP_BATCH} FOR UPDATE SKIP LOCKED
+      ) RETURNING 1
+    )
+    SELECT (SELECT count(*) FROM swept)::int AS n, (SELECT count(*) FROM swept_blocks) AS b`;
+  return rows[0]?.n ?? 0;
+}
+
 export function createPgRecallStore(sql: Sql, opts: PgRecallStoreOptions = {}): RecallStore {
   const beforeGateSec = opts.testWriteDelay?.beforeGateSec ?? 0;
   const afterGateSec = opts.testWriteDelay?.afterGateSec ?? 0;

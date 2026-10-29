@@ -32,7 +32,15 @@ export type RecallRouteDeps = ClerkRouteAuthDeps & {
    * not enabled or refused (no identity DB, no pepper under the approval, recall
    * off): the route then answers `not_enabled` after auth.
    */
-  recall: { store: RecallStore; groupFor: (sub: string) => string } | null;
+  recall: {
+    store: RecallStore;
+    groupFor: (sub: string) => string;
+    /**
+     * fact_id → the cached highlight citing it, for the group (PR-2). Absent, or on
+     * any failure, items carry highlight_id null: it never fails this route.
+     */
+    highlightIndex?: (groupId: string) => Promise<Map<string, string>>;
+  } | null;
 };
 
 function turnParam(req: IncomingMessage): { turn: string | null; tooLong: boolean } {
@@ -45,17 +53,22 @@ function turnParam(req: IncomingMessage): { turn: string | null; tooLong: boolea
     : { turn: raw, tooLong: false };
 }
 
-const body = (state: string, turn: string | null, record?: RecallRecord | null) => ({
+const body = (
+  state: string,
+  turn: string | null,
+  record?: RecallRecord | null,
+  highlightFor: Map<string, string> = new Map(),
+) => ({
   contract: RECALL_CONTRACT,
   state,
   turn,
-  // Key order is part of the contract. highlight_id joins the highlight cache (PR-2).
+  // Key order is part of the contract. highlight_id joins the highlight cache.
   items: (record?.items ?? []).map((i) => ({
     rank: i.rank,
     fact_id: i.fact_id,
     fact: i.fact,
     last_seen: i.last_seen,
-    highlight_id: null,
+    highlight_id: highlightFor.get(i.fact_id) ?? null,
   })),
 });
 
@@ -93,6 +106,14 @@ export function createRecallHandler(deps: RecallRouteDeps) {
       sendJson(res, 200, body("none", turn));
       return;
     }
-    sendJson(res, 200, body(record.state, record.turnId, record));
+    let index = new Map<string, string>();
+    if (deps.recall.highlightIndex && record.items.length > 0) {
+      try {
+        index = await deps.recall.highlightIndex(deps.recall.groupFor(sub));
+      } catch {
+        deps.logger?.warn?.("memory-recall: highlight join skipped (store_error)");
+      }
+    }
+    sendJson(res, 200, body(record.state, record.turnId, record, index));
   };
 }

@@ -106,6 +106,16 @@ export interface ReceiptLedger {
   addTombstones(groupId: string, hashes: string[]): Promise<void>;
   /** Delete every receipt AND pending row for a group (the user's forget). Returns receipts removed. */
   deleteGroup(groupId: string): Promise<number>;
+  /**
+   * Entry hashes whose receipts cite any of these store episodes (highlight remove
+   * tombstones them). `untracked` counts episodes with no receipt in the group
+   * (captured before receipts existed): still deleted from the store, never
+   * tombstoned.
+   */
+  entryHashesForEpisodes(
+    groupId: string,
+    episodeIds: string[],
+  ): Promise<{ hashes: string[]; untracked: number }>;
 }
 
 type Sql = {
@@ -113,8 +123,32 @@ type Sql = {
   json?: (v: unknown) => unknown;
 };
 
+/** Postgres codes for "already exists" when two sessions create the same object at once. */
+const DDL_RACE_CODES = new Set(["23505", "42P07", "42710"]);
+
+/**
+ * Run one CREATE ... IF NOT EXISTS, retrying when a concurrent session created the
+ * object first: IF NOT EXISTS does not cover that race (it can fail on the catalog's
+ * unique index). Several gateways booting together is the multi-instance case.
+ */
+async function ddl(run: () => Promise<unknown>): Promise<void> {
+  for (let attempt = 1; ; attempt++) {
+    try {
+      await run();
+      return;
+    } catch (err) {
+      const code = (err as { code?: string }).code;
+      if (attempt >= 5 || !code || !DDL_RACE_CODES.has(code)) {
+        throw err;
+      }
+      await new Promise((r) => setTimeout(r, 20 * attempt));
+    }
+  }
+}
+
 export async function ensureReceiptSchema(sql: Sql): Promise<void> {
-  await sql`
+  await ddl(
+    () => sql`
     CREATE TABLE IF NOT EXISTS lp_memory_receipts (
       id BIGSERIAL PRIMARY KEY,
       group_id TEXT NOT NULL,
@@ -125,8 +159,23 @@ export async function ensureReceiptSchema(sql: Sql): Promise<void> {
       ingested_at TIMESTAMPTZ NOT NULL,
       created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
       UNIQUE (group_id, entry_hash)
-    )`;
-  await sql`
+    )`,
+  );
+  // One-shot repair, safe to repeat: earlier versions stored episode_ids as a JSON
+  // string holding the array. Unwrap those rows; arrays are left alone.
+  // Best-effort: a malformed legacy row must never block the schema (every memory
+  // feature waits on it). Rows it cannot unwrap stay strings; highlight remove
+  // then counts their episodes as untracked (deleted, not tombstoned).
+  try {
+    await sql`
+      UPDATE lp_memory_receipts
+      SET episode_ids = (episode_ids #>> '{}')::jsonb
+      WHERE jsonb_typeof(episode_ids) = 'string' AND left(episode_ids #>> '{}', 1) = '['`;
+  } catch {
+    // left as strings; see above
+  }
+  await ddl(
+    () => sql`
     CREATE TABLE IF NOT EXISTS lp_memory_pending (
       group_id TEXT NOT NULL,
       entry_hash TEXT NOT NULL,
@@ -134,18 +183,22 @@ export async function ensureReceiptSchema(sql: Sql): Promise<void> {
       store TEXT NOT NULL,
       created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
       PRIMARY KEY (group_id, entry_hash)
-    )`;
-  await sql`
+    )`,
+  );
+  await ddl(
+    () => sql`
     CREATE TABLE IF NOT EXISTS lp_memory_tombstones (
       group_id TEXT NOT NULL,
       entry_hash TEXT NOT NULL,
       created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
       PRIMARY KEY (group_id, entry_hash)
-    )`;
+    )`,
+  );
   // The facts injected into one turn, exactly as injected (A&D §5): read by the
   // recall panel route on any gateway instance. Keyed by the opaque group, never
   // a sub or email; 10-minute TTL and at most 5 rows per group (recall-store.ts).
-  await sql`
+  await ddl(
+    () => sql`
     CREATE TABLE IF NOT EXISTS lp_memory_recall (
       group_id TEXT NOT NULL,
       turn_id TEXT NOT NULL,
@@ -153,15 +206,36 @@ export async function ensureReceiptSchema(sql: Sql): Promise<void> {
       state TEXT NOT NULL,
       at TIMESTAMPTZ NOT NULL DEFAULT now(),
       PRIMARY KEY (group_id, turn_id)
-    )`;
-  await sql`CREATE INDEX IF NOT EXISTS lp_memory_recall_at ON lp_memory_recall (at)`;
+    )`,
+  );
+  await ddl(() => sql`CREATE INDEX IF NOT EXISTS lp_memory_recall_at ON lp_memory_recall (at)`);
+  // The generated highlights per group, as served (A&D §5). Keyed by the opaque
+  // group; payload holds fact text, under the same controls as the receipts.
+  await ddl(() => sql`CREATE SEQUENCE IF NOT EXISTS lp_memory_highlights_epoch`);
+  await ddl(
+    () => sql`
+    CREATE TABLE IF NOT EXISTS lp_memory_highlights (
+      group_id TEXT PRIMARY KEY,
+      payload JSONB NOT NULL,
+      state TEXT NOT NULL,
+      generated_at TIMESTAMPTZ NOT NULL,
+      stale_since TIMESTAMPTZ,
+      ondemand_day DATE,
+      ondemand_count INT NOT NULL DEFAULT 0,
+      source_fact_ids TEXT[] NOT NULL,
+      epoch BIGINT NOT NULL DEFAULT nextval('lp_memory_highlights_epoch'),
+      regen_lease_until TIMESTAMPTZ
+    )`,
+  );
   // A forget blocks recall writes for the group briefly, so a turn whose recall
   // was already in flight cannot re-create a record after the erase.
-  await sql`
+  await ddl(
+    () => sql`
     CREATE TABLE IF NOT EXISTS lp_memory_recall_block (
       group_id TEXT PRIMARY KEY,
       until TIMESTAMPTZ NOT NULL
-    )`;
+    )`,
+  );
 }
 
 export function createPgReceiptLedger(sql: Sql): ReceiptLedger {
@@ -176,12 +250,14 @@ export function createPgReceiptLedger(sql: Sql): ReceiptLedger {
       return new Set(rows.map((r) => r.entry_hash));
     },
     async record(r) {
+      // Sent as TEXT and parsed by Postgres. A bare `${string}::jsonb` makes the
+      // driver JSON-encode the string again, storing a JSON string, not an array.
       const episodes = JSON.stringify(r.episodeIds);
       for (const h of r.entryHashes) {
         await sql`
           INSERT INTO lp_memory_receipts
             (group_id, entry_hash, store, episode_ids, content_hash, ingested_at)
-          VALUES (${r.groupId}, ${h}, ${r.store}, ${episodes}::jsonb, ${r.contentHash}, ${r.ingestedAt})
+          VALUES (${r.groupId}, ${h}, ${r.store}, ${episodes}::text::jsonb, ${r.contentHash}, ${r.ingestedAt})
           ON CONFLICT (group_id, entry_hash) DO NOTHING`;
       }
     },
@@ -230,6 +306,25 @@ export function createPgReceiptLedger(sql: Sql): ReceiptLedger {
         INSERT INTO lp_memory_tombstones (group_id, entry_hash)
         SELECT ${groupId}, h FROM unnest(${hashes}::text[]) AS h
         ON CONFLICT (group_id, entry_hash) DO UPDATE SET created_at = now()`;
+    },
+    async entryHashesForEpisodes(groupId, episodeIds) {
+      const wanted = [...new Set(episodeIds)];
+      if (wanted.length === 0) {
+        return { hashes: [], untracked: 0 };
+      }
+      const rows = await sql<{ entry_hash: string; episode_ids: unknown }>`
+        SELECT entry_hash, episode_ids FROM lp_memory_receipts
+        WHERE group_id = ${groupId} AND episode_ids ?| ${wanted}::text[]`;
+      const seen = new Set<string>();
+      for (const r of rows) {
+        for (const e of Array.isArray(r.episode_ids) ? r.episode_ids : []) {
+          seen.add(String(e));
+        }
+      }
+      return {
+        hashes: [...new Set(rows.map((r) => r.entry_hash))],
+        untracked: wanted.filter((e) => !seen.has(e)).length,
+      };
     },
     async deleteGroup(groupId) {
       await sql`DELETE FROM lp_memory_pending WHERE group_id = ${groupId}`;
@@ -312,6 +407,24 @@ export function createMemoryReceiptLedger(): ReceiptLedger & {
           rows.set(key(r.groupId, h), r);
         }
       }
+    },
+    async entryHashesForEpisodes(groupId, episodeIds) {
+      const wanted = new Set(episodeIds);
+      const hashes = new Set<string>();
+      const seen = new Set<string>();
+      for (const [k, r] of rows) {
+        if (!k.startsWith(`${groupId}\u0000`)) {
+          continue;
+        }
+        const hits = r.episodeIds.filter((e) => wanted.has(e));
+        if (hits.length > 0) {
+          hashes.add(k.slice(groupId.length + 1));
+          for (const e of hits) {
+            seen.add(e);
+          }
+        }
+      }
+      return { hashes: [...hashes], untracked: [...wanted].filter((e) => !seen.has(e)).length };
     },
     async deleteGroup(groupId) {
       for (const k of [...pend.keys()]) {

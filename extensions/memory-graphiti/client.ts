@@ -125,7 +125,8 @@ export interface MemoryFactSurface {
    * Delete facts by id. CALLERS MUST pass only ids of facts owned by `groupId`
    * (read from that group's own records). A backend may not be able to check
    * ownership itself: Zep edge ids are global, so a foreign id would be deleted.
-   * PR-2's remove path enforces the ownership check before calling this.
+   * Call it only through forgetOwnedFacts (owned-forget.ts), which checks ownership
+   * first; a guard test fails if any other module calls it.
    */
   forgetFacts(groupId: string, factIds: string[]): Promise<{ deleted: number; absent: number }>;
   capabilities(): MemoryCapabilities;

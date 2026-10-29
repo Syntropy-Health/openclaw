@@ -51,6 +51,8 @@ export type ForgetResult = {
   vanished: number;
   /** Per-turn recall records (lp_memory_recall) deleted. */
   recall: number;
+  /** Highlight cache rows (lp_memory_highlights) deleted. */
+  highlights: number;
 };
 
 /** Live + archived transcript files (never locks, never sessions.json). */
@@ -224,6 +226,8 @@ type ForgetDeps = {
   /** The per-turn recall records (A&D §4.8). Absent when there is no recall store. */
   /** forgetGroup erases the records and blocks late writes for the group. */
   recall?: { forgetGroup(groupId: string): Promise<number> };
+  /** The highlight cache (lp_memory_highlights). Absent when highlights are off. */
+  highlights?: { deleteGroup(groupId: string): Promise<number> };
   /** The plugin's opaque group-id function (keyed by the pepper). */
   opaque: (raw: string) => string;
   stateDir: string;
@@ -239,6 +243,7 @@ const emptyResult = (): ForgetResult => ({
   lockedSkipped: 0,
   vanished: 0,
   recall: 0,
+  highlights: 0,
 });
 
 /** The erase itself, for an already-resolved identity. */
@@ -309,6 +314,10 @@ async function eraseLocked(
     // that can fail, so a later store/ledger failure never leaves them unblocked.
     if (deps.recall) {
       res.recall += await deps.recall.forgetGroup(g);
+    }
+    // The highlight cache holds fact text: gone before anything else can fail.
+    if (deps.highlights) {
+      res.highlights += await deps.highlights.deleteGroup(g);
     }
     if (await client.forget(g)) {
       res.storeGroupsDeleted++;

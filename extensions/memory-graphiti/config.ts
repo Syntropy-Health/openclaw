@@ -1,4 +1,5 @@
 import { normalizeE164 } from "openclaw/plugin-sdk";
+import { DEFAULT_RANK_CONFIG, type RankConfig } from "./highlights/rank.js";
 import { isCanonicalE164 } from "./tripwire.js";
 
 export type GroupIdStrategy = "channel-sender" | "session" | "static" | "identity";
@@ -69,7 +70,20 @@ export type GraphitiConfig = {
   phiCloudApproval?: PhiCloudApproval;
   /** Auto-recall tuning (A&D §4.6). Absent: reranker "rrf", a 800 ms budget. */
   recall?: RecallConfig;
+  /** Highlights (A&D §4). A parsed config always sets it, with defaults filled. */
+  highlights?: HighlightsConfig;
 };
+
+export type HighlightsConfig = {
+  /** Ranking constants (A&D §4.3). */
+  rank: RankConfig;
+  /** Summariser model, "anthropic/<id>" (D2: anthropic only). Absent: the agent default, if anthropic. */
+  model?: string;
+};
+
+/** Bounds for `highlights.rank`; the manifest schema carries the same ones. */
+export const RANK_HALF_LIFE_MAX_DAYS = 3650;
+export const RANK_WEIGHT_MAX = 10;
 
 export type RecallReranker = "rrf" | "mmr" | "cross_encoder";
 
@@ -124,6 +138,7 @@ const ALLOWED_KEYS = [
   "qaNumbers",
   "phiCloudApproval",
   "recall",
+  "highlights",
 ];
 
 const VALID_STRATEGIES: GroupIdStrategy[] = ["channel-sender", "session", "static", "identity"];
@@ -410,6 +425,60 @@ export const graphitiConfigSchema = {
       }
     }
 
+    // highlights (optional): ranking constants; absent keys take the R3 defaults.
+    const rank: RankConfig = { ...DEFAULT_RANK_CONFIG };
+    let highlightsModel: string | undefined;
+    if (cfg.highlights !== undefined) {
+      const h = cfg.highlights as Record<string, unknown> | null;
+      if (!h || typeof h !== "object" || Array.isArray(h)) {
+        throw new Error("highlights must be an object { rank?, model? }");
+      }
+      assertAllowedKeys(h, ["rank", "model"], "highlights");
+      if (h.model !== undefined) {
+        if (typeof h.model !== "string" || !/^anthropic\/\S+$/.test(h.model)) {
+          throw new Error(
+            'highlights.model must be "anthropic/<model id>" (the summariser is pinned to anthropic)',
+          );
+        }
+        highlightsModel = h.model;
+      }
+      if (h.rank !== undefined) {
+        const r = h.rank as Record<string, unknown> | null;
+        if (!r || typeof r !== "object" || Array.isArray(r)) {
+          throw new Error(
+            "highlights.rank must be an object { halfLifeDays?, wOcc?, wLink?, wSal? }",
+          );
+        }
+        assertAllowedKeys(r, ["halfLifeDays", "wOcc", "wLink", "wSal"], "highlights.rank");
+        if (r.halfLifeDays !== undefined) {
+          const d = r.halfLifeDays;
+          if (
+            typeof d !== "number" ||
+            !Number.isFinite(d) ||
+            d <= 0 ||
+            d > RANK_HALF_LIFE_MAX_DAYS
+          ) {
+            throw new Error(
+              `highlights.rank.halfLifeDays must be a number above 0 and at most ${RANK_HALF_LIFE_MAX_DAYS}`,
+            );
+          }
+          rank.halfLifeDays = d;
+        }
+        for (const k of ["wOcc", "wLink", "wSal"] as const) {
+          const w = r[k];
+          if (w === undefined) {
+            continue;
+          }
+          if (typeof w !== "number" || !Number.isFinite(w) || w < 0 || w > RANK_WEIGHT_MAX) {
+            throw new Error(
+              `highlights.rank.${k} must be a number between 0 and ${RANK_WEIGHT_MAX}`,
+            );
+          }
+          rank[k] = w;
+        }
+      }
+    }
+
     return {
       backend,
       deprecationWarning,
@@ -426,6 +495,7 @@ export const graphitiConfigSchema = {
       qaNumbers,
       phiCloudApproval,
       recall,
+      highlights: highlightsModel ? { rank, model: highlightsModel } : { rank },
     };
   },
 
