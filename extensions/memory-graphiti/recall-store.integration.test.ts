@@ -202,7 +202,7 @@ describeIf("RecallStore (real Postgres)", () => {
     await store.deleteGroup(B);
   });
 
-  it("once the block has expired, writes work again (and the expired block is swept)", async () => {
+  it("once the block has expired, writes work again (and other groups' expired blocks are swept)", async () => {
     const sql = await open();
     const store = createPgRecallStore(sql);
     await store.forgetGroup(C);
@@ -210,11 +210,20 @@ describeIf("RecallStore (real Postgres)", () => {
               WHERE group_id = ${C}`;
     await store.write(C, "resp_again", items(1), "ready");
     expect(await store.read(C, "resp_again")).not.toBeNull();
-    expect((await sql`SELECT 1 FROM lp_memory_recall_block WHERE group_id = ${C}`).length).toBe(0);
+    // C's own row stays as its (inactive) gate; ANOTHER group's expired block is swept
+    expect(
+      (await sql`SELECT 1 FROM lp_memory_recall_block WHERE group_id = ${C} AND until > now()`)
+        .length,
+    ).toBe(0);
+    await store.forgetGroup(B);
+    await sql`UPDATE lp_memory_recall_block SET until = now() - interval '1 second'
+              WHERE group_id = ${B}`;
+    await store.write(C, "resp_again_2", items(1), "ready");
+    expect((await sql`SELECT 1 FROM lp_memory_recall_block WHERE group_id = ${B}`).length).toBe(0);
     await store.deleteGroup(C);
   });
 
-  it("RACE: a recall write started before a forget but landing after it commits nothing", async () => {
+  it("a write ISSUED after a forget (the turn's recall was in flight in the client) commits nothing", async () => {
     const sql = await open();
     const store = createPgRecallStore(sql);
     await sql`DELETE FROM lp_memory_recall_block WHERE group_id = ${C}`;
@@ -230,5 +239,43 @@ describeIf("RecallStore (real Postgres)", () => {
     await lateWrite;
     expect(await store.read(C, "resp_late")).toBeNull();
     expect(await store.latest(C)).toBeNull();
+  });
+
+  describe("OVERLAP: a write statement and a forget run at the same time (both orderings)", () => {
+    const D = `ok_recall_d_${run}`;
+    const wait = (ms: number) => new Promise((r) => setTimeout(r, ms));
+    const rowsOf = async (sql: Sql, g: string) =>
+      (await sql`SELECT turn_id FROM lp_memory_recall WHERE group_id = ${g}`).length;
+
+    it("the forget commits while the write is paused BEFORE taking the group: no row survives", async () => {
+      const sql = await open();
+      await sql`DELETE FROM lp_memory_recall_block WHERE group_id = ${D}`;
+      const slow = createPgRecallStore(await open(), { testWriteDelay: { beforeGateSec: 0.4 } });
+      const write = slow.write(D, "resp_overlap_1", items(2), "ready");
+      await wait(120); // the write statement has started (its snapshot predates the forget)
+      await createPgRecallStore(await open()).forgetGroup(D);
+      await write;
+      expect(await rowsOf(sql, D)).toBe(0);
+    });
+
+    it("the forget arrives while the write HOLDS the group: it waits, then no row survives", async () => {
+      const sql = await open();
+      await sql`DELETE FROM lp_memory_recall_block WHERE group_id = ${D}`;
+      const slow = createPgRecallStore(await open(), { testWriteDelay: { afterGateSec: 0.4 } });
+      const write = slow.write(D, "resp_overlap_2", items(2), "ready");
+      await wait(120);
+      await createPgRecallStore(await open()).forgetGroup(D);
+      await write;
+      expect(await rowsOf(sql, D)).toBe(0);
+      // and the block stands for the next write
+      await createPgRecallStore(sql).write(D, "resp_overlap_3", items(1), "ready");
+      expect(await rowsOf(sql, D)).toBe(0);
+    });
+
+    afterAll(async () => {
+      const sql = sqls[0];
+      await sql`DELETE FROM lp_memory_recall WHERE group_id = ${D}`;
+      await sql`DELETE FROM lp_memory_recall_block WHERE group_id = ${D}`;
+    });
   });
 });

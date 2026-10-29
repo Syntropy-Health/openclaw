@@ -305,15 +305,17 @@ async function eraseLocked(
 
   // 2. The store and the ledger.
   for (const g of groups) {
+    // Recall FIRST: block new records and erase the existing ones before anything
+    // that can fail, so a later store/ledger failure never leaves them unblocked.
+    if (deps.recall) {
+      res.recall += await deps.recall.forgetGroup(g);
+    }
     if (await client.forget(g)) {
       res.storeGroupsDeleted++;
     } else {
       res.storeGroupsAbsent++;
     }
     res.receipts += await ledger.deleteGroup(g);
-    if (deps.recall) {
-      res.recall += await deps.recall.forgetGroup(g);
-    }
   }
 
   // 3. The transcripts.

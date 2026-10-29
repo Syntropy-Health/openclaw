@@ -873,6 +873,10 @@ export async function runEmbeddedAttempt(
         let effectivePrompt = params.prompt;
         // Reuse the early result (even "every hook returned nothing"); run the hook
         // here only when the early call did not run or threw (before-agent-start.ts).
+        // Intended: a HANDLER that throws in the early call is not retried by a second
+        // invocation — the hook runner already isolates handler errors (each throw is
+        // caught and logged, the other handlers still run), so the early call still
+        // "ran". Only a failure of the runner call itself falls back to this path.
         const { result: hookResult, fallback: hookFallback } = await resolveAttemptHookResult({
           earlyHookRan: params.earlyHookRan === true,
           earlyHookResult: params.earlyHookResult,

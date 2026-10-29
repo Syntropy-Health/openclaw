@@ -7,6 +7,14 @@
  * "The early call ran and every handler returned nothing" is a result, not a
  * missing one: running again would fire every hook twice per turn (a memory
  * plugin would search twice and inject facts it never recorded).
+ *
+ * So a handler that throws in the early call is NOT retried here. That is
+ * intended: the hook runner isolates handler errors (catches and logs each, and
+ * runs the rest), so the early call still ran. Only a throw of the runner call
+ * itself leaves earlyHookRan false and falls back to one call here.
+ *
+ * The decision is per run: every attempt of a run (retries, compaction) reuses
+ * the same early result, so the hook fires once per run.
  */
 import type {
   PluginHookAgentContext,

@@ -39,15 +39,20 @@ describe("createPgRecallStore (statement shape)", () => {
     expect(calls[0].text).toContain("INSERT INTO lp_memory_recall");
     expect(calls[0].text).toContain("ON CONFLICT (group_id, turn_id) DO UPDATE");
     expect(calls[0].text).toContain("DELETE FROM lp_memory_recall");
-    // a forget's block refuses the write, in the same statement
+    // the gate: upsert the group's block row (reads its LATEST version, holds its
+    // lock); insert only when it is not an active block — all in the same statement
     expect(calls[0].text).toMatch(
-      /SELECT[\s\S]*WHERE NOT EXISTS \( SELECT 1 FROM lp_memory_recall_block WHERE group_id = \$ AND until > now\(\) \)/,
+      /gate AS \( INSERT INTO lp_memory_recall_block \(group_id, until\) SELECT \$, '-infinity'::timestamptz FROM pre ON CONFLICT \(group_id\) DO UPDATE SET until = lp_memory_recall_block\.until RETURNING until \)/,
     );
-    // the sweep: expired rows of EVERY group (no group filter), and expired blocks
+    expect(calls[0].text).toMatch(/FROM gate, post WHERE gate\.until <= now\(\)/);
+    // the sweep: expired rows of EVERY group (no group filter), oldest first,
+    // bounded and SKIP LOCKED; and expired blocks of other groups the same way
     expect(calls[0].text).toMatch(
-      /DELETE FROM lp_memory_recall WHERE at < now\(\) - make_interval\(mins => \$\) RETURNING/,
+      /DELETE FROM lp_memory_recall WHERE ctid IN \( SELECT ctid FROM lp_memory_recall WHERE at < now\(\) - make_interval\(mins => \$\) ORDER BY at LIMIT \$ FOR UPDATE SKIP LOCKED \)/,
     );
-    expect(calls[0].text).toContain("DELETE FROM lp_memory_recall_block WHERE until < now()");
+    expect(calls[0].text).toMatch(
+      /DELETE FROM lp_memory_recall_block WHERE ctid IN \( SELECT ctid FROM lp_memory_recall_block WHERE until < now\(\) AND group_id <> \$ ORDER BY until LIMIT \$ FOR UPDATE SKIP LOCKED \)/,
+    );
     expect(calls[0].values).toContain("ok_g");
     expect(calls[0].values).toContain(RECALL_CAP_PER_GROUP - 1);
     expect(calls[0].values).toContain(4); // keep this turn + the 4 newest others
@@ -90,15 +95,16 @@ describe("createPgRecallStore (statement shape)", () => {
     expect(r?.at).toBe("1970-01-01T00:00:00.000Z");
   });
 
-  it("forgetGroup erases AND blocks the group for 11 minutes, in one statement", async () => {
-    const { sql, calls } = recordingSql([[{ turn_id: "a" }, { turn_id: "b" }]]);
+  it("forgetGroup: block FIRST (one statement), then delete with a fresh snapshot", async () => {
+    const { sql, calls } = recordingSql([[], [{ turn_id: "a" }, { turn_id: "b" }]]);
     expect(await createPgRecallStore(sql).forgetGroup("ok_g")).toBe(2);
-    expect(calls).toHaveLength(1);
+    expect(calls).toHaveLength(2);
     expect(calls[0].text).toContain("INSERT INTO lp_memory_recall_block");
     expect(calls[0].text).toContain("GREATEST(");
-    expect(calls[0].text).toMatch(/DELETE FROM lp_memory_recall WHERE group_id = \$/);
-    expect(calls[0].values).toEqual(["ok_g", RECALL_BLOCK_MINUTES, "ok_g"]);
+    expect(calls[0].values).toEqual(["ok_g", 11]);
     expect(RECALL_BLOCK_MINUTES).toBe(11);
+    expect(calls[1].text).toMatch(/^DELETE FROM lp_memory_recall WHERE group_id = \$ RETURNING/);
+    expect(calls[1].values).toEqual(["ok_g"]);
   });
 
   it("deleteCitingFacts is scoped to the caller's group", async () => {
@@ -111,7 +117,7 @@ describe("createPgRecallStore (statement shape)", () => {
   it("the sweep in write uses the same 10-minute TTL", async () => {
     const { sql, calls } = recordingSql();
     await createPgRecallStore(sql).write("ok_g", "resp_1", ITEMS, "ready");
-    expect(calls[0].values[0]).toBe(10);
+    expect(calls[0].values.slice(0, 2)).toEqual([10, 200]); // TTL exactly 10 min, batch 200
   });
 
   it("an empty fact-id list deletes nothing and issues no statement", async () => {

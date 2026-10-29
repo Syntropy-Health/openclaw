@@ -1,16 +1,19 @@
 /**
- * before_agent_start fires ONCE per turn. run.ts calls it early; the attempt
- * reuses that result and runs the hook itself only when the early call did not
+ * before_agent_start fires ONCE per run (a turn), however many attempts the run
+ * makes (retries, compaction). run.ts calls it early; every attempt reuses that
+ * result, and an attempt runs the hook itself only when the early call did not
  * run or threw. Before this fix, "every hook returned nothing" (undefined) looked
- * like "no early result", so every hook ran twice — the second time without a
+ * like "no early result", so every hook ran again in each attempt — without a
  * run id.
  */
 import "./run.overflow-compaction.mocks.shared.js";
 import fs from "node:fs";
 import path from "node:path";
+import ts from "typescript";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { getGlobalHookRunner } from "../../plugins/hook-runner-global.js";
 import type { PluginHookAgentContext } from "../../plugins/types.js";
+import { compactEmbeddedPiSessionDirect } from "./compact.js";
 import { runEmbeddedPiAgent } from "./run.js";
 import { makeAttemptResult } from "./run.overflow-compaction.fixture.js";
 import { runEmbeddedAttempt } from "./run/attempt.js";
@@ -90,6 +93,32 @@ describe("before_agent_start runs once per turn", () => {
     expect(calls[1].runId).toBe("resp_once");
   });
 
+  it("two attempts in one run (an overflow retry) still run the hook ONCE in total", async () => {
+    const { r } = runner(undefined);
+    const overflow = new Error("request_too_large: Request size exceeds model context window");
+    let n = 0;
+    vi.mocked(runEmbeddedAttempt).mockImplementation(async (p) => {
+      n++;
+      await resolveAttemptHookResult({
+        earlyHookRan: p.earlyHookRan === true,
+        earlyHookResult: p.earlyHookResult,
+        hookRunner: getGlobalHookRunner(),
+        event: { prompt: p.prompt },
+        ctx: attemptHookContext({ runId: p.runId }),
+        onError: () => {},
+      });
+      return makeAttemptResult({ promptError: n === 1 ? overflow : null });
+    });
+    vi.mocked(compactEmbeddedPiSessionDirect).mockResolvedValueOnce({
+      ok: true,
+      compacted: true,
+      result: { summary: "s", firstKeptEntryId: "e", tokensBefore: 150000 },
+    } as never);
+    await run();
+    expect(n).toBe(2); // two attempts really ran
+    expect(r.runBeforeAgentStart).toHaveBeenCalledTimes(1);
+  });
+
   it("run.ts tells the attempt whether the early call ran", async () => {
     runner(undefined);
     await run();
@@ -139,8 +168,20 @@ describe("resolveAttemptHookResult", () => {
 
 // The attempt is not unit-runnable without a live agent session, so its use of
 // the step above is pinned at the source (the same practice as system-prompt.hook.test.ts).
+/** The source with every comment removed, so a commented-out line can never satisfy a pin. */
+function codeOnly(file: string): string {
+  const text = fs.readFileSync(file, "utf8");
+  const sf = ts.createSourceFile(file, text, ts.ScriptTarget.Latest, false, ts.ScriptKind.TS);
+  return ts.createPrinter({ removeComments: true }).printFile(sf);
+}
+
 describe("attempt.ts wiring (source pin)", () => {
-  const src = fs.readFileSync(path.join(import.meta.dirname, "run", "attempt.ts"), "utf8");
+  const src = codeOnly(path.join(import.meta.dirname, "run", "attempt.ts"));
+
+  it("control: comments are gone, code is kept", () => {
+    expect(src).not.toContain("Reuse the early result");
+    expect(src).toContain("resolveAttemptHookResult(");
+  });
 
   it("decides with earlyHookRan, never by `earlyHookResult ??` (which re-ran on undefined)", () => {
     expect(src).not.toMatch(/params\.earlyHookResult\s*\?\?/);

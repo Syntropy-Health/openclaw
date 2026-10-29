@@ -657,3 +657,23 @@ describe("recall route with autoRecall off", () => {
     expect(recall.reads).toBe(0);
   });
 });
+
+describe("recall config warnings at load", () => {
+  const mmrWarnings = (logger: { warn: { mock: { calls: unknown[][] } } }) =>
+    logger.warn.mock.calls.map((c) => String(c[0])).filter((l) => l.includes("mmrLambda"));
+
+  it("mmrLambda set without the mmr reranker: ONE warning (it has no effect)", async () => {
+    const { logger } = await register({ recall: { mmrLambda: 0.8 } });
+    expect(mmrWarnings(logger)).toHaveLength(1);
+    expect(mmrWarnings(logger)[0]).toContain('"rrf"');
+  });
+
+  it("control: mmrLambda with the mmr reranker, or no mmrLambda, warns nothing", async () => {
+    expect(
+      mmrWarnings((await register({ recall: { reranker: "mmr", mmrLambda: 0.8 } })).logger),
+    ).toEqual([]);
+    expect(mmrWarnings((await register({ recall: { reranker: "cross_encoder" } })).logger)).toEqual(
+      [],
+    );
+  });
+});

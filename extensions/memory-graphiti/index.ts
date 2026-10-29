@@ -358,6 +358,12 @@ const memoryPlugin = {
     // MMR's relevance/diversity balance; sent only when the reranker is mmr.
     const recallMmrLambda =
       recallReranker === "mmr" ? (cfg.recall?.mmrLambda ?? RECALL_MMR_LAMBDA_DEFAULT) : undefined;
+    if (cfg.recall?.mmrLambda !== undefined && recallReranker !== "mmr") {
+      api.logger.warn(
+        `memory-graphiti: recall.mmrLambda is set but recall.reranker is "${recallReranker}"; ` +
+          "mmrLambda only applies to the mmr reranker and is ignored",
+      );
+    }
     if (cfg.autoRecall && !client.capabilities().rerankers.includes(recallReranker)) {
       // Logged ONCE: the backend ranks with its own default (results say server_default).
       api.logger.warn(

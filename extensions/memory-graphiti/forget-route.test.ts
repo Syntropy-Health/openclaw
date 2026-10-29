@@ -241,6 +241,28 @@ describe("forgetByExternalId + tombstones (end to end, real files)", () => {
     ).toBe(0);
   });
 
+  it("recall is blocked and erased FIRST: a store failure afterwards still leaves no recall rows", async () => {
+    const recall = recallRows();
+    recall.rows.set(opaque(SUB), 2);
+    await expect(
+      forgetByExternalId({
+        sql: noRows,
+        client: {
+          forget: vi.fn(async () => {
+            throw new Error("zep 503");
+          }),
+        },
+        ledger: createMemoryReceiptLedger(),
+        recall,
+        opaque,
+        externalId: SUB,
+        stateDir,
+      }),
+    ).rejects.toThrow("zep 503");
+    expect(recall.forgetGroup).toHaveBeenCalledWith(opaque(SUB));
+    expect(recall.rows.get(opaque(SUB))).toBeUndefined();
+  });
+
   it("a recall delete failure fails the erase (never a SUCCEEDED with records left)", async () => {
     const recall = {
       forgetGroup: vi.fn(async () => {

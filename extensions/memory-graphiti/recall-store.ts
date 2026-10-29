@@ -8,15 +8,17 @@
  *
  * - Keyed by (opaque group id, turn id). Every lookup filters on the CALLER's
  *   group, so another user's turn id finds nothing (`none`, never 403).
- * - TTL 10 minutes, enforced in the read query; every write also sweeps expired
- *   rows of ALL groups (and expired forget blocks), using the index on `at`.
+ * - TTL 10 minutes, enforced in the read query; every write also sweeps up to
+ *   200 expired rows of ALL groups (and expired blocks), oldest first, skipping
+ *   rows another writer holds (index on `at`).
  * - About 5 rows per group: the write upserts and evicts the oldest beyond 5 in
  *   ONE statement (atomic; no transaction is held on the shared pool, see
  *   plugin-sdk/pg-pool.ts). Two writers racing for the same group can briefly
  *   leave a few more; the next write trims them.
  * - forgetGroup erases the group's rows AND blocks writes to it for 11 minutes
  *   (lp_memory_recall_block), so a turn already in flight cannot re-create a
- *   record after a forget. The write checks the block in the same statement.
+ *   record after a forget. Writes and forgets are serialised per group on the
+ *   group's row in that table (see write); no transaction is held.
  *
  * Rows hold fact text (PHI-grade), in the same database and under the same
  * controls as lp_memory_receipts. forget and remove delete them.
@@ -27,6 +29,8 @@ export const RECALL_TTL_MINUTES = 10;
 export const RECALL_CAP_PER_GROUP = 5;
 /** How long a forget refuses recall writes for the group (longer than the TTL). */
 export const RECALL_BLOCK_MINUTES = 11;
+/** At most this many expired rows (and blocks) one write sweeps. */
+export const RECALL_SWEEP_BATCH = 200;
 
 /** One injected fact, as the panel serves it. Key order is part of the contract. */
 export type RecallItem = {
@@ -106,28 +110,64 @@ function toRecord(row: Row | undefined): RecallRecord | null {
   };
 }
 
-export function createPgRecallStore(sql: Sql): RecallStore {
+export type PgRecallStoreOptions = {
+  /**
+   * TEST-ONLY: seconds to pg_sleep inside the write statement, before or after it
+   * takes the group's gate, so overlap tests can interleave a forget. 0 otherwise.
+   */
+  testWriteDelay?: { beforeGateSec?: number; afterGateSec?: number };
+};
+
+export function createPgRecallStore(sql: Sql, opts: PgRecallStoreOptions = {}): RecallStore {
+  const beforeGateSec = opts.testWriteDelay?.beforeGateSec ?? 0;
+  const afterGateSec = opts.testWriteDelay?.afterGateSec ?? 0;
   return {
     async write(groupId, turnId, items, state) {
       // ONE statement. The items go as a value, not a pre-stringified string: the
       // driver encodes a jsonb parameter itself (a string would be stored as a JSON
-      // string scalar). In order:
-      //   - sweep expired rows of every group, and expired forget blocks;
-      //   - insert/update this turn UNLESS a forget blocks the group;
-      //   - keep this turn plus the newest (cap - 1) other turns of the group. The
-      //     deletes see the pre-statement snapshot, so the subquery excludes this
-      //     turn explicitly.
+      // string scalar).
+      //
+      // Serialised against forgetGroup per group through the group's row in
+      // lp_memory_recall_block (the "gate"): this statement upserts it. ON CONFLICT
+      // DO UPDATE locks the row and reads its LATEST committed version, even one
+      // committed after this statement's snapshot — so a forget that committed
+      // first is always seen, and a forget that comes later waits for this write
+      // (it holds the row lock) and then deletes what it wrote. An advisory lock
+      // inside one statement does NOT do this: READ COMMITTED takes the snapshot
+      // before the lock wait (measured; the overlap tests fail with it).
+      //
+      // Also: a lock-friendly sweep of expired rows and blocks of other groups
+      // (bounded, SKIP LOCKED, oldest first), then keep this turn plus the newest
+      // (cap - 1) other turns. The deletes see the pre-statement snapshot, so the
+      // eviction subquery excludes this turn explicitly.
       await sql`
         WITH swept AS (
-          DELETE FROM lp_memory_recall WHERE at < now() - make_interval(mins => ${RECALL_TTL_MINUTES}) RETURNING 1
+          DELETE FROM lp_memory_recall WHERE ctid IN (
+            SELECT ctid FROM lp_memory_recall
+            WHERE at < now() - make_interval(mins => ${RECALL_TTL_MINUTES})
+            ORDER BY at LIMIT ${RECALL_SWEEP_BATCH} FOR UPDATE SKIP LOCKED
+          ) RETURNING 1
         ),
         swept_blocks AS (
-          DELETE FROM lp_memory_recall_block WHERE until < now() RETURNING 1
+          DELETE FROM lp_memory_recall_block WHERE ctid IN (
+            SELECT ctid FROM lp_memory_recall_block
+            WHERE until < now() AND group_id <> ${groupId}
+            ORDER BY until LIMIT ${RECALL_SWEEP_BATCH} FOR UPDATE SKIP LOCKED
+          ) RETURNING 1
         ),
+        pre AS (SELECT pg_sleep(${beforeGateSec})),
+        gate AS (
+          INSERT INTO lp_memory_recall_block (group_id, until)
+          SELECT ${groupId}, '-infinity'::timestamptz FROM pre
+          ON CONFLICT (group_id) DO UPDATE SET until = lp_memory_recall_block.until
+          RETURNING until
+        ),
+        post AS (SELECT pg_sleep(${afterGateSec}) FROM gate),
         up AS (
           INSERT INTO lp_memory_recall (group_id, turn_id, items, state, at)
           SELECT ${groupId}, ${turnId}, ${canonicalRecallItems(items)}::jsonb, ${state}, now()
-          WHERE NOT EXISTS ( SELECT 1 FROM lp_memory_recall_block WHERE group_id = ${groupId} AND until > now() )
+          FROM gate, post
+          WHERE gate.until <= now()
           ON CONFLICT (group_id, turn_id) DO UPDATE
             SET items = EXCLUDED.items, state = EXCLUDED.state, at = EXCLUDED.at
           RETURNING turn_id
@@ -163,13 +203,16 @@ export function createPgRecallStore(sql: Sql): RecallStore {
       return rows.length;
     },
     async forgetGroup(groupId) {
+      // TWO statements, block first. The block upsert waits for any write holding
+      // the group's gate; once it commits, every later write sees the block and
+      // refuses. The delete then runs with a FRESH snapshot that includes every
+      // write that got in before the block.
+      await sql`
+        INSERT INTO lp_memory_recall_block (group_id, until)
+        VALUES (${groupId}, now() + make_interval(mins => ${RECALL_BLOCK_MINUTES}))
+        ON CONFLICT (group_id) DO UPDATE
+          SET until = GREATEST(lp_memory_recall_block.until, EXCLUDED.until)`;
       const rows = await sql<{ turn_id: string }>`
-        WITH blocked AS (
-          INSERT INTO lp_memory_recall_block (group_id, until)
-          VALUES (${groupId}, now() + make_interval(mins => ${RECALL_BLOCK_MINUTES}))
-          ON CONFLICT (group_id) DO UPDATE
-            SET until = GREATEST(lp_memory_recall_block.until, EXCLUDED.until)
-        )
         DELETE FROM lp_memory_recall WHERE group_id = ${groupId} RETURNING turn_id`;
       return rows.length;
     },
