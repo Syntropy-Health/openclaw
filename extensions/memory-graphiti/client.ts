@@ -38,6 +38,69 @@ export type GraphitiMessage = {
   source_description?: string;
 };
 
+/** One fact (entity edge) as the read surface returns it, store-agnostic. */
+export type MemoryFact = {
+  id: string;
+  fact: string;
+  name: string;
+  validAt: string | null;
+  invalidAt: string | null;
+  createdAt: string;
+  expiredAt: string | null;
+  /** Ids of the episodes the fact was derived from (may be empty). */
+  episodeIds: string[];
+};
+
+export type Reranker = "rrf" | "mmr" | "cross_encoder";
+
+/** A search hit, in the backend's rank order (rank = index + 1). */
+export type RankedFact = MemoryFact & {
+  rank: number;
+  /** The backend's score; null when the backend reports none. */
+  score: number | null;
+  /**
+   * Set to "server_default" when the requested reranker could not be applied and
+   * the backend ranked with its own default instead (never a silent pass).
+   */
+  rerankerApplied?: "server_default";
+};
+
+export type ListFactsOptions = {
+  /** Only facts created at or after this ISO time. */
+  since?: string;
+  /** At most this many facts (the backend ceiling still applies). */
+  limit?: number;
+  /** Continue from a previous call's nextCursor. */
+  cursor?: string;
+  /** Include facts that are invalidated or expired. Default false. */
+  includeInvalid?: boolean;
+};
+
+export type ListFactsResult = {
+  facts: MemoryFact[];
+  /** Pass back as `cursor` to continue; null when everything was read. */
+  nextCursor: string | null;
+  /** True when the read stopped at the backend ceiling with more facts left. */
+  truncated?: boolean;
+};
+
+export type SearchRankedOptions = {
+  reranker: Reranker;
+  limit: number;
+  mmrLambda?: number;
+  signal?: AbortSignal;
+};
+
+/**
+ * The fact-level read and delete surface (A&D §4.1). Every backend implements it;
+ * a backend that cannot serve an operation throws MemoryCapabilityError.
+ */
+export interface MemoryFactSurface {
+  listFacts(groupId: string, opts?: ListFactsOptions): Promise<ListFactsResult>;
+  searchRanked(groupId: string, query: string, opts: SearchRankedOptions): Promise<RankedFact[]>;
+  forgetFacts(groupId: string, factIds: string[]): Promise<{ deleted: number; absent: number }>;
+}
+
 /**
  * Unified memory client interface — both self-hosted Graphiti and Zep Cloud
  * implement this so the plugin logic is backend-agnostic.
