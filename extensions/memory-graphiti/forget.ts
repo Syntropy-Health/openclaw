@@ -4,7 +4,8 @@
  *
  * Deletes:
  *   1. the user's memory group(s) at the store (adapter.forget — Zep user delete),
- *   2. their receipt and pending rows (ledger.deleteGroup),
+ *   2. their receipt and pending rows (ledger.deleteGroup), and their per-turn
+ *      recall records (lp_memory_recall, when a recall store is given),
  *   3. their session transcript files, live AND archived (.deleted./.reset./.bak).
  *
  * How transcripts are chosen — never by a loose identifier match (re-gate review):
@@ -48,6 +49,8 @@ export type ForgetResult = {
   lockedSkipped: number;
   /** Files that disappeared between listing and reading/deleting (concurrent rename): re-run. */
   vanished: number;
+  /** Per-turn recall records (lp_memory_recall) deleted. */
+  recall: number;
 };
 
 /** Live + archived transcript files (never locks, never sessions.json). */
@@ -218,6 +221,8 @@ type ForgetDeps = {
   sql: Sql;
   client: Pick<MemoryClient, "forget">;
   ledger: Pick<ReceiptLedger, "deleteGroup" | "addTombstones">;
+  /** The per-turn recall records (A&D §4.8). Absent when there is no recall store. */
+  recall?: { deleteGroup(groupId: string): Promise<number> };
   /** The plugin's opaque group-id function (keyed by the pepper). */
   opaque: (raw: string) => string;
   stateDir: string;
@@ -232,6 +237,7 @@ const emptyResult = (): ForgetResult => ({
   sharedSkipped: 0,
   lockedSkipped: 0,
   vanished: 0,
+  recall: 0,
 });
 
 /** The erase itself, for an already-resolved identity. */
@@ -304,6 +310,9 @@ async function eraseLocked(
       res.storeGroupsAbsent++;
     }
     res.receipts += await ledger.deleteGroup(g);
+    if (deps.recall) {
+      res.recall += await deps.recall.deleteGroup(g);
+    }
   }
 
   // 3. The transcripts.

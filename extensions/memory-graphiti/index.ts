@@ -749,6 +749,7 @@ const memoryPlugin = {
                   sql: identitySql as unknown as Parameters<typeof forgetByExternalId>[0]["sql"],
                   client,
                   ledger,
+                  recall: recallStore ?? undefined,
                   opaque,
                   externalId,
                   stateDir: gatewayStateDir(),
@@ -813,6 +814,7 @@ const memoryPlugin = {
                 sql: identitySql as unknown as Parameters<typeof forgetUser>[0]["sql"],
                 client,
                 ledger,
+                recall: recallStore ?? undefined,
                 opaque,
                 userId: opts.user,
                 stateDir,
@@ -825,7 +827,7 @@ const memoryPlugin = {
               return;
             }
             console.log(
-              `graphiti forget: userFound=${r.userFound} storeGroupsDeleted=${r.storeGroupsDeleted} storeGroupsAbsent=${r.storeGroupsAbsent} receipts=${r.receipts} transcripts=${r.transcripts} sharedSkipped=${r.sharedSkipped} lockedSkipped=${r.lockedSkipped} vanished=${r.vanished}`,
+              `graphiti forget: userFound=${r.userFound} storeGroupsDeleted=${r.storeGroupsDeleted} storeGroupsAbsent=${r.storeGroupsAbsent} receipts=${r.receipts} recall=${r.recall} transcripts=${r.transcripts} sharedSkipped=${r.sharedSkipped} lockedSkipped=${r.lockedSkipped} vanished=${r.vanished}`,
             );
           });
 
