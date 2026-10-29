@@ -15,41 +15,18 @@
  * Logs carry the outcome and counts only — never the sub, a group id or content.
  */
 import type { IncomingMessage, ServerResponse } from "node:http";
-import type { ResolvedClerkAuth } from "../../src/gateway/auth.js";
 import { forgetOutcome, type ForgetResult } from "./forget.js";
+import { authenticateClerk, sendJson, type ClerkRouteAuthDeps } from "./route-auth.js";
 
 export const FORGET_ROUTE_PATH = "/gateway/memory/forget";
 
-export type ForgetRouteDeps = {
-  resolveClerk: () => ResolvedClerkAuth | undefined;
-  verifyJwt: (
-    token: string,
-    clerk: ResolvedClerkAuth,
-  ) => Promise<{ ok: true; externalId: string } | { ok: false }>;
-  /**
-   * Server-side Clerk session check, when the gateway has a session resolver (the
-   * chat path's revocation guard): a token from a signed-out / revoked session is
-   * refused. Undefined = JWT-verify-only (as chat does without a resolver).
-   */
-  validateSession?: (sub: string, sessionId: string | undefined) => Promise<boolean>;
+export type ForgetRouteDeps = ClerkRouteAuthDeps & {
   /** Minimum gap between two erases for the same user (abuse guard). Default 5 s. */
   cooldownMs?: number;
   now?: () => number;
   /** Null when memory is refused (e.g. no pepper under the PHI approval): the erase cannot target the right groups. */
   forget: ((externalId: string) => Promise<ForgetResult>) | null;
-  logger?: { info?: (m: string) => void; warn?: (m: string) => void; error?: (m: string) => void };
 };
-
-function bearerToken(req: IncomingMessage): string | undefined {
-  const raw = req.headers.authorization;
-  const value = Array.isArray(raw) ? raw[0] : raw;
-  return value?.match(/^Bearer\s+(.+)$/i)?.[1]?.trim() || undefined;
-}
-
-function sendJson(res: ServerResponse, status: number, body: Record<string, unknown>): void {
-  res.writeHead(status, { "content-type": "application/json", "cache-control": "no-store" });
-  res.end(JSON.stringify(body));
-}
 
 const failed = (reasons: string[], retryable: boolean) => ({
   status: "FAILED",
@@ -70,42 +47,10 @@ export function createForgetHandler(deps: ForgetRouteDeps) {
       sendJson(res, 405, { error: "method not allowed" });
       return;
     }
-    const clerk = deps.resolveClerk();
-    const token = bearerToken(req);
-    if (!clerk || !token) {
-      deps.logger?.warn?.(
-        `memory-forget: 401 reason=${!clerk ? "clerk-not-configured" : "no-bearer"}`,
-      );
-      sendJson(res, 401, { error: "unauthorized" });
+    const sub = await authenticateClerk(req, res, deps, "memory-forget");
+    if (sub === null) {
       return;
     }
-    let verified: Awaited<ReturnType<ForgetRouteDeps["verifyJwt"]>>;
-    try {
-      verified = await deps.verifyJwt(token, clerk);
-    } catch {
-      verified = { ok: false };
-    }
-    if (!verified.ok || !verified.externalId) {
-      deps.logger?.warn?.("memory-forget: 401 reason=invalid-token");
-      sendJson(res, 401, { error: "unauthorized" });
-      return;
-    }
-    if (deps.validateSession) {
-      const raw = req.headers["x-openclaw-clerk-session-id"];
-      const sid = (Array.isArray(raw) ? raw[0] : raw)?.trim() || undefined;
-      let live = false;
-      try {
-        live = await deps.validateSession(verified.externalId, sid);
-      } catch {
-        live = false;
-      }
-      if (!live) {
-        deps.logger?.warn?.("memory-forget: 401 reason=session-not-active");
-        sendJson(res, 401, { error: "unauthorized" });
-        return;
-      }
-    }
-    const sub = verified.externalId;
     if (running.has(sub)) {
       sendJson(res, 200, failed(["in_progress"], true));
       return;

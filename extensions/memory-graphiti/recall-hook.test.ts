@@ -4,6 +4,7 @@
  * (RecallStore, keyed by the turn's run id) so the panel shows exactly what the
  * agent got. On timeout nothing is injected and the record says `timed_out`.
  */
+import type { IncomingMessage, ServerResponse } from "node:http";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { RankedFact, SearchRankedOptions } from "./client.js";
 
@@ -22,13 +23,17 @@ vi.mock("postgres", () => {
   return { default: () => sql };
 });
 
-/** The RecallStore the plugin builds over its pool: replaced by a recording one. */
+/** The RecallStore the plugin builds over its pool: replaced by a recording, group-keyed one. */
 const recall = vi.hoisted(() => ({
   writes: [] as Array<{ group: string; turnId: string; items: unknown[]; state: string }>,
   write: null as null | ((...a: unknown[]) => Promise<void>),
 }));
 vi.mock("./recall-store.js", async (importOriginal) => {
   const actual = await importOriginal<typeof import("./recall-store.js")>();
+  const find = (g: string, t?: string) =>
+    recall.writes.findLast((w) => w.group === g && (t === undefined || w.turnId === t));
+  const asRecord = (w?: (typeof recall.writes)[number]) =>
+    w ? { turnId: w.turnId, items: w.items, state: w.state, at: "2026-10-29T00:00:00Z" } : null;
   return {
     ...actual,
     createPgRecallStore: () => ({
@@ -38,11 +43,26 @@ vi.mock("./recall-store.js", async (importOriginal) => {
         }
         recall.writes.push({ group, turnId, items, state });
       },
-      read: async () => null,
-      latest: async () => null,
+      read: async (g: string, t: string) => asRecord(find(g, t)),
+      latest: async (g: string) => asRecord(find(g)),
       deleteGroup: async () => 0,
       deleteCitingFacts: async () => 0,
     }),
+  };
+});
+
+/** Clerk: "Bearer good" is the verified user, "Bearer other" another user. */
+vi.mock("../../src/gateway/auth.js", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../../src/gateway/auth.js")>();
+  return {
+    ...actual,
+    resolveClerkAuth: () => ({ issuer: "https://clerk.test" }),
+    authorizeClerkJwt: async (token: string) =>
+      token === "good"
+        ? { ok: true, externalId: "user_2abcDEF345ghiJKL678mnoPQR" }
+        : token === "other"
+          ? { ok: true, externalId: "user_2zzzZZZ999yyyXXX888wwwVVV" }
+          : { ok: false },
   };
 });
 
@@ -69,8 +89,10 @@ const TURN = {
 const GROUP = opaqueGroupId(CLERK, PEPPER);
 
 type Hook = (event: unknown, ctx: unknown) => unknown;
+type Route = (req: IncomingMessage, res: ServerResponse) => Promise<void>;
 async function register(extra: Record<string, unknown> = {}, cfg?: Record<string, unknown>) {
   const hooks: Record<string, Hook> = {};
+  const routes: Record<string, Route> = {};
   const logger = { info: vi.fn(), warn: vi.fn(), error: vi.fn(), debug: vi.fn() };
   const api = {
     id: "memory-graphiti",
@@ -91,7 +113,9 @@ async function register(extra: Record<string, unknown> = {}, cfg?: Record<string
     registerTool: vi.fn(),
     registerHook: vi.fn(),
     registerHttpHandler: vi.fn(),
-    registerHttpRoute: vi.fn(),
+    registerHttpRoute: vi.fn((r: { path: string; handler: Route }) => {
+      routes[r.path] = r.handler;
+    }),
     registerChannel: vi.fn(),
     registerGatewayMethod: vi.fn(),
     registerCli: vi.fn(),
@@ -105,7 +129,7 @@ async function register(extra: Record<string, unknown> = {}, cfg?: Record<string
   };
   const mod = await import("./index.js");
   mod.default.register(api as never);
-  return { hooks, logger };
+  return { hooks, logger, routes };
 }
 
 const ranked = (facts: ReturnType<typeof factFixture>[]): RankedFact[] =>
@@ -380,5 +404,89 @@ describe("recall config", () => {
     expect(() =>
       graphitiConfigSchema.parse({ serverUrl: "http://localhost:8000", recall: recallCfg }),
     ).toThrow(err);
+  });
+});
+
+/** GET the recall route as the panel would. */
+async function getRecall(route: Route | undefined, token: string | null, turn?: string) {
+  let status = 0;
+  let body = "";
+  await route?.(
+    {
+      method: "GET",
+      url: `/gateway/memory/recall${turn ? `?turn=${turn}` : ""}`,
+      headers: token ? { authorization: `Bearer ${token}` } : {},
+    } as unknown as IncomingMessage,
+    {
+      writeHead: (s: number) => {
+        status = s;
+      },
+      end: (b: string) => {
+        body = b;
+      },
+    } as unknown as ServerResponse,
+  );
+  return { status, json: body ? JSON.parse(body) : null };
+}
+
+describe("recall route end to end (hook → store → GET /gateway/memory/recall)", () => {
+  it("the route serves exactly the items the hook injected, byte for byte, after ONE search", async () => {
+    const searchRanked = vi
+      .spyOn(ZepCloudClient.prototype, "searchRanked")
+      .mockResolvedValue(RANKED);
+    const { hooks, routes } = await register();
+    const out = (await hooks.before_agent_start?.({ prompt: "how did I sleep?" }, TURN)) as {
+      prependContext?: string;
+    };
+    const r = await getRecall(routes["/gateway/memory/recall"], "good", RUN_ID);
+    expect(searchRanked).toHaveBeenCalledTimes(1); // the route did not search again
+    expect(r.status).toBe(200);
+    expect(r.json.state).toBe("ready");
+    expect(r.json.turn).toBe(RUN_ID);
+    const served = (r.json.items as Array<Record<string, unknown>>).map(
+      ({ highlight_id: _h, ...rest }) => rest,
+    );
+    expect(JSON.stringify(served)).toBe(JSON.stringify(recall.writes[0].items));
+    const lines = (out?.prependContext ?? "").split("\n").filter((l) => /^\d+\. /.test(l));
+    served.forEach((item, i) => {
+      expect(lines[i].startsWith(`${String(item.rank)}. ${escape(String(item.fact))}`)).toBe(true);
+    });
+    // the latest turn, when the panel has no response id
+    expect((await getRecall(routes["/gateway/memory/recall"], "good")).json.turn).toBe(RUN_ID);
+  });
+
+  it("another user's token gets none for this turn id; no token gets 401", async () => {
+    vi.spyOn(ZepCloudClient.prototype, "searchRanked").mockResolvedValue(RANKED);
+    const { hooks, routes } = await register();
+    await hooks.before_agent_start?.({ prompt: "how did I sleep?" }, TURN);
+    const other = await getRecall(routes["/gateway/memory/recall"], "other", RUN_ID);
+    expect(other.json).toMatchObject({ state: "none", items: [] });
+    expect((await getRecall(routes["/gateway/memory/recall"], null, RUN_ID)).status).toBe(401);
+  });
+
+  it("memory refused (no pepper): the route answers not_enabled after auth", async () => {
+    delete process.env.OPENCLAW_MEMORY_GROUP_KEY;
+    const { routes } = await register();
+    expect((await getRecall(routes["/gateway/memory/recall"], "good", RUN_ID)).json).toEqual({
+      contract: "memory-highlights/1",
+      state: "not_enabled",
+      turn: RUN_ID,
+      items: [],
+    });
+    expect((await getRecall(routes["/gateway/memory/recall"], "bad")).status).toBe(401);
+  });
+
+  it("no identity database: the route is still registered and answers not_enabled", async () => {
+    const { routes } = await register(
+      {},
+      {
+        backend: "self-hosted",
+        serverUrl: "http://localhost:8000",
+        groupIdStrategy: "channel-sender",
+      },
+    );
+    expect((await getRecall(routes["/gateway/memory/recall"], "good")).json.state).toBe(
+      "not_enabled",
+    );
   });
 });

@@ -39,6 +39,7 @@ import {
 import { createGroupLock } from "./lock.js";
 import { extractMessages } from "./messages.js";
 import { minimiseForMemory } from "./minimise.js";
+import { createRecallHandler, RECALL_ROUTE_PATH } from "./recall-route.js";
 import {
   createPgRecallStore,
   toRecallItems,
@@ -711,30 +712,36 @@ const memoryPlugin = {
     // Self-service "Clear chat memory" (CTO #17002): the verified Clerk user only.
     // The gateway's OWN state-dir resolution (env overrides, ~ expansion, legacy dirs).
     const gatewayStateDir = () => resolveStateDir(process.env);
+    // The /gateway/memory/* routes share one auth (route-auth.ts): the verified
+    // Clerk sub, plus the chat path's session check when there is a resolver.
+    const clerkRouteAuth = {
+      resolveClerk: () => resolveClerkAuth(api.config.gateway?.auth?.clerk, process.env),
+      verifyJwt: (token: string, clerk: Parameters<typeof authorizeClerkJwt>[1]) =>
+        authorizeClerkJwt(token, clerk),
+      // Mirror the chat path: with a session resolver, a revoked/signed-out
+      // session's token is refused (Clerk unreachable → fail-open, as chat).
+      validateSession: (() => {
+        const clerk = resolveClerkAuth(api.config.gateway?.auth?.clerk, process.env);
+        const resolve = clerk?.sessionResolver;
+        return resolve
+          ? async (sub: string, sessionId: string | undefined) =>
+              (
+                await validateClerkSession({
+                  sub,
+                  sessionId,
+                  resolve,
+                  cacheTtlMs: clerk?.sessionCacheTtlMs,
+                  now: Date.now(),
+                  logger: api.logger,
+                })
+              ).ok
+          : undefined;
+      })(),
+    };
     api.registerHttpRoute({
       path: FORGET_ROUTE_PATH,
       handler: createForgetHandler({
-        resolveClerk: () => resolveClerkAuth(api.config.gateway?.auth?.clerk, process.env),
-        verifyJwt: (token, clerk) => authorizeClerkJwt(token, clerk),
-        // Mirror the chat path: with a session resolver, a revoked/signed-out
-        // session's token is refused (Clerk unreachable → fail-open, as chat).
-        validateSession: (() => {
-          const clerk = resolveClerkAuth(api.config.gateway?.auth?.clerk, process.env);
-          const resolve = clerk?.sessionResolver;
-          return resolve
-            ? async (sub: string, sessionId: string | undefined) =>
-                (
-                  await validateClerkSession({
-                    sub,
-                    sessionId,
-                    resolve,
-                    cacheTtlMs: clerk?.sessionCacheTtlMs,
-                    now: Date.now(),
-                    logger: api.logger,
-                  })
-                ).ok
-            : undefined;
-        })(),
+        ...clerkRouteAuth,
         forget:
           identitySql && !memoryRefused
             ? (externalId) =>
@@ -747,6 +754,22 @@ const memoryPlugin = {
                   stateDir: gatewayStateDir(),
                   lock: withGroups,
                 })
+            : null,
+        logger: api.logger,
+      }),
+    });
+
+    // Recall panel feed (A&D §1c). Always registered so SJ gets the contract
+    // shape; it reads records only when memory is enabled and not refused,
+    // otherwise it answers `not_enabled` after auth. The group is the verified
+    // sub's opaque id — the one group recall writes for an HTTP/Clerk turn.
+    api.registerHttpRoute({
+      path: RECALL_ROUTE_PATH,
+      handler: createRecallHandler({
+        ...clerkRouteAuth,
+        recall:
+          recallStore && !memoryRefused && cfg.autoRecall
+            ? { store: recallStore, groupFor: (sub) => opaque(sub) }
             : null,
         logger: api.logger,
       }),
