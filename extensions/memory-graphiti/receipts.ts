@@ -126,6 +126,12 @@ export async function ensureReceiptSchema(sql: Sql): Promise<void> {
       created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
       UNIQUE (group_id, entry_hash)
     )`;
+  // One-shot repair, safe to repeat: earlier versions stored episode_ids as a JSON
+  // string holding the array. Unwrap those rows; arrays are left alone.
+  await sql`
+    UPDATE lp_memory_receipts
+    SET episode_ids = (episode_ids #>> '{}')::jsonb
+    WHERE jsonb_typeof(episode_ids) = 'string' AND left(episode_ids #>> '{}', 1) = '['`;
   await sql`
     CREATE TABLE IF NOT EXISTS lp_memory_pending (
       group_id TEXT NOT NULL,
@@ -176,12 +182,14 @@ export function createPgReceiptLedger(sql: Sql): ReceiptLedger {
       return new Set(rows.map((r) => r.entry_hash));
     },
     async record(r) {
+      // Sent as TEXT and parsed by Postgres. A bare `${string}::jsonb` makes the
+      // driver JSON-encode the string again, storing a JSON string, not an array.
       const episodes = JSON.stringify(r.episodeIds);
       for (const h of r.entryHashes) {
         await sql`
           INSERT INTO lp_memory_receipts
             (group_id, entry_hash, store, episode_ids, content_hash, ingested_at)
-          VALUES (${r.groupId}, ${h}, ${r.store}, ${episodes}::jsonb, ${r.contentHash}, ${r.ingestedAt})
+          VALUES (${r.groupId}, ${h}, ${r.store}, ${episodes}::text::jsonb, ${r.contentHash}, ${r.ingestedAt})
           ON CONFLICT (group_id, entry_hash) DO NOTHING`;
       }
     },
