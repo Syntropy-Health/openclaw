@@ -155,6 +155,13 @@ export async function ensureReceiptSchema(sql: Sql): Promise<void> {
       PRIMARY KEY (group_id, turn_id)
     )`;
   await sql`CREATE INDEX IF NOT EXISTS lp_memory_recall_at ON lp_memory_recall (at)`;
+  // A forget blocks recall writes for the group briefly, so a turn whose recall
+  // was already in flight cannot re-create a record after the erase.
+  await sql`
+    CREATE TABLE IF NOT EXISTS lp_memory_recall_block (
+      group_id TEXT PRIMARY KEY,
+      until TIMESTAMPTZ NOT NULL
+    )`;
 }
 
 export function createPgReceiptLedger(sql: Sql): ReceiptLedger {

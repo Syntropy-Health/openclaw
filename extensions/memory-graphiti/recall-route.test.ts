@@ -45,6 +45,9 @@ function memoryStore(): RecallStore & { rows: Map<string, RecallRecord> } {
     async deleteGroup() {
       return 0;
     },
+    async forgetGroup() {
+      return 0;
+    },
     async deleteCitingFacts() {
       return 0;
     },

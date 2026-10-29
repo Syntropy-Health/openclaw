@@ -198,7 +198,7 @@ describe("forgetByExternalId + tombstones (end to end, real files)", () => {
     const rows = new Map<string, number>();
     return {
       rows,
-      deleteGroup: vi.fn(async (group: string) => {
+      forgetGroup: vi.fn(async (group: string) => {
         const n = rows.get(group) ?? 0;
         rows.delete(group);
         return n;
@@ -221,7 +221,7 @@ describe("forgetByExternalId + tombstones (end to end, real files)", () => {
       stateDir,
     });
     expect(r.recall).toBe(3);
-    expect(recall.deleteGroup).toHaveBeenCalledWith(opaque(SUB));
+    expect(recall.forgetGroup).toHaveBeenCalledWith(opaque(SUB));
     expect(recall.rows.get(opaque(SUB))).toBeUndefined();
     expect(recall.rows.get(opaque("user_someoneElse"))).toBe(2);
     expect(forgetOutcome(r).status).toBe("SUCCEEDED");
@@ -243,7 +243,7 @@ describe("forgetByExternalId + tombstones (end to end, real files)", () => {
 
   it("a recall delete failure fails the erase (never a SUCCEEDED with records left)", async () => {
     const recall = {
-      deleteGroup: vi.fn(async () => {
+      forgetGroup: vi.fn(async () => {
         throw new Error("db down");
       }),
     };

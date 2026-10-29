@@ -347,6 +347,7 @@ const memoryPlugin = {
         read: async (g, t) => (await ready(), pgRecall.read(g, t)),
         latest: async (g) => (await ready(), pgRecall.latest(g)),
         deleteGroup: async (g) => (await ready(), pgRecall.deleteGroup(g)),
+        forgetGroup: async (g) => (await ready(), pgRecall.forgetGroup(g)),
         deleteCitingFacts: async (g, ids) => (await ready(), pgRecall.deleteCitingFacts(g, ids)),
       };
     }

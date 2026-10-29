@@ -7,6 +7,7 @@ import { describe, expect, it } from "vitest";
 import {
   canonicalRecallItems,
   createPgRecallStore,
+  RECALL_BLOCK_MINUTES,
   RECALL_CAP_PER_GROUP,
   RECALL_TTL_MINUTES,
   toRecallItems,
@@ -38,6 +39,15 @@ describe("createPgRecallStore (statement shape)", () => {
     expect(calls[0].text).toContain("INSERT INTO lp_memory_recall");
     expect(calls[0].text).toContain("ON CONFLICT (group_id, turn_id) DO UPDATE");
     expect(calls[0].text).toContain("DELETE FROM lp_memory_recall");
+    // a forget's block refuses the write, in the same statement
+    expect(calls[0].text).toMatch(
+      /SELECT[\s\S]*WHERE NOT EXISTS \( SELECT 1 FROM lp_memory_recall_block WHERE group_id = \$ AND until > now\(\) \)/,
+    );
+    // the sweep: expired rows of EVERY group (no group filter), and expired blocks
+    expect(calls[0].text).toMatch(
+      /DELETE FROM lp_memory_recall WHERE at < now\(\) - make_interval\(mins => \$\) RETURNING/,
+    );
+    expect(calls[0].text).toContain("DELETE FROM lp_memory_recall_block WHERE until < now()");
     expect(calls[0].values).toContain("ok_g");
     expect(calls[0].values).toContain(RECALL_CAP_PER_GROUP - 1);
     expect(calls[0].values).toContainEqual(ITEMS);
@@ -70,6 +80,17 @@ describe("createPgRecallStore (statement shape)", () => {
     const r = await createPgRecallStore(sql).read("ok_g", "resp_1");
     expect(JSON.stringify(r?.items)).toBe(JSON.stringify(ITEMS));
     expect(r?.at).toBe("1970-01-01T00:00:00.000Z");
+  });
+
+  it("forgetGroup erases AND blocks the group for 11 minutes, in one statement", async () => {
+    const { sql, calls } = recordingSql([[{ turn_id: "a" }, { turn_id: "b" }]]);
+    expect(await createPgRecallStore(sql).forgetGroup("ok_g")).toBe(2);
+    expect(calls).toHaveLength(1);
+    expect(calls[0].text).toContain("INSERT INTO lp_memory_recall_block");
+    expect(calls[0].text).toContain("GREATEST(");
+    expect(calls[0].text).toMatch(/DELETE FROM lp_memory_recall WHERE group_id = \$/);
+    expect(calls[0].values).toEqual(["ok_g", RECALL_BLOCK_MINUTES, "ok_g"]);
+    expect(RECALL_BLOCK_MINUTES).toBe(11);
   });
 
   it("an empty fact-id list deletes nothing and issues no statement", async () => {

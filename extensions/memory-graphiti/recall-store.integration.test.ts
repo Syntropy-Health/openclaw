@@ -34,6 +34,9 @@ function createInMemoryRecallStore(): RecallStore {
     async deleteGroup() {
       return 0;
     },
+    async forgetGroup() {
+      return 0;
+    },
     async deleteCitingFacts() {
       return 0;
     },
@@ -52,6 +55,7 @@ describeIf("RecallStore (real Postgres)", () => {
   const run = `${Date.now()}`;
   const A = `ok_recall_a_${run}`;
   const B = `ok_recall_b_${run}`;
+  const C = `ok_recall_c_${run}`;
   const sqls: Sql[] = [];
 
   const open = async (): Promise<Sql> => {
@@ -72,7 +76,8 @@ describeIf("RecallStore (real Postgres)", () => {
   afterAll(async () => {
     const sql = sqls[0];
     if (sql) {
-      await sql`DELETE FROM lp_memory_recall WHERE group_id IN (${A}, ${B})`;
+      await sql`DELETE FROM lp_memory_recall WHERE group_id IN (${A}, ${B}, ${C})`;
+      await sql`DELETE FROM lp_memory_recall_block WHERE group_id IN (${A}, ${B}, ${C})`;
     }
     for (const s of sqls) {
       await s.end({ timeout: 5 });
@@ -168,5 +173,70 @@ describeIf("RecallStore (real Postgres)", () => {
     expect(await store.read(A, "resp_a_cite")).not.toBeNull(); // other group untouched
     expect(await store.deleteGroup(B)).toBe(1);
     expect(await store.latest(B)).toBeNull();
+  });
+
+  it("sweep: any write deletes ANOTHER group's expired rows (not only the writer's)", async () => {
+    const sql = await open();
+    const store = createPgRecallStore(sql);
+    await store.write(C, "resp_stale", items(1), "ready");
+    await sql`UPDATE lp_memory_recall SET at = now() - interval '11 minutes'
+              WHERE group_id = ${C} AND turn_id = 'resp_stale'`;
+    await store.write(B, "resp_any", items(1), "ready"); // a different group writes
+    const left = await sql`SELECT 1 FROM lp_memory_recall WHERE group_id = ${C}`;
+    expect(left.length).toBe(0);
+    await store.deleteGroup(B);
+  });
+
+  it("forget blocks: a write after forgetGroup is refused (no row)", async () => {
+    const sql = await open();
+    const store = createPgRecallStore(sql);
+    await store.write(C, "resp_before", items(1), "ready");
+    expect(await store.forgetGroup(C)).toBe(1);
+    await store.write(C, "resp_after", items(2), "ready");
+    expect(await store.read(C, "resp_after")).toBeNull();
+    expect((await sql`SELECT 1 FROM lp_memory_recall WHERE group_id = ${C}`).length).toBe(0);
+    const [blk] = await sql<{ mins: number }>`
+      SELECT EXTRACT(EPOCH FROM (until - now())) / 60 AS mins
+      FROM lp_memory_recall_block WHERE group_id = ${C}`;
+    expect(Number(blk.mins)).toBeGreaterThan(10.5);
+    expect(Number(blk.mins)).toBeLessThanOrEqual(11);
+  });
+
+  it("the block does not affect another group", async () => {
+    const store = createPgRecallStore(await open());
+    await store.forgetGroup(C);
+    await store.write(B, "resp_b_free", items(1), "ready");
+    expect(await store.read(B, "resp_b_free")).not.toBeNull();
+    await store.deleteGroup(B);
+  });
+
+  it("once the block has expired, writes work again (and the expired block is swept)", async () => {
+    const sql = await open();
+    const store = createPgRecallStore(sql);
+    await store.forgetGroup(C);
+    await sql`UPDATE lp_memory_recall_block SET until = now() - interval '1 second'
+              WHERE group_id = ${C}`;
+    await store.write(C, "resp_again", items(1), "ready");
+    expect(await store.read(C, "resp_again")).not.toBeNull();
+    expect((await sql`SELECT 1 FROM lp_memory_recall_block WHERE group_id = ${C}`).length).toBe(0);
+    await store.deleteGroup(C);
+  });
+
+  it("RACE: a recall write started before a forget but landing after it commits nothing", async () => {
+    const sql = await open();
+    const store = createPgRecallStore(sql);
+    await sql`DELETE FROM lp_memory_recall_block WHERE group_id = ${C}`;
+    let release!: () => void;
+    const gate = new Promise<void>((r) => (release = r));
+    // The turn's recall started (search done, items in hand); its write is delayed.
+    const lateWrite = (async () => {
+      await gate;
+      await store.write(C, "resp_late", items(3), "ready");
+    })();
+    await createPgRecallStore(await open()).forgetGroup(C); // forget on another instance
+    release();
+    await lateWrite;
+    expect(await store.read(C, "resp_late")).toBeNull();
+    expect(await store.latest(C)).toBeNull();
   });
 });

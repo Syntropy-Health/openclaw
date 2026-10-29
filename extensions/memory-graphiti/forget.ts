@@ -222,7 +222,8 @@ type ForgetDeps = {
   client: Pick<MemoryClient, "forget">;
   ledger: Pick<ReceiptLedger, "deleteGroup" | "addTombstones">;
   /** The per-turn recall records (A&D §4.8). Absent when there is no recall store. */
-  recall?: { deleteGroup(groupId: string): Promise<number> };
+  /** forgetGroup erases the records and blocks late writes for the group. */
+  recall?: { forgetGroup(groupId: string): Promise<number> };
   /** The plugin's opaque group-id function (keyed by the pepper). */
   opaque: (raw: string) => string;
   stateDir: string;
@@ -311,7 +312,7 @@ async function eraseLocked(
     }
     res.receipts += await ledger.deleteGroup(g);
     if (deps.recall) {
-      res.recall += await deps.recall.deleteGroup(g);
+      res.recall += await deps.recall.forgetGroup(g);
     }
   }
 

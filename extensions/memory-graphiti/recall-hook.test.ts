@@ -46,6 +46,7 @@ vi.mock("./recall-store.js", async (importOriginal) => {
       read: async (g: string, t: string) => asRecord(find(g, t)),
       latest: async (g: string) => asRecord(find(g)),
       deleteGroup: async () => 0,
+      forgetGroup: async () => 0,
       deleteCitingFacts: async () => 0,
     }),
   };

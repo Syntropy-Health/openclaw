@@ -8,10 +8,15 @@
  *
  * - Keyed by (opaque group id, turn id). Every lookup filters on the CALLER's
  *   group, so another user's turn id finds nothing (`none`, never 403).
- * - TTL 10 minutes, enforced in the read query.
- * - At most 5 rows per group: the write upserts and evicts the oldest beyond 5 in
+ * - TTL 10 minutes, enforced in the read query; every write also sweeps expired
+ *   rows of ALL groups (and expired forget blocks), using the index on `at`.
+ * - About 5 rows per group: the write upserts and evicts the oldest beyond 5 in
  *   ONE statement (atomic; no transaction is held on the shared pool, see
- *   plugin-sdk/pg-pool.ts).
+ *   plugin-sdk/pg-pool.ts). Two writers racing for the same group can briefly
+ *   leave a few more; the next write trims them.
+ * - forgetGroup erases the group's rows AND blocks writes to it for 11 minutes
+ *   (lp_memory_recall_block), so a turn already in flight cannot re-create a
+ *   record after a forget. The write checks the block in the same statement.
  *
  * Rows hold fact text (PHI-grade), in the same database and under the same
  * controls as lp_memory_receipts. forget and remove delete them.
@@ -20,6 +25,8 @@ import type { RankedFact } from "./client.js";
 
 export const RECALL_TTL_MINUTES = 10;
 export const RECALL_CAP_PER_GROUP = 5;
+/** How long a forget refuses recall writes for the group (longer than the TTL). */
+export const RECALL_BLOCK_MINUTES = 11;
 
 /** One injected fact, as the panel serves it. Key order is part of the contract. */
 export type RecallItem = {
@@ -48,6 +55,11 @@ export interface RecallStore {
   latest(groupId: string): Promise<RecallRecord | null>;
   /** Delete every record of the group. Returns rows removed. */
   deleteGroup(groupId: string): Promise<number>;
+  /**
+   * The user's forget: delete every record of the group AND refuse writes to it for
+   * RECALL_BLOCK_MINUTES (a late in-flight write commits nothing). Returns rows removed.
+   */
+  forgetGroup(groupId: string): Promise<number>;
   /** Delete the group's records whose items cite any of these fact ids. Returns rows removed. */
   deleteCitingFacts(groupId: string, factIds: string[]): Promise<number>;
 }
@@ -97,15 +109,25 @@ function toRecord(row: Row | undefined): RecallRecord | null {
 export function createPgRecallStore(sql: Sql): RecallStore {
   return {
     async write(groupId, turnId, items, state) {
-      // The items go as a value, not a pre-stringified string: the driver encodes a
-      // jsonb parameter itself (a string would be stored as a JSON string scalar).
-      // One statement: upsert this turn, then keep it plus the newest (cap - 1)
-      // OTHER turns of the group. The delete sees the pre-statement snapshot, so
-      // the subquery excludes this turn explicitly.
+      // ONE statement. The items go as a value, not a pre-stringified string: the
+      // driver encodes a jsonb parameter itself (a string would be stored as a JSON
+      // string scalar). In order:
+      //   - sweep expired rows of every group, and expired forget blocks;
+      //   - insert/update this turn UNLESS a forget blocks the group;
+      //   - keep this turn plus the newest (cap - 1) other turns of the group. The
+      //     deletes see the pre-statement snapshot, so the subquery excludes this
+      //     turn explicitly.
       await sql`
-        WITH up AS (
+        WITH swept AS (
+          DELETE FROM lp_memory_recall WHERE at < now() - make_interval(mins => ${RECALL_TTL_MINUTES}) RETURNING 1
+        ),
+        swept_blocks AS (
+          DELETE FROM lp_memory_recall_block WHERE until < now() RETURNING 1
+        ),
+        up AS (
           INSERT INTO lp_memory_recall (group_id, turn_id, items, state, at)
-          VALUES (${groupId}, ${turnId}, ${canonicalRecallItems(items)}::jsonb, ${state}, now())
+          SELECT ${groupId}, ${turnId}, ${canonicalRecallItems(items)}::jsonb, ${state}, now()
+          WHERE NOT EXISTS ( SELECT 1 FROM lp_memory_recall_block WHERE group_id = ${groupId} AND until > now() )
           ON CONFLICT (group_id, turn_id) DO UPDATE
             SET items = EXCLUDED.items, state = EXCLUDED.state, at = EXCLUDED.at
           RETURNING turn_id
@@ -137,6 +159,17 @@ export function createPgRecallStore(sql: Sql): RecallStore {
     },
     async deleteGroup(groupId) {
       const rows = await sql<{ turn_id: string }>`
+        DELETE FROM lp_memory_recall WHERE group_id = ${groupId} RETURNING turn_id`;
+      return rows.length;
+    },
+    async forgetGroup(groupId) {
+      const rows = await sql<{ turn_id: string }>`
+        WITH blocked AS (
+          INSERT INTO lp_memory_recall_block (group_id, until)
+          VALUES (${groupId}, now() + make_interval(mins => ${RECALL_BLOCK_MINUTES}))
+          ON CONFLICT (group_id) DO UPDATE
+            SET until = GREATEST(lp_memory_recall_block.until, EXCLUDED.until)
+        )
         DELETE FROM lp_memory_recall WHERE group_id = ${groupId} RETURNING turn_id`;
       return rows.length;
     },
