@@ -91,4 +91,35 @@ describeIf("receipt ledger episode_ids (real Postgres)", () => {
     await ensureReceiptSchema(sql);
     expect(await typeOf(LEGACY)).toEqual([["array", ["ep_old_1", "ep_old_2"]]]);
   });
+
+  it("concurrent first boots on an empty schema all succeed (CREATE IF NOT EXISTS races)", async () => {
+    const postgres = (await import("postgres")).default;
+    const schema = `mg_ddl_race_${run}`; // run-suffixed identifier
+    await (sql as unknown as { unsafe: (q: string) => Promise<unknown> }).unsafe(
+      `CREATE SCHEMA ${schema}`,
+    );
+    const conns = Array.from(
+      { length: 6 },
+      () =>
+        postgres(DB_URL!, {
+          ssl: { rejectUnauthorized: false },
+          max: 1,
+          idle_timeout: 5,
+          connection: { search_path: schema },
+        }) as unknown as Sql,
+    );
+    try {
+      const results = await Promise.allSettled(conns.map((c) => ensureReceiptSchema(c)));
+      expect(results.filter((r) => r.status === "rejected")).toEqual([]);
+      const tables = await sql<{ n: number }>`
+        SELECT count(*)::int AS n FROM information_schema.tables
+        WHERE table_schema = ${schema} AND table_name LIKE 'lp_memory_%'`;
+      expect(tables[0].n).toBe(6);
+    } finally {
+      await Promise.all(conns.map((c) => c.end({ timeout: 5 })));
+      await (sql as unknown as { unsafe: (q: string) => Promise<unknown> }).unsafe(
+        `DROP SCHEMA IF EXISTS ${schema} CASCADE`,
+      );
+    }
+  });
 });
