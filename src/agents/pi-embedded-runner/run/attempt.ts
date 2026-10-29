@@ -96,6 +96,7 @@ import {
 import { splitSdkTools } from "../tool-split.js";
 import { describeUnknownError, mapThinkingLevel } from "../utils.js";
 import { flushPendingToolResultsAfterIdle } from "../wait-for-idle-before-flush.js";
+import { attemptHookContext, resolveAttemptHookResult } from "./before-agent-start.js";
 import {
   selectCompactionTimeoutSnapshot,
   shouldFlagCompactionTimeout,
@@ -870,37 +871,32 @@ export async function runEmbeddedAttempt(
         // Run before_agent_start hooks to allow plugins to inject context.
         // If run.ts already fired the hook (for model override), reuse its result.
         let effectivePrompt = params.prompt;
-        const hookResult =
-          params.earlyHookResult ??
-          (hookRunner?.hasHooks("before_agent_start")
-            ? await hookRunner
-                .runBeforeAgentStart(
-                  {
-                    prompt: params.prompt,
-                    messages: activeSession.messages,
-                  },
-                  {
-                    agentId: hookAgentId,
-                    sessionKey: params.sessionKey,
-                    sessionId: params.sessionId,
-                    workspaceDir: params.workspaceDir,
-                    messageProvider: resolveHookChannel(params),
-                    senderE164: params.senderE164,
-                    externalId: params.externalId,
-                    deviceId: params.deviceId,
-                  },
-                )
-                .catch((hookErr: unknown) => {
-                  log.warn(`before_agent_start hook failed: ${String(hookErr)}`);
-                  return undefined;
-                })
-            : undefined);
+        // Reuse the early result (even "every hook returned nothing"); run the hook
+        // here only when the early call did not run or threw (before-agent-start.ts).
+        const { result: hookResult, fallback: hookFallback } = await resolveAttemptHookResult({
+          earlyHookRan: params.earlyHookRan === true,
+          earlyHookResult: params.earlyHookResult,
+          hookRunner,
+          event: { prompt: params.prompt, messages: activeSession.messages },
+          ctx: attemptHookContext({
+            agentId: hookAgentId,
+            sessionKey: params.sessionKey,
+            sessionId: params.sessionId,
+            runId: params.runId,
+            workspaceDir: params.workspaceDir,
+            messageProvider: resolveHookChannel(params),
+            senderE164: params.senderE164,
+            externalId: params.externalId,
+            deviceId: params.deviceId,
+          }),
+          onError: (hookErr) => log.warn(`before_agent_start hook failed: ${String(hookErr)}`),
+        });
         // mono #538: run.ts honours shortCircuitReply from the EARLY hook. Reaching here
         // with one means the early hook did not run (the runner threw), and this
         // fallback call asked to stop the model. Fail CLOSED: never prompt the model
         // for a run a gate refused.
         if (
-          !params.earlyHookResult &&
+          hookFallback &&
           typeof hookResult?.shortCircuitReply === "string" &&
           hookResult.shortCircuitReply.trim()
         ) {
@@ -908,11 +904,10 @@ export async function runEmbeddedAttempt(
             "before_agent_start requested a short-circuit on the fallback hook path; refusing to prompt the model",
           );
         }
-        // Fallback path only: there is no early hook result (no hook was registered when
-        // run.ts ran, or every handler returned nothing or threw; the runner catches handler
-        // errors), so the hook ran here, AFTER the system prompt was applied. Rebuild with the
-        // hook's systemPrompt and re-apply, keeping systemPromptText in step.
-        if (!params.earlyHookResult) {
+        // Fallback path only: the early call did not run (no hook was registered when
+        // run.ts ran) or threw, so the hook ran here, AFTER the system prompt was applied.
+        // Rebuild with the hook's systemPrompt and re-apply, keeping systemPromptText in step.
+        if (hookFallback) {
           const lateSystemPrompt = mergeHookSystemPrompt(
             params.extraSystemPrompt,
             hookResult?.systemPrompt,
