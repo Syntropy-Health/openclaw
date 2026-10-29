@@ -221,6 +221,7 @@ export async function runEmbeddedPiAgent(
               agentId: params.agentId,
               sessionKey: params.sessionKey,
               sessionId: params.sessionId,
+              runId: params.runId,
               workspaceDir: params.workspaceDir,
               messageProvider: resolveHookChannel(params),
               senderE164: params.senderE164,

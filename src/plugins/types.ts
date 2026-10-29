@@ -334,6 +334,13 @@ export type PluginHookAgentContext = {
   agentId?: string;
   sessionKey?: string;
   sessionId?: string;
+  /**
+   * The run id of this agent turn, when the runner has one. On the OpenResponses
+   * HTTP path it IS the `response.id` the client receives, so a plugin can key
+   * per-turn state the client can later look up. Optional: hooks that ignore it
+   * are unaffected.
+   */
+  runId?: string;
   workspaceDir?: string;
   messageProvider?: string;
   /**
