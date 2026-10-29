@@ -149,6 +149,32 @@ export class ZepCloudClient implements MemoryClient {
   }
 
   /**
+   * Delete facts (edges) by id. A 404 means already gone and counts as absent, so
+   * a retry after a partial failure is idempotent; any other error propagates.
+   * Edge uuids are global in Zep: callers pass only ids read from this user's own
+   * group (the recall/highlight rows are keyed by it).
+   */
+  async forgetFacts(
+    _groupId: string,
+    factIds: string[],
+  ): Promise<{ deleted: number; absent: number }> {
+    let deleted = 0;
+    let absent = 0;
+    for (const id of new Set(factIds)) {
+      try {
+        await this.zep.graph.edge.delete(id);
+        deleted++;
+      } catch (err) {
+        if ((err as { statusCode?: number }).statusCode !== 404) {
+          throw err;
+        }
+        absent++;
+      }
+    }
+    return { deleted, absent };
+  }
+
+  /**
    * Add messages to the Zep Cloud knowledge graph.
    * Uses graph.add() with type "message" for each message, or "text" for batched content.
    * Zep Cloud processes episodes synchronously (returns Episode object).

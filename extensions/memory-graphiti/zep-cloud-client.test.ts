@@ -167,3 +167,29 @@ describe("ZepCloudClient.searchRanked", () => {
     await expect(p).rejects.toThrow("aborted");
   });
 });
+
+describe("ZepCloudClient.forgetFacts", () => {
+  it("graph.edge.delete per id; a 404 counts as absent; duplicates are deleted once", async () => {
+    const { client, zep, seed } = zepClient();
+    seed(G, [factFixture(1), factFixture(2)]);
+    expect(await client.forgetFacts(G, ["e_0001", "e_0002", "e_0001", "e_gone"])).toEqual({
+      deleted: 2,
+      absent: 1,
+    });
+    expect(zep.graph.edge.delete.mock.calls.map((c) => c[0])).toEqual([
+      "e_0001",
+      "e_0002",
+      "e_gone",
+    ]);
+  });
+
+  it("any other error propagates (a retry is idempotent: 404 = absent)", async () => {
+    const { client, zep, seed } = zepClient();
+    seed(G, [factFixture(1), factFixture(2)]);
+    zep.graph.edge.delete.mockRejectedValueOnce(
+      Object.assign(new Error("503"), { statusCode: 503 }),
+    );
+    await expect(client.forgetFacts(G, ["e_0001", "e_0002"])).rejects.toThrow("503");
+    expect(await client.forgetFacts(G, ["e_0001", "e_0002"])).toEqual({ deleted: 2, absent: 0 });
+  });
+});
