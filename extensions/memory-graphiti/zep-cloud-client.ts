@@ -163,9 +163,8 @@ export class ZepCloudClient implements MemoryClient {
    * a retry after a partial failure is idempotent; any other error propagates.
    * Ownership is NOT checked here: Zep edge uuids are global and graph.edge.delete
    * does not take a user, so an id from another user's graph WOULD be deleted. The
-   * MemoryFactSurface contract puts the check on the caller, which must pass only
-   * ids of facts owned by `groupId`; no caller exists in PR-1, and PR-2's remove
-   * path enforces the check before calling this.
+   * MemoryFactSurface contract puts the check on the caller: forgetOwnedFacts
+   * (owned-forget.ts) is the only caller and deletes only ids `groupId` lists.
    */
   async forgetFacts(
     _groupId: string,
