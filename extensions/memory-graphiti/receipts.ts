@@ -96,6 +96,14 @@ export interface ReceiptLedger {
   pending(groupId: string, hashes: string[]): Promise<Map<string, string>>;
   addPending(groupId: string, hashes: string[], ref: string, store: string): Promise<void>;
   clearPending(groupId: string, hashes: string[]): Promise<void>;
+  /**
+   * Entries the user asked to FORGET (hashes only). Capture never sends them again,
+   * even though the gateway's live session may still replay them (agent_end sees the
+   * whole session). Kept after the forget, deliberately: deleting them would let the
+   * next turn re-upload exactly what was cleared.
+   */
+  tombstoned(groupId: string, hashes: string[]): Promise<Set<string>>;
+  addTombstones(groupId: string, hashes: string[]): Promise<void>;
   /** Delete every receipt AND pending row for a group (the user's forget). Returns receipts removed. */
   deleteGroup(groupId: string): Promise<number>;
 }
@@ -124,6 +132,13 @@ export async function ensureReceiptSchema(sql: Sql): Promise<void> {
       entry_hash TEXT NOT NULL,
       ref TEXT NOT NULL,
       store TEXT NOT NULL,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+      PRIMARY KEY (group_id, entry_hash)
+    )`;
+  await sql`
+    CREATE TABLE IF NOT EXISTS lp_memory_tombstones (
+      group_id TEXT NOT NULL,
+      entry_hash TEXT NOT NULL,
       created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
       PRIMARY KEY (group_id, entry_hash)
     )`;
@@ -173,6 +188,29 @@ export function createPgReceiptLedger(sql: Sql): ReceiptLedger {
           DELETE FROM lp_memory_pending WHERE group_id = ${groupId} AND entry_hash = ANY(${hashes})`;
       }
     },
+    async tombstoned(groupId, hashes) {
+      if (hashes.length === 0) {
+        return new Set();
+      }
+      const rows = await sql<{ entry_hash: string }>`
+        SELECT entry_hash FROM lp_memory_tombstones
+        WHERE group_id = ${groupId} AND entry_hash = ANY(${hashes})
+          AND created_at > now() - make_interval(days => ${TOMBSTONE_TTL_DAYS})`;
+      return new Set(rows.map((r) => r.entry_hash));
+    },
+    async addTombstones(groupId, hashes) {
+      if (hashes.length === 0) {
+        return;
+      }
+      // One statement for the batch; expired tombstones are pruned on the way.
+      await sql`
+        DELETE FROM lp_memory_tombstones
+        WHERE created_at <= now() - make_interval(days => ${TOMBSTONE_TTL_DAYS})`;
+      await sql`
+        INSERT INTO lp_memory_tombstones (group_id, entry_hash)
+        SELECT ${groupId}, h FROM unnest(${hashes}::text[]) AS h
+        ON CONFLICT (group_id, entry_hash) DO UPDATE SET created_at = now()`;
+    },
     async deleteGroup(groupId) {
       await sql`DELETE FROM lp_memory_pending WHERE group_id = ${groupId}`;
       const rows = await sql<{ id: string }>`
@@ -182,17 +220,47 @@ export function createPgReceiptLedger(sql: Sql): ReceiptLedger {
   };
 }
 
+/**
+ * How long a "Clear chat memory" tombstone blocks re-capture. It only has to
+ * outlive the gateway's live session that may replay the cleared turns; after
+ * that it is dropped (so identical text said much later can be remembered again).
+ */
+export const TOMBSTONE_TTL_DAYS = 30;
+
+/**
+ * Tombstone values are KEYED (HMAC with the group pepper, distinct label), so a
+ * party with database read access cannot confirm "did this user say X?" by
+ * hashing candidate phrases. Without a pepper the label still separates them
+ * from entry hashes (not a secret — the approval path always has a pepper).
+ */
+export function tombstoneKey(entryHashHex: string, pepper?: string): string {
+  return createHmac("sha256", pepper ?? "openclaw-tombstone-unkeyed")
+    .update(`openclaw-tombstone:v1:${entryHashHex}`)
+    .digest("hex");
+}
+
 /** In-memory ledger for tests and for a plugin with no database. */
 export function createMemoryReceiptLedger(): ReceiptLedger & {
   rows: Map<string, MemoryReceipt>;
   pend: Map<string, string>;
+  tombs: Set<string>;
 } {
   const rows = new Map<string, MemoryReceipt>();
   const pend = new Map<string, string>();
+  const tombs = new Set<string>();
   const key = (g: string, h: string) => `${g}\u0000${h}`;
   return {
     rows,
     pend,
+    tombs,
+    async tombstoned(groupId, hashes) {
+      return new Set(hashes.filter((h) => tombs.has(key(groupId, h))));
+    },
+    async addTombstones(groupId, hashes) {
+      for (const h of hashes) {
+        tombs.add(key(groupId, h));
+      }
+    },
     async pending(groupId, hashes) {
       const out = new Map<string, string>();
       for (const h of hashes) {

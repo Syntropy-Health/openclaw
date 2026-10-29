@@ -25,7 +25,9 @@
 import fs from "node:fs";
 import path from "node:path";
 import type { MemoryClient } from "./client.js";
-import type { ReceiptLedger } from "./receipts.js";
+import { extractMessages } from "./messages.js";
+import { leadingIdentityExternalId, minimiseForMemory } from "./minimise.js";
+import { entryHash, type ReceiptLedger } from "./receipts.js";
 
 type Sql = <T = Record<string, unknown>>(
   strings: TemplateStringsArray,
@@ -50,9 +52,6 @@ export type ForgetResult = {
 
 /** Live + archived transcript files (never locks, never sessions.json). */
 const TRANSCRIPT = /\.jsonl(\.(deleted|reset|bak)\.[^/\\]+)?$/;
-/** external_id inside a [USER_IDENTITY] block (JSON-escaped "\\n" on disk, or a real newline). */
-const EXTERNAL_ID =
-  /\[USER_IDENTITY\](?:\\n|\n)(?:(?!\[\/USER_IDENTITY\])[\s\S]){0,400}?external_id:\s*([^\s"\\]+)/g;
 /** HTTP session keys: agent:<agent>:<prefix>-user:<lowercased verified sub>[:hint]. */
 const HTTP_USER_PREFIX = /^(openresponses|openai)-user$/;
 /** Channels whose "peer" is a client-supplied device id: never a deletion selector. */
@@ -111,18 +110,48 @@ function basesForPeers(
   return bases;
 }
 
-/** The external_ids an identity block in this file names. */
-function externalIdsIn(file: string): Set<string> | null {
-  const ids = new Set<string>();
+/** User/assistant messages of a transcript file (null if it vanished). */
+function messagesIn(file: string): unknown[] | null {
   let text: string;
   try {
     text = fs.readFileSync(file, "utf8");
   } catch {
     return null; // renamed/removed concurrently (archive, retention sweep)
   }
-  for (const m of text.matchAll(EXTERNAL_ID)) {
-    if (m[1] && m[1] !== "none") {
-      ids.add(m[1]);
+  const out: unknown[] = [];
+  for (const line of text.split("\n")) {
+    if (!line.trim()) {
+      continue;
+    }
+    try {
+      const e = JSON.parse(line) as { message?: unknown };
+      if (e && typeof e === "object" && e.message) {
+        out.push(e.message);
+      }
+    } catch {
+      // not a JSON entry
+    }
+  }
+  return out;
+}
+
+/**
+ * The external_ids named by SYSTEM-injected identity blocks in this file (the
+ * leading block region of user turns only — never text a person typed).
+ */
+function externalIdsIn(file: string): Set<string> | null {
+  const msgs = messagesIn(file);
+  if (msgs === null) {
+    return null;
+  }
+  const ids = new Set<string>();
+  for (const m of extractMessages(msgs)) {
+    if (m.roleType !== "user") {
+      continue;
+    }
+    const id = leadingIdentityExternalId(m.content);
+    if (id) {
+      ids.add(id);
     }
   }
   return ids;
@@ -166,59 +195,119 @@ export function userTranscriptFiles(
   return { files, sharedSkipped, vanished };
 }
 
-export async function forgetUser(opts: {
+/** Hash-only tombstones for every user/assistant entry in these transcript files. */
+export function tombstonesFor(files: string[]): string[] {
+  const hashes = new Set<string>();
+  for (const file of files) {
+    for (const m of extractMessages(messagesIn(file) ?? [])) {
+      const t = minimiseForMemory(m.content);
+      if (t !== null) {
+        hashes.add(entryHash({ role: m.roleType, text: t }));
+      }
+    }
+  }
+  return [...hashes];
+}
+
+/** Serialises work on a set of memory groups (shared with capture, in-process). */
+export type GroupLock = <T>(groups: string[], fn: () => Promise<T>) => Promise<T>;
+
+type ForgetDeps = {
+  /** Wait for in-flight captures of these groups before erasing (else a late upload survives). */
+  lock?: GroupLock;
   sql: Sql;
   client: Pick<MemoryClient, "forget">;
-  ledger: Pick<ReceiptLedger, "deleteGroup">;
+  ledger: Pick<ReceiptLedger, "deleteGroup" | "addTombstones">;
   /** The plugin's opaque group-id function (keyed by the pepper). */
   opaque: (raw: string) => string;
-  userId: string;
   stateDir: string;
-}): Promise<ForgetResult> {
-  const { sql, client, ledger, opaque, userId, stateDir } = opts;
-  const res: ForgetResult = {
-    userFound: false,
-    storeGroupsDeleted: 0,
-    storeGroupsAbsent: 0,
-    receipts: 0,
-    transcripts: 0,
-    sharedSkipped: 0,
-    lockedSkipped: 0,
-    vanished: 0,
-  };
+};
 
-  const users = await sql<{ id: string; external_id: string | null }>`
-    SELECT id, external_id FROM lp_users WHERE id = ${userId} LIMIT 1`;
-  const user = users[0];
-  if (!user) {
-    return res; // unknown id: touch nothing
-  }
-  res.userFound = true;
-  const channels = await sql<{ channel: string; channel_peer_id: string }>`
-    SELECT channel, channel_peer_id FROM lp_user_channels WHERE user_id = ${userId}`;
+const emptyResult = (): ForgetResult => ({
+  userFound: false,
+  storeGroupsDeleted: 0,
+  storeGroupsAbsent: 0,
+  receipts: 0,
+  transcripts: 0,
+  sharedSkipped: 0,
+  lockedSkipped: 0,
+  vanished: 0,
+});
 
+/** The erase itself, for an already-resolved identity. */
+async function forgetIdentity(
+  deps: ForgetDeps,
+  identity: {
+    internalIds: string[];
+    externalId: string | null;
+    channels: Array<{ channel: string; channel_peer_id: string }>;
+  },
+  res: ForgetResult,
+): Promise<ForgetResult> {
+  const { opaque } = deps;
   // Every scope this user's memory can be keyed under: the verified external id
-  // (the approval path), the internal id and channel:peer (identity fallbacks).
-  const scopes = new Set(
-    [user.external_id, user.id, ...channels.map((c) => `${c.channel}:${c.channel_peer_id}`)].filter(
-      (s): s is string => Boolean(s),
+  // (the approval path), the internal id(s) and channel:peer (identity fallbacks).
+  const groups = [
+    ...new Set(
+      [
+        identity.externalId,
+        ...identity.internalIds,
+        ...identity.channels
+          .filter((c) => !CLIENT_SUPPLIED_PEER_CHANNELS.has(c.channel.toLowerCase()))
+          .map((c) => `${c.channel}:${c.channel_peer_id}`),
+      ]
+        .filter((s): s is string => Boolean(s))
+        .map(opaque),
     ),
-  );
-  for (const scope of scopes) {
-    const group = opaque(scope);
-    if (await client.forget(group)) {
+  ];
+
+  const lock: GroupLock = deps.lock ?? ((_g, fn) => fn());
+  return lock(groups, () => eraseLocked(deps, identity, groups, res));
+}
+
+async function eraseLocked(
+  deps: ForgetDeps,
+  identity: {
+    internalIds: string[];
+    externalId: string | null;
+    channels: Array<{ channel: string; channel_peer_id: string }>;
+  },
+  groups: string[],
+  res: ForgetResult,
+): Promise<ForgetResult> {
+  const { client, ledger, stateDir } = deps;
+  // 1. Find the user's transcripts and TOMBSTONE their entries FIRST, so a capture
+  //    that runs from here on (the live session still replays them) never re-sends.
+  const dirs = sessionsDirs(stateDir);
+  if (dirs.length === 0) {
+    throw Object.assign(new Error("no sessions directory under the state dir"), {
+      code: "misconfigured",
+    });
+  }
+  const perDir = dirs.map((dir) => ({
+    dir,
+    ...userTranscriptFiles(dir, {
+      externalId: identity.externalId,
+      peers: identity.channels.map((c) => ({ channel: c.channel, peer: c.channel_peer_id })),
+    }),
+  }));
+  const tombs = tombstonesFor(perDir.flatMap((d) => d.files));
+  for (const g of groups) {
+    await ledger.addTombstones(g, tombs);
+  }
+
+  // 2. The store and the ledger.
+  for (const g of groups) {
+    if (await client.forget(g)) {
       res.storeGroupsDeleted++;
     } else {
       res.storeGroupsAbsent++;
     }
-    res.receipts += await ledger.deleteGroup(group);
+    res.receipts += await ledger.deleteGroup(g);
   }
 
-  for (const dir of sessionsDirs(stateDir)) {
-    const { files, sharedSkipped, vanished } = userTranscriptFiles(dir, {
-      externalId: user.external_id,
-      peers: channels.map((c) => ({ channel: c.channel, peer: c.channel_peer_id })),
-    });
+  // 3. The transcripts.
+  for (const { files, sharedSkipped, vanished } of perDir) {
     res.sharedSkipped += sharedSkipped;
     res.vanished += vanished;
     for (const file of files) {
@@ -236,4 +325,70 @@ export async function forgetUser(opts: {
     }
   }
   return res;
+}
+
+/** Operator path: erase by internal user id (lp_users.id). Unknown id: touches nothing. */
+export async function forgetUser(opts: ForgetDeps & { userId: string }): Promise<ForgetResult> {
+  const res = emptyResult();
+  const users = await opts.sql<{ id: string; external_id: string | null }>`
+    SELECT id, external_id FROM lp_users WHERE id = ${opts.userId} LIMIT 1`;
+  const user = users[0];
+  if (!user) {
+    return res;
+  }
+  res.userFound = true;
+  const channels = await opts.sql<{ channel: string; channel_peer_id: string }>`
+    SELECT channel, channel_peer_id FROM lp_user_channels WHERE user_id = ${opts.userId}`;
+  return forgetIdentity(
+    opts,
+    { internalIds: [user.id], externalId: user.external_id, channels },
+    res,
+  );
+}
+
+/**
+ * Self-service path ("Clear chat memory"): erase by the VERIFIED Clerk sub. Works
+ * whether or not an lp_users row exists — the external-id group and the user's
+ * HTTP transcripts are found from the sub alone.
+ */
+export async function forgetByExternalId(
+  opts: ForgetDeps & { externalId: string },
+): Promise<ForgetResult> {
+  const res = emptyResult();
+  const users = await opts.sql<{ id: string }>`
+    SELECT id FROM lp_users WHERE external_id = ${opts.externalId}`;
+  const ids = users.map((u) => u.id);
+  res.userFound = ids.length > 0;
+  const channels =
+    ids.length > 0
+      ? await opts.sql<{ channel: string; channel_peer_id: string }>`
+          SELECT channel, channel_peer_id FROM lp_user_channels WHERE user_id = ANY(${ids})`
+      : [];
+  return forgetIdentity(opts, { internalIds: ids, externalId: opts.externalId, channels }, res);
+}
+
+/** The definite outcome the API reports: SUCCEEDED only when nothing was left behind. */
+export function forgetOutcome(r: ForgetResult): {
+  status: "SUCCEEDED" | "FAILED";
+  retryable: boolean;
+  reasons: string[];
+} {
+  const reasons: string[] = [];
+  if (r.lockedSkipped > 0) {
+    reasons.push("transcript_locked");
+  }
+  if (r.vanished > 0) {
+    reasons.push("transcript_moved");
+  }
+  if (r.sharedSkipped > 0) {
+    reasons.push("transcript_shared");
+  }
+  return reasons.length === 0
+    ? { status: "SUCCEEDED", retryable: false, reasons }
+    : {
+        status: "FAILED",
+        // A shared file needs a human; locked/moved files clear on a retry.
+        retryable: !reasons.includes("transcript_shared"),
+        reasons,
+      };
 }
