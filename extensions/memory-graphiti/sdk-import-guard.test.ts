@@ -18,7 +18,12 @@ const IMPORT_RE = new RegExp(
   String.raw`(?:\bfrom\s*|\bimport\s*\(?\s*|\brequire\s*\(\s*)["'\`]` + SDK.replace("/", "\\/"),
 );
 
-/** Files under `root` (relative paths, node_modules skipped) that import the SDK. */
+/** A relative path in POSIX form, whatever the platform separator (Windows reports `\\`). */
+export function toPosixPath(rel: string, sep: string = path.sep): string {
+  return rel.split(sep).join("/");
+}
+
+/** Files under `root` (POSIX relative paths, node_modules skipped) that import the SDK. */
 export function filesImportingSdk(root: string): string[] {
   const hits: string[] = [];
   const walk = (dir: string) => {
@@ -30,7 +35,7 @@ export function filesImportingSdk(root: string): string[] {
       if (entry.isDirectory()) {
         walk(full);
       } else if (SOURCE.test(entry.name) && IMPORT_RE.test(fs.readFileSync(full, "utf8"))) {
-        hits.push(path.relative(root, full));
+        hits.push(toPosixPath(path.relative(root, full)));
       }
     }
   };
@@ -45,6 +50,11 @@ describe("Zep SDK import guard", () => {
     const hits = filesImportingSdk(EXTENSION_ROOT);
     expect(hits.filter((f) => !ALLOWED.has(f))).toEqual([]);
     expect(hits).toContain("zep-cloud-client.ts"); // control: the matcher sees the real one
+  });
+
+  it("reports POSIX relative paths on every platform", () => {
+    expect(toPosixPath("highlights\\static.ts", "\\")).toBe("highlights/static.ts");
+    expect(toPosixPath("highlights/static.ts", "/")).toBe("highlights/static.ts");
   });
 
   it("RED arm: a planted import in any other file is detected, in every import form", () => {
