@@ -70,6 +70,7 @@ describe("openPluginPool — options reach the driver", () => {
       max: 5,
       idle_timeout: PG_POOL_IDLE_TIMEOUT_S,
       connect_timeout: PG_POOL_CONNECT_TIMEOUT_S,
+      onnotice: expect.any(Function),
     });
   });
 
