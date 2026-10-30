@@ -80,13 +80,21 @@ describe("SYN-272 R1 — explicit-enable by construction (supersedes #223's ruli
     // Post-supersession: enabling is sanctioned policy (SYN-272), so the
     // active path is INFO-level and cites the ruling; the WARN-shaped
     // "ACTIVE against the ruling" line is gone WITH its ruling.
-    const { api, logs, registered } = fakeApi({ smsEnabled: true });
-    await twilioSmsPlugin.register(api);
+    // A unit test: never reach a real database even when CI provides DATABASE_URL (as the
+    // tests below already do), or register() opens a pool and creates SMS tables.
+    const saved = { ...process.env };
+    delete process.env.DATABASE_URL;
+    try {
+      const { api, logs, registered } = fakeApi({ smsEnabled: true });
+      await twilioSmsPlugin.register(api);
 
-    expect(registered.channels).toBe(1);
-    expect(registered.routes).toBe(1);
-    expect(logs.info.join("\n")).toContain("ACTIVE under SYN-272");
-    expect(logs.warn.join("\n")).not.toContain("ACTIVE against");
+      expect(registered.channels).toBe(1);
+      expect(registered.routes).toBe(1);
+      expect(logs.info.join("\n")).toContain("ACTIVE under SYN-272");
+      expect(logs.warn.join("\n")).not.toContain("ACTIVE against");
+    } finally {
+      process.env = saved;
+    }
   });
 
   it("the RETIRED #223 flag name no longer enables anything (a rename, not an alias)", async () => {

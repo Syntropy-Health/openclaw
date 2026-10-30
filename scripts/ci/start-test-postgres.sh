@@ -21,8 +21,13 @@ if [ -n "${GITHUB_ACTIONS:-}" ]; then
   echo "::add-mask::${password}" >&2
 fi
 
-openssl req -x509 -newkey rsa:2048 -nodes -days 1 -subj "/CN=localhost" \
-  -keyout "$work/server.key" -out "$work/server.crt" >/dev/null 2>&1
+# stdout must carry only the URL. openssl's progress noise is kept out of the log, but shown if it fails.
+if ! openssl req -x509 -newkey rsa:2048 -nodes -days 1 -subj "/CN=localhost" \
+  -keyout "$work/server.key" -out "$work/server.crt" >/dev/null 2>"$work/openssl.err"; then
+  echo "could not generate the test TLS certificate:" >&2
+  cat "$work/openssl.err" >&2
+  exit 1
+fi
 
 # The password goes in through an env FILE, never on the docker command line.
 umask 077
