@@ -7,6 +7,7 @@
  * and user-independent (same reasoning as lp_sms_optouts: it must work before
  * pairing). Lives in OpenClaw's own Postgres, never the Journal PHI database (ADR 0001).
  */
+import { retryDdlRace } from "openclaw/plugin-sdk";
 import { type SqlTag } from "./optout-store.js";
 
 export interface SmsContactStore {
@@ -21,12 +22,14 @@ export interface SmsContactStore {
 
 /** Idempotent DDL. Safe to call on every startup. */
 export async function ensureContactSchema(sql: SqlTag): Promise<void> {
-  await sql`
+  await retryDdlRace(
+    () => sql`
     CREATE TABLE IF NOT EXISTS lp_sms_contacts (
       channel_peer_id VARCHAR(512) PRIMARY KEY,
       first_seen_at   TIMESTAMPTZ NOT NULL DEFAULT now()
     )
-  `;
+  `,
+  );
 }
 
 /** Atomic first-contact check: the INSERT either creates the row (first) or does

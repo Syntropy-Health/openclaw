@@ -8,6 +8,7 @@
  *
  * Run: DATABASE_URL=<url> pnpm vitest run extensions/auth-memory-gate/src/integration.test.ts
  */
+import { retryDdlRace } from "openclaw/plugin-sdk";
 import { describe, test, expect, beforeAll, afterAll } from "vitest";
 import { resolveScope, formatScopeBlock, formatHardGateSystemPrompt } from "./scope.js";
 
@@ -37,7 +38,8 @@ describeIf("identity-scoped memory stack — integration", () => {
     });
 
     // Ensure schema exists
-    await sql`
+    await retryDdlRace(
+      () => sql`
 			CREATE TABLE IF NOT EXISTS lp_users (
 				id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
 				external_id VARCHAR(256) UNIQUE,
@@ -46,8 +48,10 @@ describeIf("identity-scoped memory stack — integration", () => {
 				created_at TIMESTAMPTZ DEFAULT now(),
 				updated_at TIMESTAMPTZ DEFAULT now()
 			)
-		`;
-    await sql`
+		`,
+    );
+    await retryDdlRace(
+      () => sql`
 			CREATE TABLE IF NOT EXISTS lp_user_channels (
 				id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
 				user_id UUID REFERENCES lp_users(id) ON DELETE CASCADE,
@@ -56,7 +60,8 @@ describeIf("identity-scoped memory stack — integration", () => {
 				linked_at TIMESTAMPTZ DEFAULT now(),
 				UNIQUE(channel, channel_peer_id)
 			)
-		`;
+		`,
+    );
   });
 
   afterAll(async () => {

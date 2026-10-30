@@ -13,6 +13,7 @@
  * only entries without a receipt are sent again.
  */
 import { createHash, createHmac } from "node:crypto";
+import { retryDdlRace } from "openclaw/plugin-sdk";
 
 export type IngestItem = { role: "user" | "assistant"; text: string };
 
@@ -123,31 +124,8 @@ type Sql = {
   json?: (v: unknown) => unknown;
 };
 
-/** Postgres codes for "already exists" when two sessions create the same object at once. */
-const DDL_RACE_CODES = new Set(["23505", "42P07", "42710"]);
-
-/**
- * Run one CREATE ... IF NOT EXISTS, retrying when a concurrent session created the
- * object first: IF NOT EXISTS does not cover that race (it can fail on the catalog's
- * unique index). Several gateways booting together is the multi-instance case.
- */
-async function ddl(run: () => Promise<unknown>): Promise<void> {
-  for (let attempt = 1; ; attempt++) {
-    try {
-      await run();
-      return;
-    } catch (err) {
-      const code = (err as { code?: string }).code;
-      if (attempt >= 5 || !code || !DDL_RACE_CODES.has(code)) {
-        throw err;
-      }
-      await new Promise((r) => setTimeout(r, 20 * attempt));
-    }
-  }
-}
-
 export async function ensureReceiptSchema(sql: Sql): Promise<void> {
-  await ddl(
+  await retryDdlRace(
     () => sql`
     CREATE TABLE IF NOT EXISTS lp_memory_receipts (
       id BIGSERIAL PRIMARY KEY,
@@ -174,7 +152,7 @@ export async function ensureReceiptSchema(sql: Sql): Promise<void> {
   } catch {
     // left as strings; see above
   }
-  await ddl(
+  await retryDdlRace(
     () => sql`
     CREATE TABLE IF NOT EXISTS lp_memory_pending (
       group_id TEXT NOT NULL,
@@ -185,7 +163,7 @@ export async function ensureReceiptSchema(sql: Sql): Promise<void> {
       PRIMARY KEY (group_id, entry_hash)
     )`,
   );
-  await ddl(
+  await retryDdlRace(
     () => sql`
     CREATE TABLE IF NOT EXISTS lp_memory_tombstones (
       group_id TEXT NOT NULL,
@@ -197,7 +175,7 @@ export async function ensureReceiptSchema(sql: Sql): Promise<void> {
   // The facts injected into one turn, exactly as injected (A&D §5): read by the
   // recall panel route on any gateway instance. Keyed by the opaque group, never
   // a sub or email; 10-minute TTL and at most 5 rows per group (recall-store.ts).
-  await ddl(
+  await retryDdlRace(
     () => sql`
     CREATE TABLE IF NOT EXISTS lp_memory_recall (
       group_id TEXT NOT NULL,
@@ -208,11 +186,13 @@ export async function ensureReceiptSchema(sql: Sql): Promise<void> {
       PRIMARY KEY (group_id, turn_id)
     )`,
   );
-  await ddl(() => sql`CREATE INDEX IF NOT EXISTS lp_memory_recall_at ON lp_memory_recall (at)`);
+  await retryDdlRace(
+    () => sql`CREATE INDEX IF NOT EXISTS lp_memory_recall_at ON lp_memory_recall (at)`,
+  );
   // The generated highlights per group, as served (A&D §5). Keyed by the opaque
   // group; payload holds fact text, under the same controls as the receipts.
-  await ddl(() => sql`CREATE SEQUENCE IF NOT EXISTS lp_memory_highlights_epoch`);
-  await ddl(
+  await retryDdlRace(() => sql`CREATE SEQUENCE IF NOT EXISTS lp_memory_highlights_epoch`);
+  await retryDdlRace(
     () => sql`
     CREATE TABLE IF NOT EXISTS lp_memory_highlights (
       group_id TEXT PRIMARY KEY,
@@ -229,7 +209,7 @@ export async function ensureReceiptSchema(sql: Sql): Promise<void> {
   );
   // A forget blocks recall writes for the group briefly, so a turn whose recall
   // was already in flight cannot re-create a record after the erase.
-  await ddl(
+  await retryDdlRace(
     () => sql`
     CREATE TABLE IF NOT EXISTS lp_memory_recall_block (
       group_id TEXT PRIMARY KEY,
