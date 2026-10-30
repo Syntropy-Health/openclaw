@@ -90,7 +90,13 @@ export type { OpenClawConfig as ClawdbotConfig } from "../config/config.js";
 export type { FileLockHandle, FileLockOptions } from "./file-lock.js";
 export { acquireFileLock, withFileLock } from "./file-lock.js";
 export type { PgPoolFactory, PgPoolMaxResolution, PgPoolOptions } from "./pg-pool.js";
-export { openPluginPool, resolvePgPoolMax, sharedPgPoolHolders } from "./pg-pool.js";
+export {
+  DDL_RACE_CODES,
+  openPluginPool,
+  resolvePgPoolMax,
+  retryDdlRace,
+  sharedPgPoolHolders,
+} from "./pg-pool.js";
 export type { RetryingInitOptions } from "./retrying-init.js";
 export { createRetryingInit } from "./retrying-init.js";
 export { normalizeWebhookPath, resolveWebhookPath } from "./webhook-path.js";

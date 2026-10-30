@@ -14,6 +14,7 @@
  * fail-closed, so an absent/erroring DB suppresses sends rather than leaking them.
  */
 
+import { retryDdlRace } from "openclaw/plugin-sdk";
 import { type OptOutStore } from "./compliance.js";
 
 /**
@@ -27,12 +28,14 @@ export type SqlTag = (strings: TemplateStringsArray, ...values: unknown[]) => Pr
 
 /** Idempotent DDL for the opt-out table. Safe to call on every startup. */
 export async function ensureOptOutSchema(sql: SqlTag): Promise<void> {
-  await sql`
+  await retryDdlRace(
+    () => sql`
     CREATE TABLE IF NOT EXISTS lp_sms_optouts (
       channel_peer_id VARCHAR(512) PRIMARY KEY,
       opted_out_at    TIMESTAMPTZ NOT NULL DEFAULT now()
     )
-  `;
+  `,
+  );
 }
 
 /**

@@ -129,3 +129,41 @@ export function openPluginPool<T extends Endable>(
 export function sharedPgPoolHolders(): number[] {
   return [...shared.values()].map((e) => e.refs);
 }
+
+/**
+ * Postgres error codes for "already exists" when two sessions create the same
+ * object at the same moment: a unique violation on the catalog (23505), a
+ * duplicate table (42P07) or a duplicate object such as an index (42710).
+ */
+export const DDL_RACE_CODES: readonly string[] = Object.freeze(["23505", "42P07", "42710"]);
+
+const DDL_RACE_ATTEMPTS = 5;
+
+/**
+ * Run one schema statement (CREATE ... IF NOT EXISTS), retrying ONLY when a
+ * concurrent session created the same object first. `IF NOT EXISTS` does not cover
+ * that case, so concurrent first boots (several gateways, or parallel test suites)
+ * on a fresh database can fail without it. At most 5 attempts with a short, growing
+ * backoff; any other error is thrown at once. The happy path runs once.
+ */
+export async function retryDdlRace<T>(
+  run: () => Promise<T>,
+  opts: { sleep?: (ms: number) => Promise<void> } = {},
+): Promise<T> {
+  const sleep = opts.sleep ?? ((ms: number) => new Promise<void>((r) => setTimeout(r, ms)));
+  for (let attempt = 1; ; attempt++) {
+    try {
+      return await run();
+    } catch (err) {
+      const code = (err as { code?: unknown }).code;
+      if (
+        attempt >= DDL_RACE_ATTEMPTS ||
+        typeof code !== "string" ||
+        !DDL_RACE_CODES.includes(code)
+      ) {
+        throw err;
+      }
+      await sleep(20 * attempt);
+    }
+  }
+}

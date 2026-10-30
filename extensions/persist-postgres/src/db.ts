@@ -1,4 +1,4 @@
-import { openPluginPool } from "openclaw/plugin-sdk";
+import { openPluginPool, retryDdlRace } from "openclaw/plugin-sdk";
 import postgres from "postgres";
 
 /** Minimal logger the pool helper needs (the plugin api logger satisfies it). */
@@ -34,7 +34,8 @@ export function createPgClient(databaseUrl: string, logger: PoolLogger) {
  * Requires PostgreSQL 13+ (gen_random_uuid() is built-in since PG 13).
  */
 export async function ensureSchema(sql: postgres.Sql) {
-  await sql`
+  await retryDdlRace(
+    () => sql`
     CREATE TABLE IF NOT EXISTS lp_conversations (
       id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
       channel VARCHAR(50) NOT NULL,
@@ -43,15 +44,19 @@ export async function ensureSchema(sql: postgres.Sql) {
       last_message_at TIMESTAMPTZ DEFAULT now(),
       message_count INTEGER DEFAULT 0
     )
-  `;
+  `,
+  );
 
   // session_key UNIQUE constraint already creates an implicit index — no explicit index needed
 
-  await sql`
+  await retryDdlRace(
+    () => sql`
     CREATE INDEX IF NOT EXISTS idx_lp_conv_last_msg ON lp_conversations (last_message_at DESC)
-  `;
+  `,
+  );
 
-  await sql`
+  await retryDdlRace(
+    () => sql`
     CREATE TABLE IF NOT EXISTS lp_messages (
       id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
       conversation_id UUID REFERENCES lp_conversations(id) ON DELETE CASCADE,
@@ -60,11 +65,14 @@ export async function ensureSchema(sql: postgres.Sql) {
       created_at TIMESTAMPTZ DEFAULT now(),
       metadata JSONB DEFAULT '{}'
     )
-  `;
+  `,
+  );
 
-  await sql`
+  await retryDdlRace(
+    () => sql`
     CREATE INDEX IF NOT EXISTS idx_lp_msg_conv ON lp_messages (conversation_id, created_at)
-  `;
+  `,
+  );
 }
 
 /**

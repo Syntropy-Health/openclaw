@@ -25,6 +25,7 @@
  * (Cloud SQL) can never silently receive plaintext tokens.
  */
 
+import { retryDdlRace } from "openclaw/plugin-sdk";
 import type postgres from "postgres";
 import { legacyReadsAllowed, TokenCipherError, type TokenCipher } from "./token-cipher.js";
 import type { SyntropyVault } from "./vault.js";
@@ -37,7 +38,8 @@ import { secretNameForUser } from "./vault.js";
 export async function ensureSyntropySchema(sql: postgres.Sql): Promise<void> {
   // `auth_token` is left nullable for legacy rows during the migration window.
   // New writes (post-PR #12) write `vault_secret_name` and leave auth_token NULL.
-  await sql`
+  await retryDdlRace(
+    () => sql`
     CREATE TABLE IF NOT EXISTS syntropy_tokens (
       user_id            UUID NOT NULL REFERENCES lp_users(id) ON DELETE CASCADE,
       auth_token         TEXT,
@@ -47,7 +49,8 @@ export async function ensureSyntropySchema(sql: postgres.Sql): Promise<void> {
       updated_at         TIMESTAMPTZ NOT NULL DEFAULT now(),
       PRIMARY KEY (user_id)
     )
-  `;
+  `,
+  );
   // Idempotent: on existing deployments, drop the NOT NULL constraint and
   // add the new column. CREATE TABLE IF NOT EXISTS above is a no-op there.
   await sql`ALTER TABLE syntropy_tokens ALTER COLUMN auth_token DROP NOT NULL`;

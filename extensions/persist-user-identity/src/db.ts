@@ -1,4 +1,4 @@
-import { openPluginPool } from "openclaw/plugin-sdk";
+import { openPluginPool, retryDdlRace } from "openclaw/plugin-sdk";
 import postgres from "postgres";
 
 /** Minimal logger the pool helper needs (the plugin api logger satisfies it). */
@@ -45,7 +45,8 @@ export function createPgClient(databaseUrl: string, logger: PoolLogger) {
 // ---------------------------------------------------------------------------
 
 export async function ensureUserSchema(sql: postgres.Sql) {
-  await sql`
+  await retryDdlRace(
+    () => sql`
     CREATE TABLE IF NOT EXISTS lp_users (
       id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
       external_id VARCHAR(256) UNIQUE,
@@ -54,9 +55,11 @@ export async function ensureUserSchema(sql: postgres.Sql) {
       created_at TIMESTAMPTZ DEFAULT now(),
       updated_at TIMESTAMPTZ DEFAULT now()
     )
-  `;
+  `,
+  );
 
-  await sql`
+  await retryDdlRace(
+    () => sql`
     CREATE TABLE IF NOT EXISTS lp_user_channels (
       id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
       user_id UUID NOT NULL REFERENCES lp_users(id) ON DELETE CASCADE,
@@ -65,12 +68,15 @@ export async function ensureUserSchema(sql: postgres.Sql) {
       linked_at TIMESTAMPTZ DEFAULT now(),
       UNIQUE(channel, channel_peer_id)
     )
-  `;
+  `,
+  );
 
-  await sql`
+  await retryDdlRace(
+    () => sql`
     CREATE INDEX IF NOT EXISTS idx_lp_uc_lookup
       ON lp_user_channels (channel, channel_peer_id)
-  `;
+  `,
+  );
 }
 
 // ---------------------------------------------------------------------------
