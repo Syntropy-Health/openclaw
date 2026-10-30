@@ -1,6 +1,6 @@
 {
   "name": "@openclaw/shrine-identity",
-  "version": "2026.10.20",
+  "version": "2026.2.16",
   "private": true,
   "description": "Sh'rine identity: logs the shipped identity version and adds a per-platform system-prompt layer",
   "type": "module",
