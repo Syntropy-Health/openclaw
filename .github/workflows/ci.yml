@@ -234,8 +234,21 @@ jobs:
           echo "OPENCLAW_TEST_WATCHDOG_MS=1200000" >> "$GITHUB_ENV"
           echo "OPENCLAW_TEST_HANG_DUMP=1" >> "$GITHUB_ENV"
 
+      # Postgres-backed integration suites (extensions/**/*.test.ts reading DATABASE_URL) skip without it.
+      # Give the Linux node test leg a disposable TLS Postgres so they run in CI. Credentials are per-run and masked.
+      - name: Start disposable Postgres 16 (TLS) for integration tests
+        if: matrix.task == 'test' && matrix.runtime == 'node'
+        run: |
+          url="$(scripts/ci/start-test-postgres.sh)"
+          echo "::add-mask::${url}"
+          echo "DATABASE_URL=${url}" >> "$GITHUB_ENV"
+
       - name: Run ${{ matrix.task }} (${{ matrix.runtime }})
         run: ${{ matrix.command }}
+
+      - name: Postgres-backed integration suites actually ran
+        if: matrix.task == 'test' && matrix.runtime == 'node'
+        run: node scripts/ci/assert-pg-integration-ran.mjs "$OPENCLAW_VITEST_REPORT_DIR"
 
       - name: Summarize slowest tests
         if: matrix.task == 'test' && matrix.runtime == 'node'
