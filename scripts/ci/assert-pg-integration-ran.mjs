@@ -6,6 +6,11 @@
 // or `integration.test.ts`) that reads process.env.DATABASE_URL, so a new one is covered without editing this
 // file. Plain unit tests that merely mention the variable are not Postgres suites and are not required here.
 //
+// Convention this relies on: a Postgres-backed suite is named `*.integration.test.ts` (or `integration.test.ts`)
+// and reads the literal `process.env.DATABASE_URL`. A suite read any other way is not enforced here.
+// Strict on purpose: ANY skipped test (it.skip / it.todo / skipIf subcase) in such a suite fails the job, because
+// a skip is exactly how a missing database used to pass silently. Keep these suites free of deliberate skips.
+//
 // Usage: node scripts/ci/assert-pg-integration-ran.mjs <vitest-json-report-dir>
 import fs from "node:fs";
 import path from "node:path";
