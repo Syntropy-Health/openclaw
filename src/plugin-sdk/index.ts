@@ -92,6 +92,7 @@ export { acquireFileLock, withFileLock } from "./file-lock.js";
 export type { PgPoolFactory, PgPoolMaxResolution, PgPoolOptions } from "./pg-pool.js";
 export {
   DDL_RACE_CODES,
+  createPgNoticeHandler,
   openPluginPool,
   resolvePgPoolMax,
   retryDdlRace,

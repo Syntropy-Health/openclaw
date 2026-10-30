@@ -62,7 +62,59 @@ export function resolvePgPoolMax(
   return { max: n };
 }
 
-export type PgPoolOptions = { max: number; idle_timeout: number; connect_timeout: number };
+export type PgPoolOptions = {
+  max: number;
+  idle_timeout: number;
+  connect_timeout: number;
+  /** Called for each server NOTICE (see createPgNoticeHandler). */
+  onnotice?: (notice: unknown) => void;
+};
+
+/**
+ * "Already exists, skipping" notices from CREATE/ADD ... IF NOT EXISTS on objects
+ * that already exist: duplicate schema (42P06), table (42P07), column (42701) or
+ * object (42710).
+ * They fire on every boot and carry no information.
+ */
+const ROUTINE_NOTICE_CODES: ReadonlySet<string> = new Set(["42P06", "42P07", "42701", "42710"]);
+const ROUTINE_NOTICE_TEXT = /already exists, skipping$/;
+const NOTICE_LINE_MAX = 200;
+
+/**
+ * Server NOTICE handler for plugin pools. The driver's default prints each notice
+ * as a multi-line object, so routine schema notices at boot flood the log and push
+ * the boot's own lines out of view. Routine "already exists, skipping" NOTICEs are
+ * dropped; anything else (another code, or a higher severity) becomes one bounded,
+ * single-line warning: `postgres <SEVERITY> <code> (pool opened by <plugin>): <message>`.
+ * Never throws. The pool is shared per URL, so the notice may come from any plugin
+ * using it; the label names only the plugin that opened the pool.
+ */
+export function createPgNoticeHandler(ctx: {
+  logger: { warn: (message: string) => void };
+  plugin: string;
+}): (notice: unknown) => void {
+  return (notice) => {
+    const o =
+      notice && typeof notice === "object" ? (notice as Record<string, unknown>) : undefined;
+    const severity = typeof o?.severity === "string" ? o.severity : "NOTICE";
+    const code = typeof o?.code === "string" ? o.code : "?";
+    const message =
+      typeof o?.message === "string" ? o.message : typeof notice === "string" ? notice : "";
+    if (
+      severity === "NOTICE" &&
+      ROUTINE_NOTICE_CODES.has(code) &&
+      ROUTINE_NOTICE_TEXT.test(message)
+    ) {
+      return;
+    }
+    const flat = message.replace(/\s+/g, " ").trim().slice(0, NOTICE_LINE_MAX);
+    try {
+      ctx.logger.warn(`postgres ${severity} ${code} (pool opened by ${ctx.plugin}): ${flat}`);
+    } catch {
+      // a logger failure must never break a query
+    }
+  };
+}
 export type PgPoolFactory<T> = (url: string, options: PgPoolOptions) => T;
 type Endable = { end: (...args: never[]) => Promise<unknown> };
 
@@ -90,6 +142,7 @@ export function openPluginPool<T extends Endable>(
         max: resolved.max,
         idle_timeout: PG_POOL_IDLE_TIMEOUT_S,
         connect_timeout: PG_POOL_CONNECT_TIMEOUT_S,
+        onnotice: createPgNoticeHandler(ctx),
       }),
       refs: 0,
     };
