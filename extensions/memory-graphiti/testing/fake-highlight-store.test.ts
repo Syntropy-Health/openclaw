@@ -3,6 +3,45 @@ import { describe, expect, it } from "vitest";
 import { highlightIdByFact } from "../highlights/store.js";
 import type { Highlight } from "../highlights/types.js";
 import { FakeHighlightStore } from "./fake-highlight-store.js";
+import { describeHighlightStoreContract } from "./highlight-store.contract.js";
+
+/**
+ * The fake runs the same contract as the Postgres store. Its clock ticks 1 ms per
+ * read, so "after the generation started" is strict, as the database clock is.
+ */
+describeHighlightStoreContract(describe, "in-memory fake", async () => {
+  let t = Date.parse("2026-10-30T12:00:00Z");
+  const now = () => new Date(++t);
+  const store = new FakeHighlightStore(now);
+  const row = (g: string) => {
+    const r = store.rows.get(g);
+    if (!r) {
+      throw new Error(`no row for ${g}`);
+    }
+    return r;
+  };
+  return {
+    store,
+    prefix: "fake",
+    staleAgo: async (g, seconds) => {
+      row(g).staleSince = new Date(t - seconds * 1000);
+    },
+    previousDay: async (g) => {
+      const r = row(g);
+      const d = new Date(`${r.ondemandDay}T00:00:00Z`);
+      d.setUTCDate(d.getUTCDate() - 1);
+      r.ondemandDay = d.toISOString().slice(0, 10);
+    },
+    capToday: async (g, count) => {
+      const r = row(g);
+      r.ondemandDay = new Date(t).toISOString().slice(0, 10);
+      r.ondemandCount = count;
+    },
+    expireLease: async (g) => {
+      row(g).leaseUntil = t - 1000;
+    },
+  };
+});
 
 const hl = (id: string, f: string): Highlight => ({
   id,
