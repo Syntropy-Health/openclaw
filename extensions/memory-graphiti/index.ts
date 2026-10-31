@@ -15,6 +15,7 @@ import postgres from "postgres";
 import { resolveStateDir } from "../../src/config/paths.js";
 import { authorizeClerkJwt, resolveClerkAuth } from "../../src/gateway/auth.js";
 import { validateClerkSession } from "../../src/gateway/clerk-session-validation.js";
+import { afterReady } from "./after-ready.js";
 import { captureWithReceipts } from "./capture.js";
 import {
   GraphitiRestClient,
@@ -324,28 +325,20 @@ const memoryPlugin = {
       const pg = createPgReceiptLedger(
         identitySql as unknown as Parameters<typeof createPgReceiptLedger>[0],
       );
+      const guarded = afterReady(pg, ready);
       ledger = {
-        covered: async (g, h) => (await ready(), pg.covered(g, h)),
-        record: async (r) => (await ready(), pg.record(r)),
-        pending: async (g, h) => (await ready(), pg.pending(g, h)),
+        ...guarded,
         // Tombstones are stored KEYED; map entry hashes to keys and back.
         tombstoned: async (g, h) => {
-          await ready();
           const byKey = new Map(h.map((x) => [tombstoneKey(x, pepper), x]));
-          const hit = await pg.tombstoned(g, [...byKey.keys()]);
+          const hit = await guarded.tombstoned(g, [...byKey.keys()]);
           return new Set([...hit].map((k) => byKey.get(k)!));
         },
-        addTombstones: async (g, h) => (
-          await ready(),
-          pg.addTombstones(
+        addTombstones: async (g, h) =>
+          guarded.addTombstones(
             g,
             h.map((x) => tombstoneKey(x, pepper)),
-          )
-        ),
-        addPending: async (g, h, ref, store) => (await ready(), pg.addPending(g, h, ref, store)),
-        clearPending: async (g, h) => (await ready(), pg.clearPending(g, h)),
-        deleteGroup: async (g) => (await ready(), pg.deleteGroup(g)),
-        entryHashesForEpisodes: async (g, e) => (await ready(), pg.entryHashesForEpisodes(g, e)),
+          ),
       };
     } else {
       api.logger.warn(
@@ -362,14 +355,7 @@ const memoryPlugin = {
       const pgRecall = createPgRecallStore(
         identitySql as unknown as Parameters<typeof createPgRecallStore>[0],
       );
-      recallStore = {
-        write: async (g, t, items, state) => (await ready(), pgRecall.write(g, t, items, state)),
-        read: async (g, t) => (await ready(), pgRecall.read(g, t)),
-        latest: async (g) => (await ready(), pgRecall.latest(g)),
-        deleteGroup: async (g) => (await ready(), pgRecall.deleteGroup(g)),
-        forgetGroup: async (g) => (await ready(), pgRecall.forgetGroup(g)),
-        deleteCitingFacts: async (g, ids) => (await ready(), pgRecall.deleteCitingFacts(g, ids)),
-      };
+      recallStore = afterReady(pgRecall, ready);
     }
     const recallReranker = cfg.recall?.reranker ?? "rrf";
     const recallTimeoutMs = cfg.recall?.timeoutMs ?? RECALL_TIMEOUT_DEFAULT_MS;
@@ -413,20 +399,7 @@ const memoryPlugin = {
       const pgHighlights = createPgHighlightStore(
         identitySql as unknown as Parameters<typeof createPgHighlightStore>[0],
       );
-      const store: HighlightStore = {
-        clock: async () => (await ready(), pgHighlights.clock()),
-        get: async (g) => (await ready(), pgHighlights.get(g)),
-        put: async (g, r, t, e) => (await ready(), pgHighlights.put(g, r, t, e)),
-        markStale: async (g) => (await ready(), pgHighlights.markStale(g)),
-        deleteGroup: async (g) => (await ready(), pgHighlights.deleteGroup(g)),
-        claimOnDemand: async (g, c, o) => (await ready(), pgHighlights.claimOnDemand(g, c, o)),
-        acquireLease: async (g, sec) => (await ready(), pgHighlights.acquireLease(g, sec)),
-        releaseLease: async (g) => (await ready(), pgHighlights.releaseLease(g)),
-        staleDue: async (o) => (await ready(), pgHighlights.staleDue(o)),
-        nightlyDue: async (n) => (await ready(), pgHighlights.nightlyDue(n)),
-        dropCiting: async (g, ids) => (await ready(), pgHighlights.dropCiting(g, ids)),
-      };
-      highlightStore = store;
+      highlightStore = afterReady(pgHighlights, ready);
     }
     if (highlightStore && approval !== undefined) {
       const store = highlightStore;
