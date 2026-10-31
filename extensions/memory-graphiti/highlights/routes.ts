@@ -12,6 +12,7 @@
  */
 import type { IncomingMessage, ServerResponse } from "node:http";
 import { MemoryCapabilityError, type MemoryFactSurface } from "../client.js";
+import { createPerUserGate } from "../per-user-gate.js";
 import { authenticateClerk, sendJson, type ClerkRouteAuthDeps } from "../route-auth.js";
 import { recentFacts } from "./generate.js";
 import type { RemoveResult } from "./remove.js";
@@ -249,10 +250,7 @@ function highlightIdFrom(raw: string): string | null {
 }
 
 export function createRemoveHighlightHandler(deps: RemoveRouteDeps) {
-  const running = new Set<string>();
-  const lastDone = new Map<string, number>();
-  const cooldown = deps.cooldownMs ?? 5_000;
-  const now = deps.now ?? Date.now;
+  const gate = createPerUserGate({ cooldownMs: deps.cooldownMs, now: deps.now });
   return async (req: IncomingMessage, res: ServerResponse): Promise<void> => {
     if ((req.method ?? "").toUpperCase() !== "POST") {
       sendJson(res, 405, { error: "method not allowed" });
@@ -295,24 +293,16 @@ export function createRemoveHighlightHandler(deps: RemoveRouteDeps) {
       );
       return;
     }
-    if (running.has(sub)) {
-      sendJson(res, 200, failed("in_progress", true));
+    const refusal = gate.refusal(sub);
+    if (refusal) {
+      sendJson(res, 200, failed(refusal, true));
       return;
     }
-    const last = lastDone.get(sub);
-    if (last !== undefined && now() - last < cooldown) {
-      sendJson(res, 200, failed("rate_limited", true));
-      return;
-    }
-    running.add(sub);
     let r: RemoveResult;
     try {
-      r = await remove.run(remove.groupFor(sub), id);
+      r = await gate.run(sub, () => remove.run(remove.groupFor(sub), id));
     } catch {
       r = { status: "FAILED", retryable: true, reasons: ["store_error"], removed_facts: 0 };
-    } finally {
-      running.delete(sub);
-      lastDone.set(sub, now());
     }
     deps.logger?.info?.(
       `memory-highlights-remove: ${r.status} reasons=${r.reasons.join(",") || "-"} removed_facts=${r.removed_facts}`,
