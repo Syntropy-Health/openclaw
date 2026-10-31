@@ -492,6 +492,19 @@ describe("security review round (77865605b)", () => {
     expect(forget).toHaveBeenCalledTimes(2);
   });
 
+  it("an erase that throws still starts the cooldown (a failing store cannot be looped)", async () => {
+    let t = 1_000;
+    const forget = vi.fn(async () => {
+      throw new Error("store down");
+    });
+    const { d } = deps({ forget, now: () => t, cooldownMs: 5_000 });
+    const h = createForgetHandler(d);
+    expect((await call(h)).json).toMatchObject({ status: "FAILED", reasons: ["store_error"] });
+    t += 1_000;
+    expect((await call(h)).json).toMatchObject({ status: "FAILED", reasons: ["rate_limited"] });
+    expect(forget).toHaveBeenCalledTimes(1);
+  });
+
   it("no sessions directory = FAILED misconfigured (an empty scan must never read as 'cleared')", async () => {
     const empty = fs.mkdtempSync(path.join(os.tmpdir(), "oc-forget-nodir-"));
     try {
