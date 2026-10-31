@@ -5,12 +5,16 @@ import { checkNarration } from "./narration-guard.js";
 import {
   DEFAULT_RANK_CONFIG,
   MAX_HIGHLIGHTS,
-  type HighlightCategory,
   type RankConfig,
   type RankInput,
   rankHighlights,
 } from "./rank.js";
-import type { Highlight, HighlightSource } from "./types.js";
+import {
+  HIGHLIGHT_CATEGORIES,
+  isHighlightCategory,
+  type Highlight,
+  type HighlightSource,
+} from "./types.js";
 
 /** Most facts given to the model (newest first): a token budget. */
 export const INPUT_FACTS_MAX = 300;
@@ -26,16 +30,6 @@ const MARKUP = /[<>]|\]\(/;
 export const SUMMARISER_TIMEOUT_MS = 30_000;
 /** D2: the summariser is pinned to this provider. */
 export const SUMMARISER_PROVIDER = "anthropic";
-
-export const HIGHLIGHT_CATEGORIES: readonly HighlightCategory[] = Object.freeze([
-  "sleep",
-  "nutrition",
-  "symptoms",
-  "activity",
-  "mood",
-  "supplements",
-  "other",
-]);
 
 export type RunnerRequest = {
   provider: typeof SUMMARISER_PROVIDER;
@@ -257,7 +251,8 @@ export async function generateHighlights(
       dropped.schema++;
       continue;
     }
-    if (!HIGHLIGHT_CATEGORIES.includes(e.category as HighlightCategory)) {
+    const category = e.category;
+    if (!isHighlightCategory(category)) {
       dropped.category++;
       continue;
     }
@@ -290,7 +285,7 @@ export async function generateHighlights(
         opts.groupId,
         sources.map((s) => s.id),
       ),
-      category: e.category as HighlightCategory,
+      category,
       salience: e.salience,
       goal_linked: e.goal_linked,
       title: e.title,

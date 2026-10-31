@@ -1,14 +1,5 @@
 import type { MemoryFact } from "../client.js";
-
-/** Highlight categories (A&D §1a). */
-export type HighlightCategory =
-  | "sleep"
-  | "nutrition"
-  | "symptoms"
-  | "activity"
-  | "mood"
-  | "supplements"
-  | "other";
+import type { HighlightCategory } from "./types.js";
 
 /** Ranking constants (plugin config `highlights.rank`; PVR R3 values by default). */
 export type RankConfig = {
