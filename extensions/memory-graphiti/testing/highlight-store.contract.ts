@@ -61,9 +61,20 @@ export function describeHighlightStoreContract(
     /** This run's groups in a due-list, in the store's order. */
     const ours = (ids: string[]) => ids.filter((g) => g.startsWith(`${h.prefix}_`));
     const epochOf = async (g: string) => (await h.store.get(g))?.epoch ?? "0";
-    /** put as a run that starts now with the row's current epoch would. */
-    const putNow = async (g: string, w: HighlightWrite) =>
-      h.store.put(g, w, await h.store.clock(), await epochOf(g));
+    /**
+     * put as a run that starts now with the row's current epoch would. The start is
+     * taken strictly AFTER the row's current stale mark: Postgres stores the mark in
+     * microseconds but the clock reaches JS as milliseconds, so a mark and a start in
+     * the same millisecond would compare as "mark after start" and survive the put.
+     */
+    const putNow = async (g: string, w: HighlightWrite) => {
+      const row = await h.store.get(g);
+      let startedAt = await h.store.clock();
+      while (row?.staleSince && startedAt.getTime() <= row.staleSince.getTime()) {
+        startedAt = await h.store.clock();
+      }
+      return h.store.put(g, w, startedAt, row?.epoch ?? "0");
+    };
     /** A group with a ready row holding `payload`. */
     const ready = async (g: string, payload: Highlight[]) => {
       await h.store.claimOnDemand(g, 3, { create: true });
