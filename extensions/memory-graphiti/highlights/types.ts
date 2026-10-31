@@ -1,4 +1,22 @@
-import type { HighlightCategory } from "./rank.js";
+/**
+ * Highlight categories (A&D §1a): the one list. The type, the summariser prompt and
+ * the output check all derive from it, so adding a category is one edit.
+ */
+export const HIGHLIGHT_CATEGORIES = Object.freeze([
+  "sleep",
+  "nutrition",
+  "symptoms",
+  "activity",
+  "mood",
+  "supplements",
+  "other",
+] as const);
+export type HighlightCategory = (typeof HIGHLIGHT_CATEGORIES)[number];
+
+/** Whether a value is one of the categories (narrows untrusted model output). */
+export function isHighlightCategory(v: unknown): v is HighlightCategory {
+  return typeof v === "string" && (HIGHLIGHT_CATEGORIES as readonly string[]).includes(v);
+}
 
 /** One source fact of a highlight, as served (A&D §1a). */
 export type HighlightSource = {
