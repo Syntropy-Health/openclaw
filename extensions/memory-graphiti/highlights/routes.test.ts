@@ -387,6 +387,21 @@ describe("POST /gateway/memory/highlights/remove", () => {
     expect((await first).json().status).toBe("SUCCEEDED");
   });
 
+  it("a remove that throws still starts the cooldown (a failing store cannot be looped)", async () => {
+    const run = vi.fn(async (): Promise<RemoveResult> => {
+      throw new Error("store down");
+    });
+    const { handler, tick } = removeSetup({ remove: { groupFor, run } });
+    expect((await post(handler, { highlight_id: ID })).json()).toMatchObject({
+      reasons: ["store_error"],
+    });
+    tick(1_000);
+    expect((await post(handler, { highlight_id: ID })).json()).toMatchObject({
+      reasons: ["rate_limited"],
+    });
+    expect(run).toHaveBeenCalledTimes(1);
+  });
+
   it("5 s cooldown per user: rate_limited inside it; another user is unaffected", async () => {
     const { handler, tick } = removeSetup();
     await post(handler, { highlight_id: ID });

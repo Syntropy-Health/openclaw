@@ -16,6 +16,7 @@
  */
 import type { IncomingMessage, ServerResponse } from "node:http";
 import { forgetOutcome, type ForgetResult } from "./forget.js";
+import { createPerUserGate } from "./per-user-gate.js";
 import { authenticateClerk, sendJson, type ClerkRouteAuthDeps } from "./route-auth.js";
 
 export const FORGET_ROUTE_PATH = "/gateway/memory/forget";
@@ -38,10 +39,7 @@ const failed = (reasons: string[], retryable: boolean) => ({
 export function createForgetHandler(deps: ForgetRouteDeps) {
   // Per-user single-flight + cooldown: an erase scans every transcript, so one
   // valid account must not be able to loop it against the shared event loop.
-  const running = new Set<string>();
-  const lastDone = new Map<string, number>();
-  const cooldown = deps.cooldownMs ?? 5_000;
-  const now = deps.now ?? Date.now;
+  const gate = createPerUserGate({ cooldownMs: deps.cooldownMs, now: deps.now });
   return async (req: IncomingMessage, res: ServerResponse): Promise<void> => {
     if ((req.method ?? "").toUpperCase() !== "POST") {
       sendJson(res, 405, { error: "method not allowed" });
@@ -51,13 +49,9 @@ export function createForgetHandler(deps: ForgetRouteDeps) {
     if (sub === null) {
       return;
     }
-    if (running.has(sub)) {
-      sendJson(res, 200, failed(["in_progress"], true));
-      return;
-    }
-    const last = lastDone.get(sub);
-    if (last !== undefined && now() - last < cooldown) {
-      sendJson(res, 200, failed(["rate_limited"], true));
+    const refusal = gate.refusal(sub);
+    if (refusal) {
+      sendJson(res, 200, failed([refusal], true));
       return;
     }
     if (!deps.forget) {
@@ -65,10 +59,10 @@ export function createForgetHandler(deps: ForgetRouteDeps) {
       sendJson(res, 200, failed(["misconfigured"], false));
       return;
     }
+    const forget = deps.forget;
     let r: ForgetResult;
-    running.add(sub);
     try {
-      r = await deps.forget(sub);
+      r = await gate.run(sub, () => forget(sub));
     } catch (err) {
       const misconfigured = (err as { code?: string }).code === "misconfigured";
       deps.logger?.error?.(
@@ -76,9 +70,6 @@ export function createForgetHandler(deps: ForgetRouteDeps) {
       );
       sendJson(res, 200, failed([misconfigured ? "misconfigured" : "store_error"], !misconfigured));
       return;
-    } finally {
-      running.delete(sub);
-      lastDone.set(sub, now());
     }
     const outcome = forgetOutcome(r);
     const counts = {
