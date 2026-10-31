@@ -191,6 +191,39 @@ describe("GET /gateway/memory/highlights", () => {
     expect(requestNow).not.toHaveBeenCalled(); // a ready read spends no slot
   });
 
+  it("RED: a stored highlight with an unknown category is never served", async () => {
+    const { handler, store } = getSetup();
+    await store.claimOnDemand("ok_user_A", 3, { create: true });
+    const stale = { ...hl("old"), category: "diet" } as unknown as Highlight;
+    await store.put(
+      "ok_user_A",
+      { state: "ready", payload: [hl("1"), stale] },
+      await store.clock(),
+      (await store.get("ok_user_A"))!.epoch,
+    );
+    const body = (await get(handler)).json();
+    expect(body.state).toBe("ready");
+    expect((body.highlights as Highlight[]).map((h) => h.id)).toEqual(["1"]);
+    expect(JSON.stringify(body)).not.toContain("diet");
+  });
+
+  it("a row with ONLY unknown categories is not served as ready: fallback + generation queued", async () => {
+    const { handler, store, requestNow } = getSetup();
+    await store.claimOnDemand("ok_user_A", 3, { create: true });
+    const stale = { ...hl("old"), category: "diet" } as unknown as Highlight;
+    await store.put(
+      "ok_user_A",
+      { state: "ready", payload: [stale] },
+      await store.clock(),
+      (await store.get("ok_user_A"))!.epoch,
+    );
+    const body = (await get(handler)).json();
+    expect(body.state).toBe("unavailable");
+    expect(body.highlights).toEqual([]);
+    expect(JSON.stringify(body)).not.toContain("diet");
+    expect(requestNow).toHaveBeenCalled();
+  });
+
   it("empty: zero facts", async () => {
     const { handler, store, requestNow } = getSetup();
     await store.claimOnDemand("ok_user_A", 3, { create: true });

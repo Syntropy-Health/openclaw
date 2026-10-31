@@ -25,6 +25,8 @@ export type HighlightStoreHarness = {
   capToday(groupId: string, count: number): Promise<void>;
   /** End the group's regeneration lease now. */
   expireLease(groupId: string): Promise<void>;
+  /** Total the store has reported through `onUnknownCategory` so far. */
+  unknownCategoryCount(): number;
   close?(): Promise<void>;
 };
 
@@ -59,9 +61,20 @@ export function describeHighlightStoreContract(
     /** This run's groups in a due-list, in the store's order. */
     const ours = (ids: string[]) => ids.filter((g) => g.startsWith(`${h.prefix}_`));
     const epochOf = async (g: string) => (await h.store.get(g))?.epoch ?? "0";
-    /** put as a run that starts now with the row's current epoch would. */
-    const putNow = async (g: string, w: HighlightWrite) =>
-      h.store.put(g, w, await h.store.clock(), await epochOf(g));
+    /**
+     * put as a run that starts now with the row's current epoch would. The start is
+     * taken strictly AFTER the row's current stale mark: Postgres stores the mark in
+     * microseconds but the clock reaches JS as milliseconds, so a mark and a start in
+     * the same millisecond would compare as "mark after start" and survive the put.
+     */
+    const putNow = async (g: string, w: HighlightWrite) => {
+      const row = await h.store.get(g);
+      let startedAt = await h.store.clock();
+      while (row?.staleSince && startedAt.getTime() <= row.staleSince.getTime()) {
+        startedAt = await h.store.clock();
+      }
+      return h.store.put(g, w, startedAt, row?.epoch ?? "0");
+    };
     /** A group with a ready row holding `payload`. */
     const ready = async (g: string, payload: Highlight[]) => {
       await h.store.claimOnDemand(g, 3, { create: true });
@@ -289,6 +302,40 @@ export function describeHighlightStoreContract(
         ours(await h.store.staleDue({ debounceSec: 120, cap: 3, limit: 100_000 })).filter(isOrd),
       ).toEqual(want);
       expect(ours(await h.store.nightlyDue(100_000)).filter(isOrd)).toEqual(want);
+    });
+
+    it("RED: a stored highlight with an unknown category is not served, and is counted", async () => {
+      const g = group("stale_category");
+      const stale = { ...hl("hl_old", ["e_old"]), category: "diet" } as unknown as Highlight;
+      await ready(g, [hl("hl_ok", ["e_ok"]), stale]);
+      const before = h.unknownCategoryCount();
+      const row = await h.store.get(g);
+      expect(row?.payload.map((x) => x.id)).toEqual(["hl_ok"]);
+      expect(row?.state).toBe("ready");
+      expect(h.unknownCategoryCount() - before).toBe(1);
+      // The read queued a regeneration (the put had cleared the stale mark)...
+      expect(row?.staleSince).toBeInstanceOf(Date);
+      // ...once: a later read must not refresh the mark, or a row read often would never
+      // age past the worker's debounce. Backdate it, read again, and it must stay put.
+      await h.staleAgo(g, 600);
+      const aged = (await h.store.get(g))?.staleSince;
+      expect((await h.store.clock()).getTime() - aged!.getTime()).toBeGreaterThan(500_000);
+      // (The second read is counted again.)
+      expect(h.unknownCategoryCount() - before).toBe(2);
+      // Never relabelled: no served highlight carries a category outside the vocabulary.
+      expect(row?.payload.every((x) => x.category === "sleep")).toBe(true);
+      // A row with only unknown categories serves none (the route then falls back).
+      const allStale = group("stale_category_all");
+      const stale2 = { ...hl("hl_old2", ["e_old2"]), category: "Sleep" } as unknown as Highlight;
+      await ready(allStale, [stale, stale2]);
+      expect((await h.store.get(allStale))?.payload).toEqual([]);
+      // The count is per highlight left out, not per row.
+      expect(h.unknownCategoryCount() - before).toBe(4);
+      const clean = group("stale_category_clean");
+      await ready(clean, [hl("hl_c", ["e_c"])]);
+      // A clean row reports nothing and is not marked stale.
+      expect((await h.store.get(clean))?.staleSince).toBeNull();
+      expect(h.unknownCategoryCount() - before).toBe(4);
     });
 
     it("dropCiting touches ONLY the given group's row", async () => {

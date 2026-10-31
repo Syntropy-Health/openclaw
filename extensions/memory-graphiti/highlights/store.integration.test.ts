@@ -41,6 +41,7 @@ const connect = async (): Promise<Sql> => {
 
 describeHighlightStoreContract(describeIf, "Postgres", async () => {
   const sql = await connect();
+  let unknown = 0;
   /** A hook on a group with no row must fail loudly, as the fake's does. */
   const one = async (rows: Promise<unknown[]>, g: string) => {
     if ((await rows).length !== 1) {
@@ -48,7 +49,8 @@ describeHighlightStoreContract(describeIf, "Postgres", async () => {
     }
   };
   return {
-    store: createPgHighlightStore(sql),
+    store: createPgHighlightStore(sql, { onUnknownCategory: (n) => (unknown += n) }),
+    unknownCategoryCount: () => unknown,
     prefix: `ok_hlc_${Date.now()}`,
     staleAgo: (g, seconds) =>
       one(

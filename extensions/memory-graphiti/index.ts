@@ -398,6 +398,12 @@ const memoryPlugin = {
     if (identitySql && !memoryRefused) {
       const pgHighlights = createPgHighlightStore(
         identitySql as unknown as Parameters<typeof createPgHighlightStore>[0],
+        {
+          onUnknownCategory: (count) =>
+            api.logger.warn(
+              `memory-highlights: ${count} stored highlight(s) with an unknown or malformed category not served; row queued for regeneration`,
+            ),
+        },
       );
       highlightStore = afterReady(pgHighlights, ready);
     }

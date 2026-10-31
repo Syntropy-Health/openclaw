@@ -4,7 +4,13 @@
  * the lease can be driven by fake timers. The real SQL is covered by
  * highlights/store.integration.test.ts.
  */
-import type { HighlightRow, HighlightStore, HighlightWrite } from "../highlights/store.js";
+import {
+  canonicalHighlights,
+  type HighlightRow,
+  type HighlightStore,
+  type HighlightStoreOptions,
+  type HighlightWrite,
+} from "../highlights/store.js";
 
 type Row = HighlightRow & {
   ondemandDay: string | null;
@@ -17,7 +23,10 @@ const utcDay = (d: Date) => d.toISOString().slice(0, 10);
 export class FakeHighlightStore implements HighlightStore {
   readonly rows = new Map<string, Row>();
   private seq = 0;
-  constructor(private readonly now: () => Date = () => new Date()) {}
+  constructor(
+    private readonly now: () => Date = () => new Date(),
+    private readonly opts: HighlightStoreOptions = {},
+  ) {}
 
   private nextEpoch(): string {
     return String(++this.seq);
@@ -33,7 +42,21 @@ export class FakeHighlightStore implements HighlightStore {
       return null;
     }
     const { ondemandDay: _d, ondemandCount: _c, leaseUntil: _l, ...row } = r;
-    return structuredClone(row);
+    const out = structuredClone(row);
+    // Same read rule as the Postgres store: unknown categories are left out, counted,
+    // and the row is marked stale (once) so it regenerates.
+    let dropped = 0;
+    out.payload = canonicalHighlights(out.payload, (n) => {
+      dropped = n;
+    });
+    if (dropped > 0) {
+      this.opts.onUnknownCategory?.(dropped);
+      if (r.staleSince === null) {
+        r.staleSince = this.now();
+        out.staleSince = r.staleSince;
+      }
+    }
+    return out;
   }
 
   async put(

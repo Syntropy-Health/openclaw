@@ -12,7 +12,8 @@ import { describeHighlightStoreContract } from "./highlight-store.contract.js";
 describeHighlightStoreContract(describe, "in-memory fake", async () => {
   let t = Date.parse("2026-10-30T12:00:00Z");
   const now = () => new Date(++t);
-  const store = new FakeHighlightStore(now);
+  let unknown = 0;
+  const store = new FakeHighlightStore(now, { onUnknownCategory: (n) => (unknown += n) });
   const row = (g: string) => {
     const r = store.rows.get(g);
     if (!r) {
@@ -23,6 +24,7 @@ describeHighlightStoreContract(describe, "in-memory fake", async () => {
   return {
     store,
     prefix: "fake",
+    unknownCategoryCount: () => unknown,
     staleAgo: async (g, seconds) => {
       row(g).staleSince = new Date(t - seconds * 1000);
     },

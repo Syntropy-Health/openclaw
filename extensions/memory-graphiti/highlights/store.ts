@@ -1,4 +1,9 @@
-import type { Highlight, HighlightCacheState, HighlightSource } from "./types.js";
+import {
+  isHighlightCategory,
+  type Highlight,
+  type HighlightCacheState,
+  type HighlightSource,
+} from "./types.js";
 
 type Sql = <T = Record<string, unknown>>(
   strings: TemplateStringsArray,
@@ -84,17 +89,37 @@ type Row = {
 
 const str = (v: unknown): string => (typeof v === "string" ? v : String(v ?? ""));
 
+export type HighlightStoreOptions = {
+  /**
+   * Called with how many stored highlights a read left out because their category
+   * is not in the vocabulary (a row written before a category was renamed or
+   * removed). Count only: never the content or the group.
+   */
+  onUnknownCategory?: (count: number) => void;
+};
+
 /**
  * Rebuild highlights in the contract's key order (A&D §1a): jsonb stores object
  * keys in its own order, and key order is part of the contract (as for recall).
+ * A highlight whose category is not in the vocabulary is LEFT OUT and counted,
+ * never relabelled: serving it as another category would present stale data as
+ * valid. The store's read then marks the row stale, so the next generation rewrites
+ * it with valid categories. Malformed entries (not an object, no category) count too.
  */
-export function canonicalHighlights(raw: unknown): Highlight[] {
+export function canonicalHighlights(
+  raw: unknown,
+  onUnknownCategory?: (count: number) => void,
+): Highlight[] {
   if (!Array.isArray(raw)) {
     return [];
   }
-  return raw.map((x: Record<string, unknown>) => ({
+  const known = raw.filter((x: Record<string, unknown>) => isHighlightCategory(x?.category));
+  if (known.length < raw.length) {
+    onUnknownCategory?.(raw.length - known.length);
+  }
+  return known.map((x: Record<string, unknown>) => ({
     id: str(x.id),
-    category: str(x.category) as Highlight["category"],
+    category: x.category as Highlight["category"],
     title: str(x.title),
     body: str(x.body),
     first_seen: str(x.first_seen),
@@ -114,7 +139,7 @@ export function canonicalHighlights(raw: unknown): Highlight[] {
 
 const toDate = (v: Date | string): Date => (v instanceof Date ? v : new Date(v));
 
-export function createPgHighlightStore(sql: Sql): HighlightStore {
+export function createPgHighlightStore(sql: Sql, opts: HighlightStoreOptions = {}): HighlightStore {
   return {
     async clock() {
       const rows = await sql<{ now: Date | string }>`SELECT now() AS now`;
@@ -129,11 +154,29 @@ export function createPgHighlightStore(sql: Sql): HighlightStore {
       if (!r) {
         return null;
       }
+      let dropped = 0;
+      const payload = canonicalHighlights(r.payload, (n) => {
+        dropped = n;
+      });
+      let staleSince = r.stale_since === null ? null : toDate(r.stale_since);
+      if (dropped > 0) {
+        opts.onUnknownCategory?.(dropped);
+        if (staleSince === null) {
+          // Queue a regeneration so the row is rewritten with valid categories; without
+          // it a quiet user's row would keep its hidden entries (and warn) indefinitely.
+          const marked = await sql<{ stale_since: Date | string }>`
+            UPDATE lp_memory_highlights SET stale_since = now()
+            WHERE group_id = ${groupId} AND stale_since IS NULL RETURNING stale_since`;
+          if (marked[0]) {
+            staleSince = toDate(marked[0].stale_since);
+          }
+        }
+      }
       return {
         state: r.state as HighlightCacheState,
-        payload: canonicalHighlights(r.payload),
+        payload,
         generatedAt: toDate(r.generated_at),
-        staleSince: r.stale_since === null ? null : toDate(r.stale_since),
+        staleSince,
         sourceFactIds: r.source_fact_ids,
         epoch: str(r.epoch),
       };
