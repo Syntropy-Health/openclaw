@@ -198,15 +198,39 @@ describe("gateway lock", () => {
       },
     });
 
-    const lock = await acquireGatewayLock({
-      env,
-      allowInTests: true,
-      timeoutMs: 30,
-      pollIntervalMs: 2,
-      staleMs: 1,
-      platform: "linux",
+    // Taking over a stale lock is a SUCCESS path: the 30 ms budget is not what is under
+    // test. Freeze the clock the loop measures elapsed time with (Date only; real timers
+    // stay real) so slow filesystem calls on a busy runner cannot spend the budget first.
+    // Staleness is still judged against the frozen "now" (createdAt is the epoch). Every
+    // open is made slower than the whole budget, so this guards the Windows CI flake.
+    // With Date frozen the loop has no time bound of its own, so the open count is the
+    // bound: the takeover needs 2 opens; a regression in stale detection would loop, and
+    // the 6th open fails it fast (as GatewayLockError) instead of hanging the test.
+    const realOpen = fs.open.bind(fs);
+    const slowOpen = vi.spyOn(fs, "open").mockImplementation(async (...args) => {
+      if (slowOpen.mock.calls.length > 5) {
+        throw Object.assign(new Error("test bound: too many lock attempts"), { code: "EBOUND" });
+      }
+      await new Promise((r) => setTimeout(r, 40));
+      return realOpen(...args);
     });
+    vi.useFakeTimers({ toFake: ["Date"] });
+    let lock: Awaited<ReturnType<typeof acquireGatewayLock>>;
+    try {
+      lock = await acquireGatewayLock({
+        env,
+        allowInTests: true,
+        timeoutMs: 30,
+        pollIntervalMs: 2,
+        staleMs: 1,
+        platform: "linux",
+      });
+    } finally {
+      vi.useRealTimers();
+      slowOpen.mockRestore();
+    }
     expect(lock).not.toBeNull();
+    expect(slowOpen.mock.calls.length).toBeLessThanOrEqual(3);
 
     await lock?.release();
     staleSpy.mockRestore();
