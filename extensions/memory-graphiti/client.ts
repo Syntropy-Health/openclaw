@@ -261,7 +261,8 @@ export class GraphitiRestClient implements MemoryClient {
     const deadline = AbortSignal.timeout(LIST_DEADLINE_MS);
     const since = opts.since ? Date.parse(opts.since) : null;
     const facts: MemoryFact[] = [];
-    let cursor: string | null = opts.cursor ?? null;
+    // An empty cursor means "from the start" (the route rejects `cursor=` with 422).
+    let cursor: string | null = opts.cursor ? opts.cursor : null;
     let read = 0;
     while (facts.length < target && read < GRAPHITI_LIST_CEILING) {
       const pageSize = Math.min(

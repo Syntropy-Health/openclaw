@@ -260,6 +260,14 @@ describe("GraphitiRestClient.listFacts / capabilities", () => {
     ).rejects.toThrow("paging contract");
   });
 
+  it("an empty cursor reads from the start (never sends `cursor=`)", async () => {
+    const { client, seed, fetchImpl } = rest();
+    seed(G, many(3));
+    const r = await client.listFacts(G, { cursor: "" });
+    expect(r.facts).toHaveLength(3);
+    expect(String(fetchImpl.mock.calls[0][0])).not.toContain("cursor=");
+  });
+
   it("declares what it can do", () => {
     expect(rest().client.capabilities()).toEqual({
       listFacts: true,
