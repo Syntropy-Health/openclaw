@@ -191,8 +191,13 @@ const INGEST_TIMEOUT_MS = 10_000;
 const HEALTHCHECK_TIMEOUT_MS = 3_000;
 
 export type GraphitiRestClientOptions = {
-  /** Transport for the fact surface (tests pass an HTTP fixture). Default: global fetch. */
+  /** Transport (tests pass an HTTP fixture). Default: global fetch, resolved per call. */
   fetch?: typeof fetch;
+  /**
+   * Caller identity: a bearer token for every request (e.g. a Google ID token for a
+   * Cloud Run service). If it throws, the request is NOT sent: fail closed.
+   */
+  authToken?: () => Promise<string>;
 };
 
 /** FactResult (snake_case, graphiti-server) → MemoryFact. */
@@ -230,6 +235,21 @@ export class GraphitiRestClient implements MemoryClient {
     this.label = `graphiti-rest @ ${serverUrl}`;
     // Resolved per call, so a test that stubs the global fetch still applies.
     this.fetchImpl = opts.fetch ?? ((input, init) => fetch(input, init));
+    this.authToken = opts.authToken;
+  }
+
+  private readonly authToken: GraphitiRestClientOptions["authToken"];
+
+  /** Every request goes through here, so none can leave without the caller identity. */
+  private async send(input: string | URL, init: RequestInit = {}): Promise<Response> {
+    if (!this.authToken) {
+      return this.fetchImpl(input, init);
+    }
+    const token = await this.authToken();
+    const headers = new Headers(init.headers);
+    headers.set("authorization", `Bearer ${token}`);
+    // Never follow a redirect with the bearer attached.
+    return this.fetchImpl(input, { ...init, headers, redirect: "error" });
   }
 
   /**
@@ -275,7 +295,7 @@ export class GraphitiRestClient implements MemoryClient {
       if (cursor !== null) {
         url.searchParams.set("cursor", cursor);
       }
-      const res = await this.fetchImpl(url, {
+      const res = await this.send(url, {
         method: "GET",
         signal: AbortSignal.any([deadline, AbortSignal.timeout(LIST_TIMEOUT_MS)]),
       });
@@ -335,7 +355,7 @@ export class GraphitiRestClient implements MemoryClient {
     opts: SearchRankedOptions,
   ): Promise<RankedFact[]> {
     const timeout = AbortSignal.timeout(SEARCH_TIMEOUT_MS);
-    const res = await this.fetchImpl(`${this.serverUrl}/search`, {
+    const res = await this.send(`${this.serverUrl}/search`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ group_ids: [groupId], query, max_facts: opts.limit }),
@@ -363,7 +383,7 @@ export class GraphitiRestClient implements MemoryClient {
     let deleted = 0;
     let absent = 0;
     for (const id of new Set(factIds)) {
-      const res = await this.fetchImpl(`${this.serverUrl}/entity-edge/${encodeURIComponent(id)}`, {
+      const res = await this.send(`${this.serverUrl}/entity-edge/${encodeURIComponent(id)}`, {
         method: "DELETE",
         signal: AbortSignal.timeout(INGEST_TIMEOUT_MS),
       });
@@ -429,7 +449,7 @@ export class GraphitiRestClient implements MemoryClient {
 
   /** DELETE /group/{group_id}. INFERRED endpoint; verify on a live server. */
   async forget(groupId: string): Promise<boolean> {
-    const res = await fetch(`${this.serverUrl}/group/${encodeURIComponent(groupId)}`, {
+    const res = await this.send(`${this.serverUrl}/group/${encodeURIComponent(groupId)}`, {
       method: "DELETE",
       signal: AbortSignal.timeout(INGEST_TIMEOUT_MS),
     });
@@ -447,7 +467,7 @@ export class GraphitiRestClient implements MemoryClient {
    * POST /messages — returns 202 Accepted (async processing).
    */
   async addMessages(groupId: string, messages: GraphitiMessage[]): Promise<void> {
-    const res = await fetch(`${this.serverUrl}/messages`, {
+    const res = await this.send(`${this.serverUrl}/messages`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ group_id: groupId, messages }),
@@ -469,7 +489,7 @@ export class GraphitiRestClient implements MemoryClient {
     groupIds?: string[] | null,
     maxFacts = 10,
   ): Promise<FactResult[]> {
-    const res = await fetch(`${this.serverUrl}/search`, {
+    const res = await this.send(`${this.serverUrl}/search`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
@@ -495,7 +515,7 @@ export class GraphitiRestClient implements MemoryClient {
    */
   async getEpisodes(groupId: string, lastN = 10): Promise<EpisodeResult[]> {
     const url = `${this.serverUrl}/episodes/${encodeURIComponent(groupId)}?last_n=${lastN}`;
-    const res = await fetch(url, {
+    const res = await this.send(url, {
       signal: AbortSignal.timeout(SEARCH_TIMEOUT_MS),
     });
 
@@ -515,7 +535,7 @@ export class GraphitiRestClient implements MemoryClient {
    */
   async healthcheck(): Promise<boolean> {
     try {
-      const res = await fetch(`${this.serverUrl}/healthcheck`, {
+      const res = await this.send(`${this.serverUrl}/healthcheck`, {
         signal: AbortSignal.timeout(HEALTHCHECK_TIMEOUT_MS),
       });
       return res.ok;

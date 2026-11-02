@@ -32,6 +32,11 @@ import {
 } from "./config.js";
 import { createForgetHandler, FORGET_ROUTE_PATH } from "./forget-route.js";
 import { forgetByExternalId, forgetUser, type GroupLock } from "./forget.js";
+import {
+  assertIdentityTarget,
+  createGcpIdTokenSource,
+  gcpIdTokenConfigFromEnv,
+} from "./gcp-id-token.js";
 import { generateHighlights } from "./highlights/generate.js";
 import { regenerateGroup } from "./highlights/regenerate.js";
 import { removeHighlight } from "./highlights/remove.js";
@@ -98,6 +103,17 @@ function within<T, F>(p: Promise<T>, ms: number, fallback: F): Promise<T | F> {
 // Client factory
 // ============================================================================
 
+/** The graphiti-server caller identity from the environment (none for a local server). */
+function graphitiIdentity(serverUrl: string): { authToken?: () => Promise<string> } {
+  const idCfg = gcpIdTokenConfigFromEnv();
+  if (!idCfg) {
+    return {};
+  }
+  assertIdentityTarget(serverUrl, idCfg.audience);
+  const source = createGcpIdTokenSource(idCfg);
+  return { authToken: () => source.token() };
+}
+
 function createClient(cfg: GraphitiConfig): MemoryClient {
   // A fully-parsed config always carries a resolved `backend`; drive off it.
   if (cfg.backend === "zep-cloud") {
@@ -110,7 +126,7 @@ function createClient(cfg: GraphitiConfig): MemoryClient {
     if (!cfg.serverUrl) {
       throw new Error("memory-graphiti: backend 'self-hosted' requires serverUrl");
     }
-    return new GraphitiRestClient(cfg.serverUrl);
+    return new GraphitiRestClient(cfg.serverUrl, graphitiIdentity(cfg.serverUrl));
   }
 
   // Backward-compat fallback: callers passing un-parsed cfg objects (no
@@ -119,7 +135,7 @@ function createClient(cfg: GraphitiConfig): MemoryClient {
     return new ZepCloudClient(cfg.apiKey);
   }
   if (cfg.serverUrl) {
-    return new GraphitiRestClient(cfg.serverUrl);
+    return new GraphitiRestClient(cfg.serverUrl, graphitiIdentity(cfg.serverUrl));
   }
   throw new Error("memory-graphiti: no backend configured (need apiKey or serverUrl)");
 }
