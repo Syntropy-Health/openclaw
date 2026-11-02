@@ -209,6 +209,16 @@ function factFromResult(f: FactResult): MemoryFact {
   };
 }
 
+/** Page size for GET /groups/{group_id}/entity-edges (our server overlay, mono #598). */
+export const GRAPHITI_EDGE_PAGE = 50;
+/** Most edges one listFacts call reads (40 pages): the same bound as Zep's. */
+export const GRAPHITI_LIST_CEILING = 2_000;
+const LIST_TIMEOUT_MS = 10_000;
+/** One listFacts call, all pages: under the 120 s regeneration lease. */
+const LIST_DEADLINE_MS = 90_000;
+
+type EdgePage = { facts: FactResult[]; next_cursor: string | null };
+
 export class GraphitiRestClient implements MemoryClient {
   readonly label: string;
   private readonly fetchImpl: typeof fetch;
@@ -223,21 +233,94 @@ export class GraphitiRestClient implements MemoryClient {
   }
 
   /**
-   * graphiti-server (upstream getzep/graphiti efc40d21b0af) has no list-edges
-   * route, and /search takes no reranker and returns no score (CTO #17028 (b)).
-   * Follow-up: mono #598 "graphiti-server: paginated list-edges-by-group read";
-   * once it lands, implement listFacts and flip `listFacts` here.
+   * /search takes no reranker and returns no score (CTO #17028 (b)). Facts are
+   * listed through our server overlay's paged route (mono #598): upstream
+   * graphiti-server has no list-edges route of its own.
    */
   capabilities(): MemoryCapabilities {
-    return { listFacts: false, forgetFacts: true, rerankers: ["rrf"], scores: false };
+    return { listFacts: true, forgetFacts: true, rerankers: ["rrf"], scores: false };
   }
 
-  /** No list-edges route on graphiti-server (mono #598): a typed refusal, no request. */
-  async listFacts(_groupId: string, _opts?: ListFactsOptions): Promise<ListFactsResult> {
-    throw new MemoryCapabilityError(
-      "backend_unsupported",
-      "graphiti-server has no list-edges route (mono #598)",
-    );
+  /**
+   * Every fact of the group through GET /groups/{group_id}/entity-edges, in uuid
+   * order (keyset pages of GRAPHITI_EDGE_PAGE; uuids are random, so this order is
+   * NOT by age). The
+   * invalid and `since` filters apply after paging, so they never end it early. At
+   * most GRAPHITI_LIST_CEILING edges are read per call; stopping there with more
+   * left is reported as truncated, with a cursor to continue from. A server reply
+   * that breaks the paging contract (an empty page that claims more; a cursor that is
+   * not the page's last uuid; uuids not strictly descending below the cursor) is an
+   * error: never a partial list that looks complete. A server without the route
+   * (404/405: an image older than the overlay) is backend_unsupported, as before.
+   */
+  async listFacts(groupId: string, opts: ListFactsOptions = {}): Promise<ListFactsResult> {
+    const target = Math.min(opts.limit ?? GRAPHITI_LIST_CEILING, GRAPHITI_LIST_CEILING);
+    if (!(target > 0)) {
+      throw new RangeError(`listFacts limit must be a positive number (got ${opts.limit})`);
+    }
+    const deadline = AbortSignal.timeout(LIST_DEADLINE_MS);
+    const since = opts.since ? Date.parse(opts.since) : null;
+    const facts: MemoryFact[] = [];
+    let cursor: string | null = opts.cursor ?? null;
+    let read = 0;
+    while (facts.length < target && read < GRAPHITI_LIST_CEILING) {
+      const pageSize = Math.min(
+        GRAPHITI_EDGE_PAGE,
+        target - facts.length,
+        GRAPHITI_LIST_CEILING - read,
+      );
+      const url = new URL(`${this.serverUrl}/groups/${encodeURIComponent(groupId)}/entity-edges`);
+      url.searchParams.set("limit", String(pageSize));
+      if (cursor !== null) {
+        url.searchParams.set("cursor", cursor);
+      }
+      const res = await this.fetchImpl(url, {
+        method: "GET",
+        signal: AbortSignal.any([deadline, AbortSignal.timeout(LIST_TIMEOUT_MS)]),
+      });
+      if (res.status === 404 || res.status === 405) {
+        // The route is ours (overlay); an empty group is 200 with no facts, never 404.
+        throw new MemoryCapabilityError(
+          "backend_unsupported",
+          "graphiti-server has no entity-edges route (image older than the overlay)",
+        );
+      }
+      if (!res.ok) {
+        throw new Error(`graphiti-server GET /groups/{id}/entity-edges failed (${res.status})`);
+      }
+      const page = (await res.json()) as EdgePage;
+      if (!Array.isArray(page?.facts)) {
+        throw new Error("graphiti-server entity-edges reply has no facts array");
+      }
+      const next = page.next_cursor ?? null;
+      let previous = cursor;
+      for (const f of page.facts) {
+        if (typeof f?.uuid !== "string" || (previous !== null && !(f.uuid < previous))) {
+          throw new Error("graphiti-server entity-edges reply broke the paging contract");
+        }
+        previous = f.uuid;
+      }
+      if (next !== null && (page.facts.length === 0 || next !== page.facts.at(-1)?.uuid)) {
+        throw new Error("graphiti-server entity-edges reply broke the paging contract");
+      }
+      read += page.facts.length;
+      for (const f of page.facts) {
+        if (!opts.includeInvalid && (f.invalid_at || f.expired_at)) {
+          continue;
+        }
+        if (since !== null && Date.parse(f.created_at) < since) {
+          continue;
+        }
+        facts.push(factFromResult(f));
+      }
+      cursor = next;
+      if (cursor === null) {
+        return { facts, nextCursor: null };
+      }
+    }
+    // More remains. Truncated when the ceiling stopped us, not the caller's own limit.
+    const truncated = read >= GRAPHITI_LIST_CEILING || target === GRAPHITI_LIST_CEILING;
+    return { facts, nextCursor: cursor, ...(truncated ? { truncated } : {}) };
   }
 
   /**

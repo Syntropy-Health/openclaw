@@ -5,6 +5,10 @@
  *   POST   /search             {group_ids, query, max_facts} → {facts: FactResult[]}
  *                              (no reranker parameter, no score; library hybrid + RRF)
  *   DELETE /entity-edge/{uuid} → 200 {message} | 404
+ *   GET    /groups/{group_id}/entity-edges?limit=&cursor=
+ *                              → {facts: FactResult[], next_cursor: string | null}
+ *                              (our server overlay, mono #598: graphiti_core's keyset
+ *                              pager, uuid DESC, `uuid < cursor`; limit 1..100 else 422)
  */
 import { vi } from "vitest";
 import type { FactResult, MemoryFact } from "../client.js";
@@ -49,6 +53,25 @@ export function createGraphitiServerFake(base = "http://graphiti.test") {
         .slice(0, body.max_facts)
         .map((x) => toFactResult(x.f));
       return json(200, { facts });
+    }
+    const listing = url.pathname.match(/^\/groups\/([^/]+)\/entity-edges$/);
+    if (method === "GET" && listing) {
+      const limit = Number(url.searchParams.get("limit") ?? "50");
+      if (!Number.isInteger(limit) || limit < 1 || limit > 100) {
+        return json(422, { detail: "limit must be 1..100" });
+      }
+      const cursor = url.searchParams.get("cursor");
+      // Upstream's order: ORDER BY e.uuid DESC, AND e.uuid < $cursor, LIMIT limit+1.
+      const rows = (groups.get(decodeURIComponent(listing[1])) ?? [])
+        .toSorted((a, b) => (a.id < b.id ? 1 : a.id > b.id ? -1 : 0))
+        .filter((f) => cursor === null || f.id < cursor)
+        .slice(0, limit + 1);
+      const page = rows.slice(0, limit);
+      const more = rows.length > limit;
+      return json(200, {
+        facts: page.map(toFactResult),
+        next_cursor: more ? page[page.length - 1].id : null,
+      });
     }
     const edge = url.pathname.match(/^\/entity-edge\/(.+)$/);
     if (method === "DELETE" && edge) {
