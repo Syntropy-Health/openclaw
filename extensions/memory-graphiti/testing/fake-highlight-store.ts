@@ -77,6 +77,8 @@ export class FakeHighlightStore implements HighlightStore {
       r.staleSince = null;
     }
     r.leaseUntil = null;
+    r.partial = result.coverage?.partial ?? false;
+    r.factsRead = result.coverage?.factsRead ?? null;
     return true;
   }
 
@@ -109,6 +111,8 @@ export class FakeHighlightStore implements HighlightStore {
         staleSince: this.now(),
         sourceFactIds: [],
         epoch: this.nextEpoch(),
+        partial: false,
+        factsRead: null,
         ondemandDay: today,
         ondemandCount: 1,
         leaseUntil: null,

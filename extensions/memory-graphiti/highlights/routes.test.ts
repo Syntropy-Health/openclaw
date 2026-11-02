@@ -146,6 +146,8 @@ describe("GET /gateway/memory/highlights", () => {
       reason: null,
       highlights: [],
       fallback_facts: null,
+      partial: false,
+      facts_read: null,
     });
     expect((await get(handler, { authorization: "Bearer nope" })).out.status).toBe(401);
   });
@@ -222,6 +224,40 @@ describe("GET /gateway/memory/highlights", () => {
     expect(body.highlights).toEqual([]);
     expect(JSON.stringify(body)).not.toContain("diet");
     expect(requestNow).toHaveBeenCalled();
+  });
+
+  it("RED: highlights built from a partial fact list are served as partial, with the count", async () => {
+    const { handler, store } = getSetup();
+    await store.claimOnDemand("ok_user_A", 3, { create: true });
+    await store.put(
+      "ok_user_A",
+      { state: "ready", payload: [hl("1")], coverage: { partial: true, factsRead: 2000 } },
+      await store.clock(),
+      (await store.get("ok_user_A"))!.epoch,
+    );
+    const body = (await get(handler)).json();
+    expect(body).toMatchObject({ state: "ready", partial: true, facts_read: 2000 });
+  });
+
+  it("a complete generation is served as complete", async () => {
+    const { handler, store } = getSetup();
+    await store.claimOnDemand("ok_user_A", 3, { create: true });
+    await store.put(
+      "ok_user_A",
+      { state: "ready", payload: [hl("1")], coverage: { partial: false, factsRead: 12 } },
+      await store.clock(),
+      (await store.get("ok_user_A"))!.epoch,
+    );
+    expect((await get(handler)).json()).toMatchObject({ partial: false, facts_read: 12 });
+  });
+
+  it("RED: fallback facts from a listing truncated at the ceiling are marked partial", async () => {
+    const { handler } = getSetup({
+      list: async () => ({ facts: [fact("a_1", 1)], nextCursor: "c", truncated: true }),
+    });
+    const body = (await get(handler)).json();
+    expect(body).toMatchObject({ state: "unavailable", partial: true, facts_read: 1 });
+    expect(body.fallback_facts).toHaveLength(1);
   });
 
   it("empty: zero facts", async () => {

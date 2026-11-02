@@ -98,13 +98,17 @@ function within<T, F>(p: Promise<T>, ms: number, fallback: F): Promise<T | F> {
 // Client factory
 // ============================================================================
 
-function createClient(cfg: GraphitiConfig): MemoryClient {
+/** `logger` receives the clients' own warnings (e.g. a listing truncated at the ceiling). */
+function createClient(
+  cfg: GraphitiConfig,
+  logger?: { warn: (message: string) => void },
+): MemoryClient {
   // A fully-parsed config always carries a resolved `backend`; drive off it.
   if (cfg.backend === "zep-cloud") {
     if (!cfg.apiKey) {
       throw new Error("memory-graphiti: backend 'zep-cloud' requires apiKey");
     }
-    return new ZepCloudClient(cfg.apiKey);
+    return new ZepCloudClient(cfg.apiKey, { logger });
   }
   if (cfg.backend === "self-hosted") {
     if (!cfg.serverUrl) {
@@ -116,7 +120,7 @@ function createClient(cfg: GraphitiConfig): MemoryClient {
   // Backward-compat fallback: callers passing un-parsed cfg objects (no
   // `backend` field) get the prior mode/apiKey → serverUrl precedence.
   if (cfg.mode === "cloud" && cfg.apiKey) {
-    return new ZepCloudClient(cfg.apiKey);
+    return new ZepCloudClient(cfg.apiKey, { logger });
   }
   if (cfg.serverUrl) {
     return new GraphitiRestClient(cfg.serverUrl);
@@ -214,7 +218,7 @@ const memoryPlugin = {
     };
 
     // self-hosted is NEVER wrapped/gated; cloud is gated per-call at each site.
-    const client = createClient(cfg);
+    const client = createClient(cfg, { warn: (m) => api.logger.warn(m) });
 
     // Derive the cloud decision from the ACTUAL constructed client — NOT from
     // cfg.backend. createClient can build a ZepCloudClient via the legacy
