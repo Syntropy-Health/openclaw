@@ -112,8 +112,10 @@ describeIf("highlight store (real Postgres only)", () => {
       generated_at: "timestamp with time zone",
       group_id: "text",
       epoch: "bigint",
+      facts_read: "integer",
       ondemand_count: "integer",
       ondemand_day: "date",
+      partial: "boolean",
       payload: "jsonb",
       regen_lease_until: "timestamp with time zone",
       source_fact_ids: "ARRAY",
@@ -147,6 +149,27 @@ describeIf("highlight store (real Postgres only)", () => {
       Array.from({ length: 8 }, () => store.claimOnDemand(g, 3, { create: true })),
     );
     expect(results.filter(Boolean)).toHaveLength(3);
+  });
+
+  it("rows generated before coverage was recorded are queued for regeneration once", async () => {
+    const legacy = group("legacy_cov");
+    const fresh = group("fresh_cov");
+    for (const g of [legacy, fresh]) {
+      await store.claimOnDemand(g, 3, { create: true });
+    }
+    const putAt = async (g: string, coverage?: { partial: boolean; factsRead: number }) =>
+      store.put(
+        g,
+        { state: "ready", payload: [hl("hl_1", ["e_1"])], ...(coverage ? { coverage } : {}) },
+        new Date(Date.now() + 60_000), // a start after any mark: the put clears it
+        (await store.get(g))!.epoch,
+      );
+    await putAt(legacy); // no coverage recorded: facts_read NULL, like a pre-migration row
+    await putAt(fresh, { partial: false, factsRead: 5 });
+    expect((await store.get(legacy))?.staleSince).toBeNull();
+    await ensureReceiptSchema(sql); // the next boot
+    expect((await store.get(legacy))?.staleSince).toBeInstanceOf(Date);
+    expect((await store.get(fresh))?.staleSince).toBeNull();
   });
 
   it("acquireLease under concurrency has exactly one winner", async () => {

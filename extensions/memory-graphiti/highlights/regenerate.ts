@@ -65,16 +65,24 @@ async function regenerateLeased(
   const startedAt = await deps.store.clock();
 
   const facts: MemoryFact[] = [];
+  // Partial = the listing stopped at the backend ceiling with facts left: the model
+  // never saw them. Stored with the result, so it is never served as complete.
+  let partial = false;
   try {
     let cursor: string | undefined;
+    let exhausted = false;
     for (let page = 0; page < LIST_PAGES_MAX; page++) {
       const res = await deps.client.listFacts(groupId, { includeInvalid: false, cursor });
       facts.push(...res.facts);
+      partial = res.truncated === true;
       if (!res.nextCursor) {
+        exhausted = true;
         break;
       }
       cursor = res.nextCursor;
     }
+    // Our own page cap stopped the read with facts left: partial, whatever the backend said.
+    partial ||= !exhausted;
   } catch (err) {
     if (err instanceof MemoryCapabilityError) {
       return "backend_unsupported";
@@ -83,6 +91,12 @@ async function regenerateLeased(
     return "error";
   }
 
+  if (partial) {
+    // Counts only: never the group, ids or content.
+    deps.logger.warn(
+      `memory-highlights: generation built from a partial fact list (facts_read=${facts.length})`,
+    );
+  }
   const result = await deps.generate(facts);
   if (result.state === "unavailable" && (before.state === "ready" || before.state === "empty")) {
     deps.logger.info("memory-highlights: regeneration failed; previous highlights kept");
@@ -93,6 +107,7 @@ async function regenerateLeased(
     {
       state: result.state,
       payload: result.state === "ready" ? result.highlights : [],
+      coverage: { partial, factsRead: facts.length },
     },
     startedAt,
     before.epoch,

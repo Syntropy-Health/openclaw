@@ -23,11 +23,21 @@ export type HighlightRow = {
    * on ANY instance during the run wins (the group lock is per process).
    */
   epoch: string;
+  /**
+   * True when the generation was built from a PARTIAL fact list (the listing hit the
+   * backend ceiling with facts left), so the highlights may miss facts. Never
+   * presented as complete. False for rows not (yet) generated.
+   */
+  partial: boolean;
+  /** How many facts the generation read; null before the first generation. */
+  factsRead: number | null;
 };
 
 export type HighlightWrite = {
   state: HighlightCacheState;
   payload: Highlight[];
+  /** Coverage of the fact list this result was built from. Default: complete, unknown count. */
+  coverage?: { partial: boolean; factsRead: number };
 };
 
 /** The per-group highlight cache (A&D §5): lp_memory_highlights. */
@@ -85,6 +95,8 @@ type Row = {
   stale_since: Date | string | null;
   source_fact_ids: string[];
   epoch: string | number | bigint;
+  partial: boolean;
+  facts_read: number | null;
 };
 
 const str = (v: unknown): string => (typeof v === "string" ? v : String(v ?? ""));
@@ -148,7 +160,8 @@ export function createPgHighlightStore(sql: Sql, opts: HighlightStoreOptions = {
 
     async get(groupId) {
       const rows = await sql<Row>`
-        SELECT state, payload, generated_at, stale_since, source_fact_ids, epoch::text AS epoch
+        SELECT state, payload, generated_at, stale_since, source_fact_ids, epoch::text AS epoch,
+               partial, facts_read
         FROM lp_memory_highlights WHERE group_id = ${groupId}`;
       const r = rows[0];
       if (!r) {
@@ -179,6 +192,9 @@ export function createPgHighlightStore(sql: Sql, opts: HighlightStoreOptions = {
         staleSince,
         sourceFactIds: r.source_fact_ids,
         epoch: str(r.epoch),
+        partial: r.partial === true,
+        factsRead:
+          r.facts_read === null || r.facts_read === undefined ? null : Number(r.facts_read),
       };
     },
 
@@ -194,7 +210,9 @@ export function createPgHighlightStore(sql: Sql, opts: HighlightStoreOptions = {
           generated_at = now(),
           source_fact_ids = ${ids}::text[],
           stale_since = CASE WHEN stale_since > ${startedAt} THEN stale_since ELSE NULL END,
-          regen_lease_until = NULL
+          regen_lease_until = NULL,
+          partial = ${result.coverage?.partial ?? false},
+          facts_read = ${result.coverage?.factsRead ?? null}::int
         WHERE group_id = ${groupId} AND epoch = ${epoch}::bigint
         RETURNING group_id`;
       return rows.length === 1;

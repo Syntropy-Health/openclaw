@@ -207,6 +207,20 @@ export async function ensureReceiptSchema(sql: Sql): Promise<void> {
       regen_lease_until TIMESTAMPTZ
     )`,
   );
+  // Coverage of the fact list a generation was built from: partial when the listing
+  // stopped at the backend ceiling with facts left (the model never saw them).
+  await retryDdlRace(
+    () => sql`
+    ALTER TABLE lp_memory_highlights
+      ADD COLUMN IF NOT EXISTS partial BOOLEAN NOT NULL DEFAULT false,
+      ADD COLUMN IF NOT EXISTS facts_read INT`,
+  );
+  // Rows generated before coverage was recorded (facts_read NULL on a generated row)
+  // have UNKNOWN coverage: mark them stale once so the worker regenerates them with
+  // real coverage, instead of serving partial=false indefinitely. A no-op afterwards.
+  await sql`
+    UPDATE lp_memory_highlights SET stale_since = now()
+    WHERE state IN ('ready', 'empty') AND facts_read IS NULL AND stale_since IS NULL`;
   // A forget blocks recall writes for the group briefly, so a turn whose recall
   // was already in flight cannot re-create a record after the erase.
   await retryDdlRace(
