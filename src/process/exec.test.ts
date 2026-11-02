@@ -50,24 +50,9 @@ describe("runCommandWithTimeout", () => {
     expect(result.code).not.toBe(0);
   });
 
-  it("resets no output timer when command keeps emitting output", async () => {
-    const result = await runCommandWithTimeout(
-      [
-        process.execPath,
-        "-e",
-        'let i=0; const t=setInterval(() => { process.stdout.write("."); i += 1; if (i >= 2) { clearInterval(t); process.exit(0); } }, 10);',
-      ],
-      {
-        timeoutMs: 5_000,
-        noOutputTimeoutMs: 160,
-      },
-    );
-
-    expect(result.code).toBe(0);
-    expect(result.termination).toBe("exit");
-    expect(result.noOutputTimedOut).toBe(false);
-    expect(result.stdout.length).toBeGreaterThanOrEqual(2);
-  });
+  // The no-output timer's reset logic is tested on a fake clock in
+  // exec.no-output-timer.test.ts. A real child cannot test it reliably: the timer arms
+  // at spawn, so a slow cold start fails it on busy runners (Windows CI).
 
   it("reports global timeout termination when overall timeout elapses", async () => {
     const result = await runCommandWithTimeout(

@@ -36,7 +36,8 @@ vi.mock("../media/store.js", async (importOriginal) => {
   return {
     ...actual,
     saveMediaBuffer: vi.fn(async (...args: Parameters<typeof actual.saveMediaBuffer>) => {
-      saveMediaBufferSpy(...args);
+      // Awaited, so a test can make the save slow (as disk I/O is on a busy runner).
+      await saveMediaBufferSpy(...args);
       return actual.saveMediaBuffer(...args);
     }),
   };
@@ -88,17 +89,29 @@ vi.mock("./session.js", () => {
 
 import { monitorWebInbox, resetWebInboundDedupe } from "./inbound.js";
 
+/**
+ * Wait for the inbound message as an event rather than against a 250 ms polling deadline:
+ * delivery includes a real media write, which on a busy CI runner (Windows especially)
+ * can outlast any small fixed budget. The 10 s bound is a generous backstop that fails
+ * with a clear message if delivery breaks, rather than the 120 s test timeout.
+ */
+const DELIVERY_BACKSTOP_MS = 10_000;
 async function waitForMessage(onMessage: ReturnType<typeof vi.fn>) {
-  await vi.waitFor(() => expect(onMessage).toHaveBeenCalledTimes(1), {
-    interval: 1,
-    timeout: 250,
-  });
+  const deadline = Date.now() + DELIVERY_BACKSTOP_MS;
+  while (onMessage.mock.calls.length === 0) {
+    if (Date.now() > deadline) {
+      throw new Error(`onMessage was not called within ${DELIVERY_BACKSTOP_MS} ms`);
+    }
+    await new Promise((r) => setImmediate(r));
+  }
+  expect(onMessage).toHaveBeenCalledTimes(1);
   return onMessage.mock.calls[0][0];
 }
 
 describe("web inbound media saves with extension", () => {
   beforeEach(() => {
-    saveMediaBufferSpy.mockClear();
+    // Reset, not just clear: a queued slow-save implementation must not leak into the next test.
+    saveMediaBufferSpy.mockReset();
     resetWebInboundDedupe();
   });
 
@@ -220,6 +233,32 @@ describe("web inbound media saves with extension", () => {
     const lastCall = saveMediaBufferSpy.mock.calls.at(-1);
     expect(lastCall?.[3]).toBe(1 * 1024 * 1024);
 
+    await listener.close();
+  });
+
+  it("a slow media save still delivers the message (a busy runner's disk is slow)", async () => {
+    // RED for the old helper: a 250 ms polling deadline failed whenever the save took longer.
+    saveMediaBufferSpy.mockImplementationOnce(() => new Promise((r) => setTimeout(r, 400)));
+    const onMessage = vi.fn();
+    const listener = await monitorWebInbox({ verbose: false, onMessage });
+    const { createWaSocket } = await import("./session.js");
+    const realSock = await (
+      createWaSocket as unknown as () => Promise<{
+        ev: import("node:events").EventEmitter;
+      }>
+    )();
+    realSock.ev.emit("messages.upsert", {
+      type: "notify",
+      messages: [
+        {
+          key: { id: "img_slow", fromMe: false, remoteJid: "444@s.whatsapp.net" },
+          message: { imageMessage: { mimetype: "image/jpeg" } },
+          messageTimestamp: 1_700_000_005,
+        },
+      ],
+    });
+    const msg = await waitForMessage(onMessage);
+    expect(path.extname(msg.mediaPath as string)).toBe(".jpg");
     await listener.close();
   });
 });
