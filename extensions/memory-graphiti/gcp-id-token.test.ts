@@ -317,8 +317,12 @@ describe("flyOidcTokenFromSocket (a real Unix socket standing in for the Machine
     await Promise.all(servers.splice(0).map((s) => new Promise((r) => s.close(r))));
   });
   const serve = async (reply: (body: string) => { status: number; body: string }) => {
-    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "fly-api-"));
-    const sock = path.join(dir, "api.sock");
+    // A Unix socket on POSIX; Windows has no AF_UNIX path here, so use a named pipe
+    // (node's http client takes either as socketPath).
+    const sock =
+      process.platform === "win32"
+        ? `\\\\.\\pipe\\fly-api-${process.pid}-${Math.random().toString(36).slice(2)}`
+        : path.join(fs.mkdtempSync(path.join(os.tmpdir(), "fly-api-")), "api.sock");
     const got: { method?: string; url?: string; body?: string } = {};
     const server = http.createServer((req, res) => {
       let body = "";
@@ -331,7 +335,11 @@ describe("flyOidcTokenFromSocket (a real Unix socket standing in for the Machine
       });
     });
     servers.push(server);
-    await new Promise<void>((r) => server.listen(sock, () => r()));
+    // Reject on a listen error, so an unusable socket fails fast instead of hanging.
+    await new Promise<void>((resolve, reject) => {
+      server.once("error", reject);
+      server.listen(sock, () => resolve());
+    });
     return { sock, got };
   };
 
