@@ -113,6 +113,28 @@ export function describeHighlightStoreContract(
       expect(row?.generatedAt).toBeInstanceOf(Date);
     });
 
+    it("coverage round-trips: a partial generation is stored and read back as partial", async () => {
+      const g = group("coverage");
+      await h.store.claimOnDemand(g, 3, { create: true });
+      // Before any generation: not partial, no count.
+      expect(await h.store.get(g)).toMatchObject({ partial: false, factsRead: null });
+      await putNow(g, {
+        state: "ready",
+        payload: [hl("hl_1", ["e_1"])],
+        coverage: { partial: true, factsRead: 2000 },
+      });
+      expect(await h.store.get(g)).toMatchObject({ partial: true, factsRead: 2000 });
+      // A later complete generation clears it; no coverage given means complete, count unknown.
+      await putNow(g, {
+        state: "ready",
+        payload: [hl("hl_1", ["e_1"])],
+        coverage: { partial: false, factsRead: 12 },
+      });
+      expect(await h.store.get(g)).toMatchObject({ partial: false, factsRead: 12 });
+      await putNow(g, { state: "empty", payload: [] });
+      expect(await h.store.get(g)).toMatchObject({ partial: false, factsRead: null });
+    });
+
     it("get returns highlights in the contract's key order", async () => {
       const g = group("order");
       await ready(g, [hl("hl_1", ["e_1"])]);

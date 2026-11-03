@@ -50,6 +50,9 @@ const view = (o: {
   reason?: Reason | null;
   highlights?: Highlight[];
   fallback?: HighlightSource[] | null;
+  /** Built from (or showing) a fact list that stopped at the backend ceiling. */
+  partial?: boolean;
+  factsRead?: number | null;
 }) => ({
   contract: HIGHLIGHTS_CONTRACT,
   state: o.state,
@@ -61,29 +64,37 @@ const view = (o: {
   reason: o.state === "unavailable" ? (o.reason ?? null) : null,
   highlights: o.state === "ready" ? (o.highlights ?? []) : [],
   fallback_facts: o.state === "unavailable" ? (o.fallback ?? null) : null,
+  // Additive fields: true when the highlights (or the fallback facts) come from a
+  // fact list that stopped at the backend ceiling, so facts may be missing. A client
+  // must never present partial highlights as complete. facts_read null on ready/empty
+  // means the coverage is not known yet (a row from before coverage was recorded; it
+  // is queued for regeneration).
+  partial: o.partial ?? false,
+  facts_read: o.factsRead ?? null,
 });
 
 export function createHighlightsHandler(deps: HighlightsRouteDeps) {
   const now = deps.now ?? Date.now;
   // Per-group fallback cache: a user refreshing an unavailable view must not turn
   // each GET into another full fact listing at the backend.
-  const fallbackCache = new Map<string, { at: number; facts: HighlightSource[] }>();
-  const cachedFallback = (group: string): HighlightSource[] | undefined => {
+  type Fallback = { facts: HighlightSource[]; partial: boolean; factsRead: number };
+  const fallbackCache = new Map<string, { at: number } & Fallback>();
+  const cachedFallback = (group: string): Fallback | undefined => {
     const hit = fallbackCache.get(group);
     if (hit && now() - hit.at < FALLBACK_CACHE_MS) {
-      return hit.facts;
+      return hit;
     }
     fallbackCache.delete(group);
     return undefined;
   };
-  const rememberFallback = (group: string, facts: HighlightSource[]) => {
+  const rememberFallback = (group: string, fb: Fallback) => {
     if (fallbackCache.size >= FALLBACK_CACHE_MAX) {
       const oldest = fallbackCache.keys().next().value;
       if (oldest !== undefined) {
         fallbackCache.delete(oldest);
       }
     }
-    fallbackCache.set(group, { at: now(), facts });
+    fallbackCache.set(group, { at: now(), ...fb });
   };
   return async (req: IncomingMessage, res: ServerResponse): Promise<void> => {
     if ((req.method ?? "").toUpperCase() !== "GET") {
@@ -124,6 +135,8 @@ export function createHighlightsHandler(deps: HighlightsRouteDeps) {
           generatedAt: row.generatedAt,
           stale: row.staleSince !== null,
           highlights: row.payload,
+          partial: row.partial,
+          factsRead: row.factsRead,
         }),
       );
       return;
@@ -131,32 +144,48 @@ export function createHighlightsHandler(deps: HighlightsRouteDeps) {
     if (row?.state === "empty") {
       answer(
         "empty",
-        view({ state: "empty", generatedAt: row.generatedAt, stale: row.staleSince !== null }),
+        view({
+          state: "empty",
+          generatedAt: row.generatedAt,
+          stale: row.staleSince !== null,
+          partial: row.partial,
+          factsRead: row.factsRead,
+        }),
       );
       return;
     }
 
     // No row yet, or the last generation failed: serve the raw recent facts (F3)
     // and queue a generation, unless the backend cannot list facts at all.
-    let fallback: HighlightSource[] | null = cachedFallback(group) ?? null;
-    if (!fallback) {
+    let listed: Fallback | null = cachedFallback(group) ?? null;
+    if (!listed) {
       try {
-        fallback = recentFacts((await h.client.listFacts(group, { includeInvalid: false })).facts);
-        rememberFallback(group, fallback);
+        const res = await h.client.listFacts(group, { includeInvalid: false });
+        listed = {
+          facts: recentFacts(res.facts),
+          partial: res.truncated === true,
+          factsRead: res.facts.length,
+        };
+        rememberFallback(group, listed);
       } catch (err) {
         if (err instanceof MemoryCapabilityError) {
           answer("unavailable", view({ state: "unavailable", reason: "backend_unsupported" }));
           return;
         }
-        fallback = null;
+        listed = null;
       }
     }
+    const fallback = listed?.facts ?? null;
+    const coverage = { partial: listed?.partial ?? false, factsRead: listed?.factsRead ?? null };
     let queued: boolean;
     try {
       queued = await h.requestNow(group);
     } catch {
       // Could not even record the request: a store failure, said as such.
-      answer("unavailable", view({ state: "unavailable", reason: "store_error", fallback }));
+      answer(
+        "unavailable",
+        view({ state: "unavailable", reason: "store_error", fallback, ...coverage }),
+      );
       return;
     }
     // Pending = a generation was just queued, or one is already marked (a claim
@@ -171,6 +200,7 @@ export function createHighlightsHandler(deps: HighlightsRouteDeps) {
         // Not pending and no slot left: the last generation failed.
         reason: pending ? null : "summariser_error",
         fallback,
+        ...coverage,
       }),
     );
   };

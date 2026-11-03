@@ -59,6 +59,35 @@ function setup(pages: MemoryFact[][] = [[fact("e_1")]]) {
   return { store, listFacts, generate, logger, deps };
 }
 
+describe("regenerateGroup coverage (partial fact lists)", () => {
+  it("RED: a listing that stopped at the ceiling is stored as partial with the count, and warned (count only)", async () => {
+    const { deps, store, logger } = setup();
+    deps.client.listFacts = vi.fn(
+      async (): Promise<ListFactsResult> => ({
+        facts: [fact("e_1"), fact("e_2"), fact("e_3")],
+        nextCursor: "more",
+        truncated: true,
+      }),
+    );
+    await store.claimOnDemand(G, 3, { create: true });
+    expect(await regenerateGroup(G, deps)).toBe("ready");
+    expect(await store.get(G)).toMatchObject({ partial: true, factsRead: 3 });
+    const warned = logger.warn.mock.calls.map((c) => String(c[0]));
+    expect(warned).toContain(
+      "memory-highlights: generation built from a partial fact list (facts_read=3)",
+    );
+    expect(warned.join(" ")).not.toContain(G);
+  });
+
+  it("a complete listing is stored as complete, with no warning", async () => {
+    const { deps, store, logger } = setup([[fact("e_1"), fact("e_2")]]);
+    await store.claimOnDemand(G, 3, { create: true });
+    expect(await regenerateGroup(G, deps)).toBe("ready");
+    expect(await store.get(G)).toMatchObject({ partial: false, factsRead: 2 });
+    expect(logger.warn).not.toHaveBeenCalled();
+  });
+});
+
 describe("regenerateGroup", () => {
   it("a group with no row is not generated (gone): no listing, no model", async () => {
     const { deps, listFacts, generate } = setup();
@@ -83,6 +112,9 @@ describe("regenerateGroup", () => {
     expect(listFacts).toHaveBeenCalledTimes(LIST_PAGES_MAX);
     expect(listFacts.mock.calls[0][1]).toMatchObject({ includeInvalid: false });
     expect(generate.mock.calls[0][0].map((f) => f.id)).toEqual(["a"]);
+    // Our own page cap stopped the read with a cursor left (the backend did not say
+    // truncated): still partial, never served as complete.
+    expect(await store.get(G)).toMatchObject({ partial: true, factsRead: 1 });
   });
 
   it("a failed run keeps the highlights the user already had, and stays stale for a retry", async () => {
