@@ -221,24 +221,54 @@ const maxOldSpaceSizeMb = (() => {
   return null;
 })();
 
+// Every lane writes a JSON report: a lane only passes when it exits 0 AND its
+// report exists and says it succeeded. Vitest can exit 0 after its workers die
+// (measured: 4 worker heap OOMs, exit 0, no summary, no report), so the exit
+// code alone cannot be trusted. Without OPENCLAW_VITEST_REPORT_DIR the reports
+// go to a temporary directory.
+let tempReportDir = null;
 function resolveReportDir() {
   const raw = process.env.OPENCLAW_VITEST_REPORT_DIR?.trim();
-  if (!raw) {
-    return null;
+  if (raw) {
+    try {
+      fs.mkdirSync(raw, { recursive: true });
+      return raw;
+    } catch {
+      // Fall through to a temporary directory: the report is still required.
+    }
   }
+  tempReportDir ??= fs.mkdtempSync(path.join(os.tmpdir(), "openclaw-vitest-reports-"));
+  return tempReportDir;
+}
+
+/** Exit code for a finished lane run, from its process exit and its JSON report. */
+function laneExitCode(label, code, signal, reportFile) {
+  if (signal) {
+    console.error(`[test-parallel] run "${label}" was killed by ${signal}`);
+    return 1;
+  }
+  if (code !== 0) {
+    return code ?? 1;
+  }
+  let report;
   try {
-    fs.mkdirSync(raw, { recursive: true });
+    report = JSON.parse(fs.readFileSync(reportFile, "utf8"));
   } catch {
-    return null;
+    console.error(
+      `[test-parallel] run "${label}" exited 0 but wrote no readable report (${reportFile}). ` +
+        "A vitest worker likely crashed (e.g. heap out of memory); treating the run as failed.",
+    );
+    return 1;
   }
-  return raw;
+  if (report?.success !== true || Number(report?.numFailedTestSuites ?? 0) > 0) {
+    console.error(`[test-parallel] run "${label}" exited 0 but its report says it failed`);
+    return 1;
+  }
+  return 0;
 }
 
 function buildReporterArgs(entry, extraArgs) {
   const reportDir = resolveReportDir();
-  if (!reportDir) {
-    return [];
-  }
 
   // Vitest supports both `--shard 1/2` and `--shard=1/2`. We use it in the
   // split-arg form, so we need to read the next arg to avoid overwriting reports.
@@ -266,7 +296,7 @@ function buildReporterArgs(entry, extraArgs) {
   if (process.env.OPENCLAW_TEST_HANG_DUMP === "1") {
     base.push("--reporter=hanging-process");
   }
-  return base;
+  return { args: base, outputFile };
 }
 
 // Per-run watchdog. A vitest fork-worker that finishes its tests but cannot
@@ -298,7 +328,10 @@ const dumpProcessTree = () => {
 const runOnce = (entry, extraArgs = []) =>
   new Promise((resolve) => {
     const maxWorkers = maxWorkersForRun(entry.name);
-    const reporterArgs = buildReporterArgs(entry, extraArgs);
+    const { args: reporterArgs, outputFile: reportFile } = buildReporterArgs(entry, extraArgs);
+    const label = extraArgs.length ? `${entry.name} ${extraArgs.join(" ")}`.trim() : entry.name;
+    // A report left over from an earlier run must not pass this one.
+    fs.rmSync(reportFile, { force: true });
     const args = maxWorkers
       ? [
           ...entry.args,
@@ -341,7 +374,6 @@ const runOnce = (entry, extraArgs = []) =>
 
     let watchdog;
     if (watchdogEnabled) {
-      const label = extraArgs.length ? `${entry.name} ${extraArgs.join(" ")}`.trim() : entry.name;
       watchdog = setTimeout(() => {
         console.error(
           `\n[test-parallel] WATCHDOG: run "${label}" exceeded ${watchdogMs}ms without exiting — ` +
@@ -377,7 +409,7 @@ const runOnce = (entry, extraArgs = []) =>
         clearTimeout(watchdog);
       }
       children.delete(child);
-      resolve(code ?? (signal ? 1 : 0));
+      resolve(laneExitCode(label, code, signal, reportFile));
     });
   });
 
