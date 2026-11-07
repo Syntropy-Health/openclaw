@@ -7,6 +7,7 @@
  */
 
 import type postgres from "postgres";
+import { isHttpShapedSession } from "../shared/http-channels.js";
 import { deriveScopeKey } from "../shared/scope-key.js";
 import { deriveIdentityPeer } from "../shared/session-key.js";
 import type { GroupIdContext } from "./config.js";
@@ -100,6 +101,12 @@ export async function resolveVerifiedExternalId(
 ): Promise<string | null> {
   const sessionKey = ctx.sessionKey ?? "";
   const channel = ctx.messageProvider ?? deriveChannel(sessionKey);
+  const sub = typeof ctx.externalId === "string" ? ctx.externalId.trim() : "";
+  // As the gate: an unverified HTTP-shaped session is unidentified (its device
+  // id and session-key tail are client-chosen), so it never selects a row.
+  if (!sub && isHttpShapedSession(channel, sessionKey)) {
+    return null;
+  }
   const peerId = deriveIdentityPeer(ctx);
   if (!peerId || peerId === "main" || peerId === "unknown") {
     return null;
@@ -116,7 +123,6 @@ export async function resolveVerifiedExternalId(
   if (!externalId) {
     return null;
   }
-  const sub = typeof ctx.externalId === "string" ? ctx.externalId.trim() : "";
   if (sub && sub !== externalId) {
     return null;
   }
@@ -125,11 +131,17 @@ export async function resolveVerifiedExternalId(
 
 export async function resolveIdentityScopeKey(
   sql: postgres.Sql,
-  ctx: GroupIdContext,
+  ctx: GroupIdContext & { deviceId?: string | null },
 ): Promise<string | null> {
   const sessionKey = ctx.sessionKey ?? "";
   const channel = ctx.messageProvider ?? deriveChannel(sessionKey);
-  const peerId = derivePeerId(sessionKey);
+  // Same rules as auth-memory-gate: an unverified HTTP-shaped session is
+  // unidentified (its session-key tail is client-chosen), and the peer is the
+  // gate's canonical peer. A verified turn never reaches here (externalIdScopeKey).
+  if (isHttpShapedSession(channel, sessionKey)) {
+    return null;
+  }
+  const peerId = deriveIdentityPeer(ctx);
 
   if (!peerId || peerId === "main" || peerId === "unknown") {
     return null;
