@@ -225,7 +225,9 @@ const maxOldSpaceSizeMb = (() => {
 // report exists and says it succeeded. Vitest can exit 0 after its workers die
 // (measured: 4 worker heap OOMs, exit 0, no summary, no report), so the exit
 // code alone cannot be trusted. Without OPENCLAW_VITEST_REPORT_DIR the reports
-// go to a temporary directory.
+// go to a per-run directory under node_modules/.cache, removed on exit. It is a
+// RELATIVE path, so a profile path with spaces cannot split the argument under
+// the Windows shell.
 let tempReportDir = null;
 function resolveReportDir() {
   const raw = process.env.OPENCLAW_VITEST_REPORT_DIR?.trim();
@@ -233,12 +235,31 @@ function resolveReportDir() {
     try {
       fs.mkdirSync(raw, { recursive: true });
       return raw;
-    } catch {
-      // Fall through to a temporary directory: the report is still required.
+    } catch (err) {
+      console.warn(
+        `[test-parallel] cannot use OPENCLAW_VITEST_REPORT_DIR=${raw} (${String(err)}); ` +
+          "writing lane reports to a temporary directory instead",
+      );
     }
   }
-  tempReportDir ??= fs.mkdtempSync(path.join(os.tmpdir(), "openclaw-vitest-reports-"));
+  if (!tempReportDir) {
+    tempReportDir = path.join(
+      "node_modules",
+      ".cache",
+      "openclaw-vitest-reports",
+      String(process.pid),
+    );
+    fs.mkdirSync(tempReportDir, { recursive: true });
+  }
   return tempReportDir;
+}
+
+/** Exit, removing this run's temporary report directory (never a configured one). */
+function exitRun(code) {
+  if (tempReportDir) {
+    fs.rmSync(tempReportDir, { recursive: true, force: true });
+  }
+  process.exit(code);
 }
 
 /** Exit code for a finished lane run, from its process exit and its JSON report. */
@@ -482,15 +503,15 @@ if (passthroughArgs.length > 0) {
 const parallelCodes = await Promise.all(parallelRuns.map(run));
 const failedParallel = parallelCodes.find((code) => code !== 0);
 if (failedParallel !== undefined) {
-  process.exit(failedParallel);
+  exitRun(failedParallel);
 }
 
 for (const entry of serialRuns) {
   // eslint-disable-next-line no-await-in-loop
   const code = await run(entry);
   if (code !== 0) {
-    process.exit(code);
+    exitRun(code);
   }
 }
 
-process.exit(0);
+exitRun(0);

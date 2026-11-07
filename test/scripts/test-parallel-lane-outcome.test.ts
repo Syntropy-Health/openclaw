@@ -25,7 +25,7 @@ function runWithStubPnpm(stubBody: string, env: Record<string, string> = {}) {
     encoding: "utf8",
     timeout: 60_000,
   });
-  return res.status;
+  return { status: res.status, stderr: res.stderr ?? "", pid: res.pid };
 }
 
 // Writes a vitest-style JSON report to the path after --outputFile (if any).
@@ -43,15 +43,22 @@ afterEach(() => {
 
 describe.skipIf(process.platform === "win32")("test-parallel lane outcome", () => {
   it("fails the run when a lane exits 0 without producing its report", () => {
-    expect(runWithStubPnpm("exit 0")).not.toBe(0);
+    const res = runWithStubPnpm("exit 0");
+    expect(res.status).toBe(1);
+    expect(res.stderr).toContain("exited 0 but wrote no readable report");
   });
 
+  // Regression guard (already handled before the report check): a signal fails the run.
   it("fails the run when a lane is killed by a signal", () => {
-    expect(runWithStubPnpm("kill -9 $$")).not.toBe(0);
+    const res = runWithStubPnpm("kill -9 $$");
+    expect(res.status).toBe(1);
+    expect(res.stderr).toContain("was killed by SIGKILL");
   });
 
   it("fails the run when a lane's report says it failed", () => {
-    expect(runWithStubPnpm(writeReport(false))).not.toBe(0);
+    const res = runWithStubPnpm(writeReport(false));
+    expect(res.status).toBe(1);
+    expect(res.stderr).toContain("its report says it failed");
   });
 
   it("does not let a stale report from an earlier run pass a lane", () => {
@@ -63,10 +70,19 @@ describe.skipIf(process.platform === "win32")("test-parallel lane outcome", () =
         '{"success":true,"numFailedTestSuites":0,"testResults":[]}',
       );
     }
-    expect(runWithStubPnpm("exit 0", { OPENCLAW_VITEST_REPORT_DIR: reports })).not.toBe(0);
+    const res = runWithStubPnpm("exit 0", { OPENCLAW_VITEST_REPORT_DIR: reports });
+    expect(res.status).toBe(1);
+    expect(res.stderr).toContain("exited 0 but wrote no readable report");
   });
 
   it("passes when every lane exits 0 with a successful report", () => {
-    expect(runWithStubPnpm(writeReport(true))).toBe(0);
+    const res = runWithStubPnpm(writeReport(true));
+    expect(res.status).toBe(0);
+    // The run's own temporary report directory is removed on exit.
+    expect(
+      fs.existsSync(
+        path.join("node_modules", ".cache", "openclaw-vitest-reports", String(res.pid)),
+      ),
+    ).toBe(false);
   });
 });
