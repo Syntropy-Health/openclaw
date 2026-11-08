@@ -593,15 +593,15 @@ GETZEP_API_KEY=z_... ./scripts/test-identity-e2e.sh --setup
 
 The test suite covers 7 groups (~37 test cases):
 
-| Group                     | What it tests                                                                                            |
-| ------------------------- | -------------------------------------------------------------------------------------------------------- |
-| Session key parsing       | `deriveChannel`/`derivePeerId` agree across auth-memory-gate and memory-graphiti for all channel formats |
-| Hard gate flow            | Unregistered → `/register` → `/verify` lifecycle, gate inject + clear                                    |
-| Multi-channel convergence | Same user across WhatsApp + Slack shares `scope_key`; guest user isolated                                |
-| Zep Cloud isolation       | Episodes scoped to `userA` are not visible to `userB`                                                    |
-| messageProvider override  | `messageProvider` takes precedence over session key for channel derivation                               |
-| JWT verification          | Valid/invalid/expired tokens, missing `sub` claim                                                        |
-| Full pipeline agreement   | `resolveScope` and `resolveIdentityScopeKey` produce identical keys for all channels                     |
+| Group                     | What it tests                                                                                     |
+| ------------------------- | ------------------------------------------------------------------------------------------------- |
+| Session key parsing       | the shared `deriveChannel`/`derivePeerId` (used by every identity plugin) for all channel formats |
+| Hard gate flow            | Unregistered → `/register` → `/verify` lifecycle, gate inject + clear                             |
+| Multi-channel convergence | Same user across WhatsApp + Slack shares `scope_key`; guest user isolated                         |
+| Zep Cloud isolation       | Episodes scoped to `userA` are not visible to `userB`                                             |
+| messageProvider override  | `messageProvider` takes precedence over session key for channel derivation                        |
+| JWT verification          | Valid/invalid/expired tokens, missing `sub` claim                                                 |
+| Full pipeline agreement   | `resolveScope` and `resolveIdentityScopeKey` produce identical keys for all channels              |
 
 ### Extension-Level Integration Test
 

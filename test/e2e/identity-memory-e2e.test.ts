@@ -26,8 +26,6 @@ import { createHmac } from "node:crypto";
 import { describe, test, expect, beforeAll, afterAll } from "vitest";
 // Import from auth-memory-gate — scope resolution and formatting
 import {
-  deriveChannel as gateChannel,
-  derivePeerId as gatePeerId,
   resolveScope,
   formatScopeBlock,
   formatHardGateSystemPrompt,
@@ -37,13 +35,11 @@ import {
 // Import from memory-graphiti — config and group derivation
 import { deriveGroupId } from "../../extensions/memory-graphiti/config.js";
 // Import from memory-graphiti — independent identity resolution
-import {
-  deriveChannel as graphitiChannel,
-  derivePeerId as graphitiPeerId,
-  resolveIdentityScopeKey,
-} from "../../extensions/memory-graphiti/identity.js";
+import { resolveIdentityScopeKey } from "../../extensions/memory-graphiti/identity.js";
 // JWT verification from persist-user-identity
 import { verifyToken } from "../../extensions/persist-user-identity/src/jwt.js";
+// Session-key parsing: the ONE shared implementation every identity plugin uses
+import { deriveChannel, derivePeerId } from "../../extensions/shared/session-key.js";
 // Test helpers
 import {
   TEST_DB_URL,
@@ -124,24 +120,20 @@ describe("session key parsing — cross-plugin agreement", () => {
 
   for (const tc of testCases) {
     test(`${tc.name}: auth-memory-gate and memory-graphiti agree on channel`, () => {
-      expect(gateChannel(tc.sessionKey)).toBe(tc.expectedChannel);
-      expect(graphitiChannel(tc.sessionKey)).toBe(tc.expectedChannel);
+      expect(deriveChannel(tc.sessionKey)).toBe(tc.expectedChannel);
     });
 
     test(`${tc.name}: auth-memory-gate and memory-graphiti agree on peerId`, () => {
-      expect(gatePeerId(tc.sessionKey)).toBe(tc.expectedPeerId);
-      expect(graphitiPeerId(tc.sessionKey)).toBe(tc.expectedPeerId);
+      expect(derivePeerId(tc.sessionKey)).toBe(tc.expectedPeerId);
     });
   }
 
   test("edge case: empty session key returns 'unknown' channel", () => {
-    expect(gateChannel("")).toBe("unknown");
-    expect(graphitiChannel("")).toBe("unknown");
+    expect(deriveChannel("")).toBe("unknown");
   });
 
   test("edge case: non-agent prefix returns raw key as peerId", () => {
-    expect(gatePeerId("some-random-key")).toBe("some-random-key");
-    expect(graphitiPeerId("some-random-key")).toBe("some-random-key");
+    expect(derivePeerId("some-random-key")).toBe("some-random-key");
   });
 });
 
@@ -512,8 +504,8 @@ describe("messageProvider override priority", () => {
       messageProvider: "whatsapp",
     };
 
-    const gateChannelResult = ctx.messageProvider ?? gateChannel(ctx.sessionKey);
-    const graphitiChannelResult = ctx.messageProvider ?? graphitiChannel(ctx.sessionKey);
+    const gateChannelResult = ctx.messageProvider ?? deriveChannel(ctx.sessionKey);
+    const graphitiChannelResult = ctx.messageProvider ?? deriveChannel(ctx.sessionKey);
 
     expect(gateChannelResult).toBe("whatsapp");
     expect(graphitiChannelResult).toBe("whatsapp");
