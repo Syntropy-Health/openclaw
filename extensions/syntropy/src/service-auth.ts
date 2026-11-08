@@ -17,7 +17,7 @@
  *     `sub`, and is verifiable via Clerk's JWKS. SJ authorizes ONLY openclaw's
  *     `sub` (allow-list) AND `resource` == its canonical `/mcp` URI.
  *   - openclaw attaches `Authorization: Bearer <token>` to its outbound `/mcp`
- *     request (see {@link withServiceAuthBearer} / `ServiceAuthProvider.buildAuthHeaders`).
+ *     request (see `ServiceAuthProvider.buildAuthHeaders`).
  *
  * **Fail-closed:** in a deployed env (`NODE_ENV=production`) a missing machine
  * secret throws — we never emit an unauthenticated `/mcp` request. In dev the
@@ -264,16 +264,4 @@ export class ServiceAuthProvider {
     this.cached = null;
     this.generation += 1;
   }
-}
-
-/**
- * Convenience: attach the service-auth Bearer to a header bag using a provider.
- * The documented seam where the future MCP client / P1 matrix client wires the
- * M2M auth onto its outbound SJ `/mcp` request.
- */
-export async function withServiceAuthBearer(
-  provider: ServiceAuthProvider,
-  base?: Record<string, string>,
-): Promise<Record<string, string>> {
-  return provider.buildAuthHeaders(base);
 }

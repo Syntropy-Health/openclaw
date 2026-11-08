@@ -10,18 +10,15 @@
  *    Bearer to POST /v1/m2m_tokens.
  *  - Missing machine secret => fail-closed (getToken throws; no request emitted).
  *  - Token is cached and refreshed before `exp` (refresh-skew honored).
- *  - The Bearer is attached to the SJ /mcp request path (header builder + the
- *    callMcpToolWithServiceAuth seam in client.ts).
+ *  - The Bearer is attached by the provider's header builder.
  */
 
 import { generateKeyPairSync, createSign, createVerify } from "node:crypto";
 import { describe, test, expect, vi } from "vitest";
-import { callMcpToolWithServiceAuth } from "./client.js";
 import type { ServiceAuthConfig } from "./service-auth-config.js";
 import {
   ServiceAuthProvider,
   clerkBapiMint,
-  withServiceAuthBearer,
   DEFAULT_TOKEN_TTL_SECONDS,
   type MintFn,
 } from "./service-auth.js";
@@ -419,7 +416,7 @@ describe("clerkBapiMint — faithful createToken request", () => {
 });
 
 describe("Bearer attached to the SJ /mcp request path", () => {
-  test("buildAuthHeaders / withServiceAuthBearer attach Authorization: Bearer <token>", async () => {
+  test("buildAuthHeaders attaches Authorization: Bearer <token>", async () => {
     const expSec = Math.floor(Date.now() / 1000) + 3600;
     const token = makeJwt(SJ_MCP, expSec);
     const mint: MintFn = async () => ({ token, expiresAtMs: expSec * 1000 });
@@ -428,102 +425,5 @@ describe("Bearer attached to the SJ /mcp request path", () => {
     const headers = await provider.buildAuthHeaders({ "Content-Type": "application/json" });
     expect(headers.Authorization).toBe(`Bearer ${token}`);
     expect(headers["Content-Type"]).toBe("application/json");
-
-    const viaHelper = await withServiceAuthBearer(provider);
-    expect(viaHelper.Authorization).toBe(`Bearer ${token}`);
-  });
-
-  test("callMcpToolWithServiceAuth sends the M2M Bearer + correct JSON-RPC envelope to <baseUrl>/mcp/", async () => {
-    const expSec = Math.floor(Date.now() / 1000) + 3600;
-    const token = makeJwt(SJ_MCP, expSec);
-    const provider = { getToken: async () => token };
-
-    const captured: { url?: string; auth?: string; body?: Record<string, unknown> } = {};
-    const fetchMock = vi.fn(async (url: string, init: RequestInit) => {
-      captured.url = url;
-      captured.auth = (init.headers as Record<string, string>).Authorization;
-      captured.body = JSON.parse(String(init.body));
-      return new Response(
-        JSON.stringify({ result: { content: [{ type: "text", text: '{"ok":true}' }] } }),
-        {
-          status: 200,
-          headers: { "Content-Type": "application/json" },
-        },
-      );
-    });
-    vi.stubGlobal("fetch", fetchMock);
-    try {
-      const res = await callMcpToolWithServiceAuth(
-        "https://shrine-api-test.up.railway.app",
-        provider,
-        "get_health_profile",
-        { foo: "bar" },
-        { label: "Syntropy" },
-      );
-      // SJ serves MCP at /mcp/ only (Starlette Mount, no redirect).
-      expect(captured.url).toBe("https://shrine-api-test.up.railway.app/mcp/");
-      expect(captured.auth).toBe(`Bearer ${token}`);
-      // F6: assert the JSON-RPC envelope, not just URL + auth.
-      expect(captured.body?.jsonrpc).toBe("2.0");
-      expect(captured.body?.method).toBe("tools/call");
-      expect(captured.body?.params).toEqual({
-        name: "get_health_profile",
-        arguments: { foo: "bar" },
-      });
-      expect(res.ok).toBe(true);
-    } finally {
-      vi.unstubAllGlobals();
-    }
-  });
-
-  test("callMcpToolWithServiceAuth fails closed (no request) when provider throws", async () => {
-    const provider = {
-      getToken: async () => {
-        throw new Error("CLERK_MACHINE_SECRET_KEY is missing (production) — fail-closed");
-      },
-    };
-    const fetchMock = vi.fn();
-    vi.stubGlobal("fetch", fetchMock);
-    try {
-      const res = await callMcpToolWithServiceAuth(
-        "https://x",
-        provider,
-        "get_health_profile",
-        {},
-        {
-          label: "Syntropy",
-        },
-      );
-      expect(res.ok).toBe(false);
-      expect(res.error).toMatch(/service-auth failed/);
-      // Fail-closed: no outbound /mcp request was made.
-      expect(fetchMock).not.toHaveBeenCalled();
-    } finally {
-      vi.unstubAllGlobals();
-    }
-  });
-
-  test("callMcpToolWithServiceAuth end-to-end fail-closed with a real provider missing the secret", async () => {
-    // Composition test (F5/F8 adjacent): a real ServiceAuthProvider with no
-    // machine secret, passed through the seam, must yield no request.
-    const provider = new ServiceAuthProvider(
-      cfg({ machineSecretKey: undefined, isProduction: true }),
-    );
-    const fetchMock = vi.fn();
-    vi.stubGlobal("fetch", fetchMock);
-    try {
-      const res = await callMcpToolWithServiceAuth(
-        "https://shrine-api-test.up.railway.app",
-        provider,
-        "get_health_profile",
-        {},
-        { label: "Syntropy" },
-      );
-      expect(res.ok).toBe(false);
-      expect(res.error).toMatch(/service-auth failed/);
-      expect(fetchMock).not.toHaveBeenCalled();
-    } finally {
-      vi.unstubAllGlobals();
-    }
   });
 });
