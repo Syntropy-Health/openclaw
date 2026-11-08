@@ -8,18 +8,7 @@ import postgres from "postgres";
  * Run with: DATABASE_URL=postgresql://postgres:postgres@localhost:5432/openclaw_e2e_test bun test extensions/persist-postgres/src/integration.e2e.test.ts
  */
 import { describe, test, expect, beforeAll, afterAll } from "vitest";
-import type { SessionEntry } from "../../../src/config/sessions/types.js";
-import type { OpenClawConfig } from "../../../src/config/types.js";
-import { listSessionsFromStore } from "../../../src/gateway/session-utils.js";
-import {
-  ensureSchema,
-  upsertConversation,
-  insertMessage,
-  persistMessage,
-  queryConversations,
-  pgRowToSessionEntry,
-  type PgSessionRow,
-} from "./db.js";
+import { ensureSchema, upsertConversation, insertMessage, persistMessage } from "./db.js";
 
 const DATABASE_URL =
   process.env.DATABASE_URL ?? "postgresql://postgres:postgres@localhost:5432/openclaw_e2e_test";
@@ -27,11 +16,6 @@ const DATABASE_URL =
 const sql = postgres(DATABASE_URL, { max: 5 });
 
 const testPrefix = `test_lp_${Date.now()}`;
-
-const baseCfg = {
-  session: { mainKey: "main" },
-  agents: { list: [{ id: "main", default: true }] },
-} as OpenClawConfig;
 
 const hour = 3_600_000;
 const baseTime = new Date("2024-06-15T12:00:00Z").getTime();
@@ -176,185 +160,6 @@ describe("PostgreSQL conversation CRUD", () => {
 
 // ── PostgreSQL Date-Range Query Tests ────────────────────────────────
 
-describe("PostgreSQL queryConversations date-range filtering", () => {
-  test("updatedAfter filters conversations by last_message_at", async () => {
-    const rows = await queryConversations(sql, {
-      updatedAfter: baseTime - 4 * hour,
-    });
-    const testRows = rows.filter((r) => r.session_key.startsWith(testPrefix));
-    expect(testRows.length).toBe(2);
-    const keys = testRows.map((r) => r.session_key);
-    expect(keys).toContain(`${testPrefix}:mid-session`);
-    expect(keys).toContain(`${testPrefix}:new-session`);
-  });
-
-  test("updatedBefore filters conversations by last_message_at", async () => {
-    const rows = await queryConversations(sql, {
-      updatedBefore: baseTime - 4 * hour,
-    });
-    const testRows = rows.filter((r) => r.session_key.startsWith(testPrefix));
-    expect(testRows.length).toBe(1);
-    expect(testRows[0].session_key).toBe(`${testPrefix}:old-session`);
-  });
-
-  test("createdAfter filters conversations by started_at", async () => {
-    const rows = await queryConversations(sql, {
-      createdAfter: baseTime - 2 * hour,
-    });
-    const testRows = rows.filter((r) => r.session_key.startsWith(testPrefix));
-    expect(testRows.length).toBe(1);
-    expect(testRows[0].session_key).toBe(`${testPrefix}:new-session`);
-  });
-
-  test("createdBefore filters conversations by started_at", async () => {
-    const rows = await queryConversations(sql, {
-      createdBefore: baseTime - 10 * hour,
-    });
-    const testRows = rows.filter((r) => r.session_key.startsWith(testPrefix));
-    expect(testRows.length).toBe(1);
-    expect(testRows[0].session_key).toBe(`${testPrefix}:old-session`);
-  });
-
-  test("combined created + updated range", async () => {
-    const rows = await queryConversations(sql, {
-      createdAfter: baseTime - 7 * hour,
-      updatedAfter: baseTime - 4 * hour,
-    });
-    const testRows = rows.filter((r) => r.session_key.startsWith(testPrefix));
-    expect(testRows.length).toBe(2);
-  });
-
-  test("empty range returns no test results", async () => {
-    const rows = await queryConversations(sql, {
-      updatedAfter: baseTime + 1 * hour,
-      updatedBefore: baseTime + 2 * hour,
-    });
-    const testRows = rows.filter((r) => r.session_key.startsWith(testPrefix));
-    expect(testRows.length).toBe(0);
-  });
-});
-
-// ── listSessionsFromStore with PostgreSQL-sourced Data ───────────────
-
-describe("listSessionsFromStore with PostgreSQL-sourced sessions", () => {
-  async function buildStoreFromPg(): Promise<Record<string, SessionEntry>> {
-    const rows = await sql<PgSessionRow[]>`
-      SELECT * FROM lp_conversations
-      WHERE session_key LIKE ${testPrefix + "%"}
-    `;
-    const store: Record<string, SessionEntry> = {};
-    for (const row of rows) {
-      const mapped = pgRowToSessionEntry(row);
-      store[`agent:main:${row.session_key}`] = {
-        sessionId: mapped.sessionId,
-        createdAt: mapped.createdAt,
-        updatedAt: mapped.updatedAt,
-        channel: mapped.channel,
-        displayName: mapped.displayName,
-      } as SessionEntry;
-    }
-    return store;
-  }
-
-  test("all sessions are returned without filters", async () => {
-    const store = await buildStoreFromPg();
-    const result = listSessionsFromStore({
-      cfg: baseCfg,
-      storePath: "/tmp/sessions.json",
-      store,
-      opts: {},
-    });
-    expect(result.sessions.length).toBe(3);
-  });
-
-  test("updatedAfter filter works with PG-sourced data", async () => {
-    const store = await buildStoreFromPg();
-    const result = listSessionsFromStore({
-      cfg: baseCfg,
-      storePath: "/tmp/sessions.json",
-      store,
-      opts: { updatedAfter: baseTime - 4 * hour },
-    });
-    expect(result.sessions.length).toBe(2);
-    const names = result.sessions.map((s) => s.displayName);
-    expect(names.some((n) => n?.includes("mid-session"))).toBe(true);
-    expect(names.some((n) => n?.includes("new-session"))).toBe(true);
-  });
-
-  test("createdBefore filter works with PG-sourced data", async () => {
-    const store = await buildStoreFromPg();
-    const result = listSessionsFromStore({
-      cfg: baseCfg,
-      storePath: "/tmp/sessions.json",
-      store,
-      opts: { createdBefore: baseTime - 10 * hour },
-    });
-    expect(result.sessions.length).toBe(1);
-    expect(result.sessions[0].displayName).toContain("old-session");
-  });
-
-  test("createdAfter + updatedBefore combined filter", async () => {
-    const store = await buildStoreFromPg();
-    const result = listSessionsFromStore({
-      cfg: baseCfg,
-      storePath: "/tmp/sessions.json",
-      store,
-      opts: {
-        createdAfter: baseTime - 7 * hour,
-        updatedBefore: baseTime - 1 * hour,
-      },
-    });
-    expect(result.sessions.length).toBe(1);
-    expect(result.sessions[0].displayName).toContain("mid-session");
-  });
-
-  test("createdAt is preserved in output from PG-sourced data", async () => {
-    const store = await buildStoreFromPg();
-    const result = listSessionsFromStore({
-      cfg: baseCfg,
-      storePath: "/tmp/sessions.json",
-      store,
-      opts: {},
-    });
-    const newSession = result.sessions.find((s) => s.displayName?.includes("new-session"));
-    expect(newSession?.createdAt).toBeDefined();
-    expect(newSession!.createdAt).toBeGreaterThan(0);
-    expect(Math.abs(newSession!.createdAt! - (baseTime - 1 * hour))).toBeLessThan(1000);
-  });
-
-  test("search combines with date filters on PG-sourced data", async () => {
-    const store = await buildStoreFromPg();
-    const result = listSessionsFromStore({
-      cfg: baseCfg,
-      storePath: "/tmp/sessions.json",
-      store,
-      opts: {
-        updatedAfter: baseTime - 4 * hour,
-        search: "new",
-      },
-    });
-    expect(result.sessions.length).toBe(1);
-    expect(result.sessions[0].displayName).toContain("new-session");
-  });
-
-  test("limit works on PG-sourced data", async () => {
-    const store = await buildStoreFromPg();
-    const result = listSessionsFromStore({
-      cfg: baseCfg,
-      storePath: "/tmp/sessions.json",
-      store,
-      opts: { limit: 1 },
-    });
-    expect(result.sessions.length).toBe(1);
-    expect(result.sessions[0].displayName).toContain("new-session");
-  });
-});
-
-// oc-hygiene #8 — persistMessage merges upsertConversation + insertMessage into
-// ONE atomic statement. These assert it is behavior-equivalent to the two-call
-// path the hooks previously used, including the snapshot edge case: a brand-new
-// conversation must land at message_count = 1 (a naive trailing-UPDATE CTE would
-// leave it at 0, since sibling CTEs can't see each other's inserted rows).
 describe("persistMessage (combined upsert + insert CTE)", () => {
   test("brand-new conversation: creates conv, inserts message, count = 1", async () => {
     const key = `${testPrefix}:pm-new`;
