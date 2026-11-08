@@ -1,7 +1,6 @@
 import { describe, test, expect } from "vitest";
+import { deriveChannel, derivePeerId } from "../../shared/session-key.js";
 import {
-  deriveChannel,
-  derivePeerId,
   resolveScope,
   formatScopeBlock,
   formatGatedMessage,

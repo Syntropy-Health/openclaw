@@ -1,12 +1,14 @@
 import { createHash } from "node:crypto";
 import { openPluginPool, type OpenClawPluginApi } from "openclaw/plugin-sdk";
 import postgres from "postgres";
-import { isHttpShapedSession } from "../../shared/http-channels.js";
+import { HTTP_GATE_CHANNELS, isHttpShapedSession } from "../../shared/http-channels.js";
 import { logToken, redactPeer, safeErr } from "../../shared/log-redact.js";
-import { isConversationalSession } from "../../shared/session-key.js";
 import {
   deriveChannel,
   deriveIdentityPeer,
+  isConversationalSession,
+} from "../../shared/session-key.js";
+import {
   findUserByChannelPeer,
   findUserByExternalId,
   reconcileVerifiedIdentity,
@@ -15,7 +17,6 @@ import {
   formatHardGateSystemPrompt,
   formatHardGateReplyAppend,
   formatHardGateUserMessage,
-  HTTP_GATE_CHANNELS,
   type ScopeConfig,
 } from "./scope.js";
 
