@@ -10,7 +10,10 @@ import { validateJsonSchemaValue } from "../../src/plugins/schema-validator.js";
 
 const manifest = JSON.parse(
   fs.readFileSync(new URL("./openclaw.plugin.json", import.meta.url), "utf8"),
-) as { configSchema: Record<string, unknown> };
+) as {
+  configSchema: Record<string, unknown>;
+  uiHints?: Record<string, { sensitive?: boolean }>;
+};
 const appConfig = JSON.parse(
   fs.readFileSync(new URL("../../openclaw.json", import.meta.url), "utf8"),
 ) as { plugins: { entries: Record<string, { config?: unknown }> } };
@@ -51,5 +54,15 @@ describe("memory-graphiti manifest configSchema", () => {
     expect(validate({ phiCloudApproval: { ruling: "x".repeat(25), date: "2026-10-26" } }).ok).toBe(
       false,
     );
+  });
+});
+
+// The loader takes this plugin's config UI hints from the MANIFEST only
+// (src/plugins/loader.ts sets configUiHints from the manifest record), and the
+// config-snapshot redaction uses them to hide sensitive fields.
+describe("memory-graphiti manifest uiHints", () => {
+  it("marks the credentials sensitive so config snapshots redact them", () => {
+    expect(manifest.uiHints?.apiKey?.sensitive).toBe(true);
+    expect(manifest.uiHints?.databaseUrl?.sensitive).toBe(true);
   });
 });
