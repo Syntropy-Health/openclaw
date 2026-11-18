@@ -261,6 +261,22 @@ describe("gcpKmsUnwrapper", () => {
     expect((await unwrap("WRAPPED")).equals(dek)).toBe(true);
   });
 
+  it("the decrypt request never follows redirects", async () => {
+    const dek = randomBytes(32);
+    const fetchImpl = vi.fn(
+      async (_url: string, _init: RequestInit) =>
+        new Response(JSON.stringify({ plaintext: dek.toString("base64") }), { status: 200 }),
+    );
+    const unwrap = gcpKmsUnwrapper({
+      keyName: KEK,
+      getAccessToken: async () => ACCESS,
+      fetchImpl: fetchImpl as never,
+    });
+    await unwrap("WRAPPED");
+    expect(fetchImpl).toHaveBeenCalledTimes(1);
+    expect(fetchImpl.mock.calls[0]?.[1]?.redirect).toBe("error");
+  });
+
   it("RED: refuses to build for a key name that is not a KMS resource", () => {
     expectCode(
       () => gcpKmsUnwrapper({ keyName: `${KEK}/../../other`, getAccessToken: async () => ACCESS }),
