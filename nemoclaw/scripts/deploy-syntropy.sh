@@ -14,6 +14,8 @@
 #   - nemoclaw CLI installed (npm install -g nemoclaw)
 #   - openshell runtime installed
 #   - Kernel 6.1+ for Landlock support (recommended)
+#   - SYNTROPY_API_BASE_URL set to the https base URL of the Syntropy API.
+#     It has no default; staging refuses to run without it.
 #
 # Copyright (c) 2026 Syntropy Health Inc. All rights reserved.
 # Proprietary and confidential.
@@ -25,6 +27,11 @@ REPO_DIR="$(cd "$SCRIPT_DIR/../.." && pwd)"
 NEMOCLAW_CONFIG_DIR="$SCRIPT_DIR/.."
 SANDBOX_NAME="${SANDBOX_NAME:-shrine-openclaw}"
 INFERENCE_PROVIDER="${INFERENCE_PROVIDER:-anthropic}"
+NEMOCLAW_HOME_DIR="${NEMOCLAW_HOME:-$HOME/.nemoclaw}"
+RENDER="$SCRIPT_DIR/render-endpoints.sh"
+# Rendered copies deploy() applies. They exist only after stage_config.
+STAGED_CONFIG="$NEMOCLAW_HOME_DIR/config/openclaw.json"
+STAGED_POLICY="$NEMOCLAW_HOME_DIR/policies/syntropy-sandbox.yaml"
 
 # Colors for output
 RED='\033[0;31m'
@@ -77,30 +84,45 @@ check_prerequisites() {
 
 # ── Stage Config Artifacts ─────────────────────────────────────
 
+# Every artifact goes through render-endpoints.sh, which takes the Syntropy
+# API endpoint from the required SYNTROPY_API_BASE_URL and refuses (naming
+# the setting) when it is unset, empty or not https://<DNS name>. Nothing is
+# staged with a default host.
 stage_config() {
   log_info "Staging Syntropy config artifacts..."
 
-  local nemoclaw_home="${NEMOCLAW_HOME:-$HOME/.nemoclaw}"
+  local nemoclaw_home="$NEMOCLAW_HOME_DIR"
+  local f
 
-  # Copy presets
+  # deploy() applies whatever is staged, so clear the previous run's copies
+  # first: a stale policy or config must never pair with a new deployment.
+  rm -f "$STAGED_POLICY" "$STAGED_CONFIG"
+
+  # Render presets
   local presets_dir="$nemoclaw_home/blueprint/policies/presets"
   mkdir -p "$presets_dir"
-  cp "$NEMOCLAW_CONFIG_DIR/presets/"*.yaml "$presets_dir/"
+  for f in "$NEMOCLAW_CONFIG_DIR/presets/"*.yaml; do
+    "$RENDER" "$f" "$presets_dir/$(basename "$f")"
+  done
   log_info "  Presets: syntropy, zep, whatsapp, postgresql"
 
-  # Copy agent manifest
+  # Render agent manifest
   local agent_dir="$nemoclaw_home/agents/syntropy-openclaw"
   mkdir -p "$agent_dir"
-  cp "$NEMOCLAW_CONFIG_DIR/agents/syntropy-openclaw/manifest.yaml" "$agent_dir/"
+  "$RENDER" "$NEMOCLAW_CONFIG_DIR/agents/syntropy-openclaw/manifest.yaml" "$agent_dir/manifest.yaml"
   log_info "  Agent manifest: syntropy-openclaw"
 
-  # Copy combined policy
-  local policy_dir="$nemoclaw_home/policies"
-  mkdir -p "$policy_dir"
+  # Render combined policy
+  mkdir -p "$(dirname "$STAGED_POLICY")"
   if [[ -f "$NEMOCLAW_CONFIG_DIR/policies/syntropy-sandbox.yaml" ]]; then
-    cp "$NEMOCLAW_CONFIG_DIR/policies/syntropy-sandbox.yaml" "$policy_dir/"
+    "$RENDER" "$NEMOCLAW_CONFIG_DIR/policies/syntropy-sandbox.yaml" "$STAGED_POLICY"
     log_info "  Combined policy: syntropy-sandbox.yaml"
   fi
+
+  # Render sandbox openclaw.json
+  mkdir -p "$(dirname "$STAGED_CONFIG")"
+  "$RENDER" "$NEMOCLAW_CONFIG_DIR/config/openclaw.json" "$STAGED_CONFIG"
+  log_info "  Sandbox config: openclaw.json"
 
   log_info "Config staged to $nemoclaw_home"
 }
@@ -144,24 +166,30 @@ deploy() {
   # openshell sandbox cp with --pre-start which copies into the image
   # layer before Landlock is applied. If --pre-start is not available,
   # fall back to shields-down copy.
+  # Deploy the rendered copy, never the repo file (which carries only
+  # placeholders for the service endpoint).
+  [[ -f "$STAGED_CONFIG" ]] || {
+    log_error "Rendered config missing ($STAGED_CONFIG); stage_config must run first"
+    return 1
+  }
   if openshell sandbox cp --help 2>&1 | grep -q "pre-start"; then
     openshell sandbox cp --pre-start \
-      "$NEMOCLAW_CONFIG_DIR/config/openclaw.json" \
+      "$STAGED_CONFIG" \
       "$SANDBOX_NAME:/sandbox/.openclaw/openclaw.json"
   else
     log_warn "  --pre-start not available; using shields-down copy"
     openshell shields down "$SANDBOX_NAME" --reason "staging openclaw.json" --timeout 30
     openshell sandbox cp \
-      "$NEMOCLAW_CONFIG_DIR/config/openclaw.json" \
+      "$STAGED_CONFIG" \
       "$SANDBOX_NAME:/sandbox/.openclaw/openclaw.json"
     openshell shields up "$SANDBOX_NAME"
   fi
   log_info "  Config: openclaw.json"
 
-  # Apply combined policy if available
-  if [[ -f "$NEMOCLAW_CONFIG_DIR/policies/syntropy-sandbox.yaml" ]]; then
+  # Apply the rendered combined policy if staged
+  if [[ -f "$STAGED_POLICY" ]]; then
     openshell policy set \
-      --policy "$NEMOCLAW_CONFIG_DIR/policies/syntropy-sandbox.yaml" \
+      --policy "$STAGED_POLICY" \
       "$SANDBOX_NAME"
     log_info "  Policy: syntropy-sandbox.yaml applied"
   fi
@@ -224,6 +252,7 @@ main() {
       echo "  --validate-only  Run validation checks only"
       echo ""
       echo "Environment variables:"
+      echo "  SYNTROPY_API_BASE_URL https base URL of the Syntropy API (required, no default)"
       echo "  SANDBOX_NAME          Sandbox name (default: shrine-openclaw)"
       echo "  INFERENCE_PROVIDER    Inference provider (default: anthropic)"
       echo "  NEMOCLAW_HOME         NemoClaw home directory (default: ~/.nemoclaw)"

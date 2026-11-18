@@ -170,6 +170,9 @@ export class McpSession {
         },
         id: crypto.randomUUID(),
       }),
+      // Never follow redirects: tool arguments can carry health data, and a
+      // redirect could move them to an endpoint the config check never saw.
+      redirect: "error",
       signal: AbortSignal.timeout(MCP_TIMEOUT_MS),
     });
 
@@ -197,6 +200,9 @@ export class McpSession {
         "mcp-session-id": sessionId,
       },
       body: JSON.stringify({ jsonrpc: "2.0", method: "notifications/initialized" }),
+      // Never follow redirects: tool arguments can carry health data, and a
+      // redirect could move them to an endpoint the config check never saw.
+      redirect: "error",
       signal: AbortSignal.timeout(MCP_TIMEOUT_MS),
     }).catch(() => {
       // Best-effort only — a lost notification never fails the call.
@@ -232,6 +238,9 @@ async function postMcpRequest(
       method: "POST",
       headers,
       body,
+      // Never follow redirects: tool arguments can carry health data, and a
+      // redirect could move them to an endpoint the config check never saw.
+      redirect: "error",
       signal: AbortSignal.timeout(MCP_TIMEOUT_MS),
     });
   };

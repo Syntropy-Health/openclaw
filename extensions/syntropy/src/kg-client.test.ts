@@ -178,7 +178,7 @@ describe("callKgTool", () => {
               reason: "insufficient_tau",
               required_tau: 1,
               current_balance_tau: 0,
-              top_up_url: "https://syntropy.health/billing/topup",
+              top_up_url: "https://billing.syntropy.example/topup",
             },
           },
         }),
@@ -197,7 +197,7 @@ describe("callKgTool", () => {
         reason: "insufficient_tau",
         required_tau: 1,
         current_balance_tau: 0,
-        top_up_url: "https://syntropy.health/billing/topup",
+        top_up_url: "https://billing.syntropy.example/topup",
       },
     });
   });

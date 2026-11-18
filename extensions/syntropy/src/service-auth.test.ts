@@ -345,6 +345,25 @@ describe("clerkBapiMint — faithful createToken request", () => {
     }
   });
 
+  test("the mint request never follows redirects", async () => {
+    const expSec = Math.floor(Date.now() / 1000) + 3600;
+    const fetchMock = vi.fn(
+      async (_url: string | URL | Request, _init?: RequestInit) =>
+        new Response(JSON.stringify({ token: "tok", expiration: expSec }), {
+          status: 200,
+          headers: { "Content-Type": "application/json" },
+        }),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+    try {
+      await clerkBapiMint(cfg());
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+      expect(fetchMock.mock.calls[0]?.[1]?.redirect).toBe("error");
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
   test("non-2xx mint surfaces an error without leaking the secret", async () => {
     expect.assertions(2);
     const fetchMock = vi.fn(async () => new Response("nope", { status: 401 }));
