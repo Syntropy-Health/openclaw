@@ -15,6 +15,8 @@ import postgres from "postgres";
 import { resolveStateDir } from "../../src/config/paths.js";
 import { authorizeClerkJwt, resolveClerkAuth } from "../../src/gateway/auth.js";
 import { validateClerkSession } from "../../src/gateway/clerk-session-validation.js";
+import { normalizeMainKey } from "../../src/routing/session-key.js";
+import { parseAgentSessionKey } from "../../src/sessions/session-key-utils.js";
 import { afterReady } from "./after-ready.js";
 import { captureWithReceipts } from "./capture.js";
 import {
@@ -88,6 +90,8 @@ export const MIN_PEPPER_CHARS = 32;
 export const RECALL_TIMEOUT_DEFAULT_MS = 800;
 /** Default MMR lambda when recall.reranker is "mmr" and none is configured. */
 export const RECALL_MMR_LAMBDA_DEFAULT = 0.5;
+/** Bound on recorded session → memory-group entries (oldest evicted first). */
+const SESSION_GROUPS_MAX = 1000;
 
 /** Settles with `fallback` once `ms` pass, whatever `p` does (p's rejection is observed). */
 function within<T, F>(p: Promise<T>, ms: number, fallback: F): Promise<T | F> {
@@ -280,10 +284,9 @@ const memoryPlugin = {
     const zepAllowed = (senderE164: string | null | undefined): boolean =>
       !isCloud || senderZepAllowed(senderE164, qaNumbers);
 
-    // The HOOK gate: as zepAllowed, plus the recorded approval. NOT used by the
-    // graphiti_* tools: they have no per-call ctx and key on the shared
-    // lastGroupId (the last user who spoke), so lifting the rail there would let
-    // one user read another's memory. Tools therefore stay QA-only on cloud.
+    // The HOOK gate: as zepAllowed, plus the recorded approval. The tools use
+    // zepAllowed alone, so on cloud they stay QA-only; the recorded approval
+    // covers the hooks, which resolve the sender for each turn.
     const hookZepAllowed = (senderE164: string | null | undefined): boolean =>
       approval !== undefined || zepAllowed(senderE164);
 
@@ -323,10 +326,42 @@ const memoryPlugin = {
       );
     }
 
-    // Track last known group_id from agent_end for use in the graphiti_* tools
-    // (which have no per-call identity). Always opaque, like every other group id.
-    let lastGroupId = opaque(cfg.userId ?? "default");
-    const toolGroup = () => (cfg.userId ? opaque(cfg.userId) : lastGroupId);
+    // Each session's memory group, recorded by the hooks (always opaque). Tools
+    // use the group recorded for their own session, and refuse when none is
+    // recorded. A configured static `userId` is one shared group by design.
+    const sessionGroups = new Map<string, string>();
+    const recordSessionGroup = (sessionKey: string | undefined, groupId: string | null) => {
+      if (!sessionKey) {
+        return;
+      }
+      sessionGroups.delete(sessionKey);
+      if (groupId === null) {
+        return;
+      }
+      sessionGroups.set(sessionKey, groupId);
+      if (sessionGroups.size > SESSION_GROUPS_MAX) {
+        const oldest = sessionGroups.keys().next().value;
+        if (oldest !== undefined) {
+          sessionGroups.delete(oldest);
+        }
+      }
+    };
+    // The main and global sessions are shared sessions. Tools use the group
+    // recorded for their own session, and none is recorded for a shared one.
+    const mainKey = normalizeMainKey(api.config.session?.mainKey);
+    const isSharedSession = (sessionKey: string | undefined): boolean => {
+      const raw = sessionKey?.trim().toLowerCase();
+      if (!raw) {
+        return false;
+      }
+      return raw === "global" || parseAgentSessionKey(raw)?.rest === mainKey;
+    };
+    const toolGroup = (sessionKey: string | undefined): string | null => {
+      if (cfg.userId) {
+        return opaque(cfg.userId);
+      }
+      return sessionKey ? (sessionGroups.get(sessionKey) ?? null) : null;
+    };
 
     // Receipt ledger (A&D C). Postgres when the identity DB is configured; else an
     // in-memory ledger (receipts then do not survive a restart, so the sweep holds
@@ -472,7 +507,7 @@ const memoryPlugin = {
      */
     const resolveMemoryGroup = async (
       ctx: GroupIdContext & { deviceId?: string | null },
-    ): Promise<{ groupId: string; identified: boolean }> => {
+    ): Promise<{ groupId: string; identified: boolean; static?: boolean }> => {
       if (approval) {
         // Real users: ONLY a verified identity the gate would also accept (same
         // peer derivation, external_id present, reconciled with the turn's Clerk
@@ -506,9 +541,53 @@ const memoryPlugin = {
         }
         return { groupId: opaque(deriveGroupId(ctx, cfg)), identified: false };
       }
+      if (cfg.userId) {
+        return { groupId: opaque(cfg.userId), identified: false, static: true };
+      }
+      // A verified caller identity keys the group, so a verified caller's memory
+      // is keyed on their identity, whatever the strategy.
+      const verifiedKey = externalIdScopeKey(ctx);
+      if (verifiedKey) {
+        return { groupId: opaque(verifiedKey), identified: true };
+      }
       // Non-identity strategies (self-hosted / QA): as before, but opaque. A turn
       // with no session key uses the strategy's fallback, never another user's.
-      return { groupId: opaque(cfg.userId ?? deriveGroupId(ctx, cfg)), identified: false };
+      return { groupId: opaque(deriveGroupId(ctx, cfg)), identified: false };
+    };
+
+    // A turn's usable memory group: null when memory is refused or the turn is
+    // unidentified under the approval (no_identity).
+    const usableGroup = async (
+      ctx: Parameters<typeof resolveMemoryGroup>[0],
+    ): Promise<{ groupId: string; identified: boolean; static?: boolean } | null> => {
+      if (memoryRefused) {
+        return null;
+      }
+      const resolved = await resolveMemoryGroup(ctx);
+      if (approval && !resolved.identified) {
+        return null;
+      }
+      // A shared session's group is only usable when a verified identity backs
+      // it, or when it is the static userId group (one group by design).
+      if (isSharedSession(ctx.sessionKey) && !resolved.identified && !resolved.static) {
+        return null;
+      }
+      return resolved;
+    };
+
+    // Resolve the STARTING turn's group and record it for that session's tools.
+    // Only before_agent_start records: agent_end runs fire-and-forget and could
+    // land after the next turn has started. The entry is cleared first, so a
+    // failed resolution leaves no stale group.
+    const resolveTurnGroup = async (
+      ctx: Parameters<typeof resolveMemoryGroup>[0],
+    ): Promise<{ groupId: string; identified: boolean; static?: boolean } | null> => {
+      recordSessionGroup(ctx.sessionKey, null);
+      const turn = await usableGroup(ctx);
+      if (turn && !isSharedSession(ctx.sessionKey)) {
+        recordSessionGroup(ctx.sessionKey, turn.groupId);
+      }
+      return turn;
     };
 
     // ========================================================================
@@ -536,17 +615,26 @@ const memoryPlugin = {
       details: Record<string, unknown>;
     };
 
+    // A tool call whose session has no recorded memory group gets none.
+    const noSessionGroup = (details: Record<string, unknown>): ToolResult => ({
+      content: [{ type: "text" as const, text: "No memory is available for this conversation." }],
+      details: { ...details, refused: "no_session_group" },
+    });
+
     // memory_search / graphiti_search — natural-language fact search.
-    const runMemorySearch = async (params: {
-      query: string;
-      maxFacts?: number;
-    }): Promise<ToolResult> => {
+
+    const runMemorySearch = async (
+      params: {
+        query: string;
+        maxFacts?: number;
+      },
+      sessionKey: string | undefined,
+    ): Promise<ToolResult> => {
       const { query, maxFacts = cfg.maxFacts } = params;
 
-      // PHI tripwire (tool read): the tool execute signature carries NO
-      // per-call ctx/sessionKey, so we cannot resolve THIS conversation's
-      // sender here. On cloud that is an ungated Zep read path — FAIL-CLOSED:
-      // refuse without touching the client. Self-hosted is never gated.
+      // PHI tripwire (tool read): the sender is not resolved for a tool call,
+      // so on cloud the read is refused without touching the client.
+      // Self-hosted is never gated.
       if (!zepAllowed(undefined)) {
         onBreach({ op: "searchFacts", backendLabel: client.label, reason: "non-qa-sender" });
         return {
@@ -561,8 +649,11 @@ const memoryPlugin = {
       }
 
       try {
-        // Tools use lastGroupId which is set by hooks (identity-resolved when applicable)
-        const facts = await client.searchFacts(query, [toolGroup()], maxFacts);
+        const groupId = toolGroup(sessionKey);
+        if (groupId === null) {
+          return noSessionGroup({ count: 0 });
+        }
+        const facts = await client.searchFacts(query, [groupId], maxFacts);
 
         if (facts.length === 0) {
           return {
@@ -601,12 +692,14 @@ const memoryPlugin = {
     };
 
     // memory_recall / graphiti_episodes — recent episodes / conversation turns.
-    const runMemoryRecall = async (params: { lastN?: number }): Promise<ToolResult> => {
+    const runMemoryRecall = async (
+      params: { lastN?: number },
+      sessionKey: string | undefined,
+    ): Promise<ToolResult> => {
       const { lastN = 10 } = params;
 
-      // PHI tripwire (tool read): no per-call ctx/sessionKey is available
-      // here, so the sender cannot be resolved. On cloud this is an ungated
-      // Zep read path — FAIL-CLOSED: refuse without touching the client.
+      // PHI tripwire (tool read): the sender is not resolved for a tool call,
+      // so on cloud the read is refused without touching the client.
       // Self-hosted is never gated.
       if (!zepAllowed(undefined)) {
         onBreach({ op: "getEpisodes", backendLabel: client.label, reason: "non-qa-sender" });
@@ -622,7 +715,11 @@ const memoryPlugin = {
       }
 
       try {
-        const episodes = await client.getEpisodes(toolGroup(), lastN);
+        const groupId = toolGroup(sessionKey);
+        if (groupId === null) {
+          return noSessionGroup({ count: 0 });
+        }
+        const episodes = await client.getEpisodes(groupId, lastN);
 
         if (episodes.length === 0) {
           return {
@@ -666,11 +763,13 @@ const memoryPlugin = {
       }
     };
 
-    // memory_store — store a memory. NEW canonical-only tool (no graphiti_*
-    // alias). Same P3 PHI gate as the others: on cloud the tool has no per-call
-    // sender ctx ⇒ FAIL-CLOSED (refuse the WRITE, emit a breach, no addMessages);
-    // self-hosted (PHI in-house) is never gated.
-    const runMemoryStore = async (params: { text: string }): Promise<ToolResult> => {
+    // memory_store — store a memory (no graphiti_* alias). Same PHI gate as
+    // the other tools: on cloud the write is refused (breach emitted, no
+    // addMessages); self-hosted is never gated.
+    const runMemoryStore = async (
+      params: { text: string },
+      sessionKey: string | undefined,
+    ): Promise<ToolResult> => {
       const { text } = params;
 
       if (typeof text !== "string" || !text.trim()) {
@@ -696,7 +795,10 @@ const memoryPlugin = {
         };
       }
 
-      const groupId = toolGroup();
+      const groupId = toolGroup(sessionKey);
+      if (groupId === null) {
+        return noSessionGroup({ stored: false });
+      }
       // GraphitiMessage shape — mirrors the auto-capture hook's message shape
       // (content / role_type / role / timestamp / source_description). The tool
       // attributes the content to the user turn under the `openclaw` role, and
@@ -726,7 +828,7 @@ const memoryPlugin = {
     // ---- CANONICAL tools (memory_*) ----
 
     api.registerTool(
-      {
+      (ctx) => ({
         name: "memory_search",
         label: "Memory Search",
         description:
@@ -736,13 +838,13 @@ const memoryPlugin = {
           maxFacts: Type.Optional(Type.Number({ description: "Max results (default: 10)" })),
         }),
         execute: (_toolCallId, params) =>
-          runMemorySearch(params as { query: string; maxFacts?: number }),
-      },
+          runMemorySearch(params as { query: string; maxFacts?: number }, ctx.sessionKey),
+      }),
       { name: "memory_search" },
     );
 
     api.registerTool(
-      {
+      (ctx) => ({
         name: "memory_recall",
         label: "Memory Recall",
         description: "Recall recent episodes (conversation turns) stored in the knowledge graph.",
@@ -751,13 +853,14 @@ const memoryPlugin = {
             Type.Number({ description: "Number of recent episodes (default: 10)" }),
           ),
         }),
-        execute: (_toolCallId, params) => runMemoryRecall(params as { lastN?: number }),
-      },
+        execute: (_toolCallId, params) =>
+          runMemoryRecall(params as { lastN?: number }, ctx.sessionKey),
+      }),
       { name: "memory_recall" },
     );
 
     api.registerTool(
-      {
+      (ctx) => ({
         name: "memory_store",
         label: "Memory Store",
         description:
@@ -765,8 +868,9 @@ const memoryPlugin = {
         parameters: Type.Object({
           text: Type.String({ description: "The content to remember" }),
         }),
-        execute: (_toolCallId, params) => runMemoryStore(params as { text: string }),
-      },
+        execute: (_toolCallId, params) =>
+          runMemoryStore(params as { text: string }, ctx.sessionKey),
+      }),
       { name: "memory_store" },
     );
 
@@ -774,7 +878,7 @@ const memoryPlugin = {
     // Same handlers (delegate to the factored closures above). Do NOT remove.
 
     api.registerTool(
-      {
+      (ctx) => ({
         name: "graphiti_search",
         label: "Graphiti Search",
         description:
@@ -784,13 +888,13 @@ const memoryPlugin = {
           maxFacts: Type.Optional(Type.Number({ description: "Max results (default: 10)" })),
         }),
         execute: (_toolCallId, params) =>
-          runMemorySearch(params as { query: string; maxFacts?: number }),
-      },
+          runMemorySearch(params as { query: string; maxFacts?: number }, ctx.sessionKey),
+      }),
       { name: "graphiti_search" },
     );
 
     api.registerTool(
-      {
+      (ctx) => ({
         name: "graphiti_episodes",
         label: "Graphiti Episodes",
         description:
@@ -800,8 +904,9 @@ const memoryPlugin = {
             Type.Number({ description: "Number of recent episodes (default: 10)" }),
           ),
         }),
-        execute: (_toolCallId, params) => runMemoryRecall(params as { lastN?: number }),
-      },
+        execute: (_toolCallId, params) =>
+          runMemoryRecall(params as { lastN?: number }, ctx.sessionKey),
+      }),
       { name: "graphiti_episodes" },
     );
 
@@ -1032,21 +1137,31 @@ const memoryPlugin = {
       }
     };
 
+    // Without auto-recall, still record each turn's group for its tools.
+    if (!cfg.autoRecall) {
+      api.on("before_agent_start", async (_event, ctx) => {
+        try {
+          await resolveTurnGroup(ctx);
+        } catch (err) {
+          api.logger.warn(`memory-graphiti: tool scope resolution failed: ${String(err)}`);
+        }
+      });
+    }
+
     // Auto-recall: inject relevant facts before agent starts
     if (cfg.autoRecall) {
       api.on("before_agent_start", async (event, ctx) => {
-        if (!event.prompt || event.prompt.length < 5) {
-          return;
-        }
-
         // Identity-resolved, opaque group (the verified Clerk `sub` first, so the
         // HTTP/Clerk graph unifies with the same person's other channels, #834/#836).
-        if (memoryRefused) {
+        // Resolved before the prompt check so this turn's tools have their group.
+        // null = memory refused, or no_identity (an anonymous/gated turn).
+        const turn = await resolveTurnGroup(ctx);
+        if (!turn) {
           return;
         }
-        const { groupId, identified } = await resolveMemoryGroup(ctx);
-        if (approval && !identified) {
-          return; // no_identity: an anonymous/gated turn gets no memory
+        const { groupId } = turn;
+        if (!event.prompt || event.prompt.length < 5) {
+          return;
         }
 
         // PHI tripwire (recall): on cloud, only recall for a QA sender. A non-QA
@@ -1132,12 +1247,11 @@ const memoryPlugin = {
           if (memoryRefused) {
             return;
           }
-          const { groupId, identified } = await resolveMemoryGroup(ctx);
-          if (approval && !identified) {
+          const turn = await usableGroup(ctx);
+          if (!turn) {
             return; // no_identity: an anonymous/gated turn is never sent
           }
-          // Store for use in before_agent_start
-          lastGroupId = groupId;
+          const { groupId } = turn;
 
           // PHI tripwire (capture): on cloud, only capture a QA sender's
           // conversation. A non-QA sender's PHI must NEVER be written to Zep —

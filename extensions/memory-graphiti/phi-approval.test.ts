@@ -62,13 +62,20 @@ async function register(pluginConfig: Record<string, unknown>) {
     pluginConfig,
     runtime: {},
     logger,
-    registerTool: vi.fn(
-      (tool: { name?: string; execute?: (id: string, p: unknown) => unknown }) => {
-        if (tool?.name && tool.execute) {
-          tools[tool.name] = tool.execute;
-        }
-      },
-    ),
+    // Tools are factories of the calling session; resolve with a test session.
+    registerTool: vi.fn((factory: unknown) => {
+      const tool = (
+        typeof factory === "function"
+          ? (factory as (ctx: unknown) => unknown)({
+              sessionKey: "agent:main:telegram:direct:tester",
+              messageChannel: "telegram",
+            })
+          : factory
+      ) as { name?: string; execute?: (id: string, p: unknown) => unknown };
+      if (tool?.name && tool.execute) {
+        tools[tool.name] = tool.execute;
+      }
+    }),
     registerHook: vi.fn(),
     registerHttpHandler: vi.fn(),
     registerHttpRoute: vi.fn(),
