@@ -1,12 +1,8 @@
 name: Deploy to Fly.io
 
+# Manual only: a deploy must never run as a side effect of a push or merge.
+# test/workflows-deploy-triggers.test.ts enforces this for every workflow that deploys.
 on:
-  push:
-    branches: [main, feat/auth-memory-gate]
-    paths-ignore:
-      - "docs/**"
-      - "**/*.md"
-      - "**/*.mdx"
   workflow_dispatch:
     inputs:
       deploy:
@@ -23,7 +19,7 @@ jobs:
   deploy:
     name: Deploy to Fly.io
     runs-on: ubuntu-latest
-    if: ${{ github.event_name == 'push' || inputs.deploy }}
+    if: ${{ inputs.deploy }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
