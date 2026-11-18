@@ -33,6 +33,7 @@ import { buildDeviceAuthPayload } from "../../device-auth.js";
 import { isLoopbackAddress, isTrustedProxyAddress, resolveGatewayClientIp } from "../../net.js";
 import { resolveHostName } from "../../net.js";
 import { resolveNodeCommandAllowlist } from "../../node-command-policy.js";
+import { isOperatorAuth } from "../../operator-auth.js";
 import { checkBrowserOrigin } from "../../origin-check.js";
 import { GATEWAY_CLIENT_IDS } from "../../protocol/client-info.js";
 import {
@@ -426,6 +427,14 @@ export function attachGatewayWsMessageHandler(params: {
           });
           close(1008, truncateCloseReason(authMessage));
         };
+        // The control plane is an operator surface; a sign-in that is not an
+        // operator credential is refused here, before any device or pairing
+        // handling. (Device tokens are resolved later, from a failed primary
+        // auth, so they are not affected.)
+        if (authResult.ok && !isOperatorAuth(authResult)) {
+          rejectUnauthorized({ ok: false, reason: "end_user_not_permitted" });
+          return;
+        }
         if (!device) {
           if (scopes.length > 0 && !allowControlUiBypass) {
             scopes = [];

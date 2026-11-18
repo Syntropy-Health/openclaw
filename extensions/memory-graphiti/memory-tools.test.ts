@@ -65,8 +65,16 @@ function makeFakeApi(opts: {
     pluginConfig: opts.pluginConfig,
     runtime: {} as Record<string, unknown>,
     logger,
+    // Tools are factories of the calling session; resolve with a test session.
     registerTool: vi.fn((tool: unknown) => {
-      const t = tool as RegisteredTool;
+      const t = (
+        typeof tool === "function"
+          ? (tool as (ctx: unknown) => unknown)({
+              sessionKey: "agent:main:telegram:direct:tester",
+              messageChannel: "telegram",
+            })
+          : tool
+      ) as RegisteredTool;
       registered.push(t);
       if (t?.name && typeof t.execute === "function") {
         tools[t.name] = t.execute;

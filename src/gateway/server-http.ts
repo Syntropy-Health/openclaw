@@ -54,6 +54,7 @@ import { getBearerToken, getHeader } from "./http-utils.js";
 import { isPrivateOrLoopbackAddress, resolveGatewayClientIp } from "./net.js";
 import { handleOpenAiHttpRequest } from "./openai-http.js";
 import { handleOpenResponsesHttpRequest } from "./openresponses-http.js";
+import { isOperatorAuth } from "./operator-auth.js";
 import type { GatewayWsClient } from "./server/ws-types.js";
 import type { TauMeter } from "./tau-meter.js";
 import { handleToolsInvokeHttpRequest } from "./tools-invoke-http.js";
@@ -131,6 +132,10 @@ async function authorizeCanvasRequest(params: {
       rateLimiter,
     });
     if (authResult.ok) {
+      // The canvas host is an operator surface.
+      if (!isOperatorAuth(authResult)) {
+        return { ok: false, reason: "end_user_not_permitted" };
+      }
       return authResult;
     }
     lastAuthFailure = authResult;
@@ -533,6 +538,16 @@ export function createGatewayHttpServer(opts: {
           });
           if (!authResult.ok) {
             sendGatewayAuthFailure(res, authResult);
+            return;
+          }
+          // Channel endpoints are operator surfaces.
+          if (!isOperatorAuth(authResult)) {
+            sendJson(res, 403, {
+              error: {
+                message: "channel endpoints require operator credentials",
+                type: "forbidden",
+              },
+            });
             return;
           }
         }

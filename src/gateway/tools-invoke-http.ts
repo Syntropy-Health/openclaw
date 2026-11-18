@@ -21,7 +21,10 @@ import { logWarn } from "../logger.js";
 import { isTestDefaultMemorySlotDisabled } from "../plugins/config-state.js";
 import { getPluginToolMeta } from "../plugins/tools.js";
 import { isSubagentSessionKey } from "../routing/session-key.js";
-import { DEFAULT_GATEWAY_HTTP_TOOL_DENY } from "../security/dangerous-tools.js";
+import {
+  DEFAULT_GATEWAY_HTTP_TOOL_DENY,
+  FIXED_GATEWAY_HTTP_TOOL_DENY,
+} from "../security/dangerous-tools.js";
 import { normalizeMessageChannel } from "../utils/message-channel.js";
 import type { AuthRateLimiter } from "./auth-rate-limit.js";
 import { authorizeGatewayConnect, type ResolvedGatewayAuth } from "./auth.js";
@@ -33,6 +36,7 @@ import {
   sendMethodNotAllowed,
 } from "./http-common.js";
 import { getBearerToken, getHeader } from "./http-utils.js";
+import { isOperatorAuth } from "./operator-auth.js";
 
 const DEFAULT_BODY_BYTES = 2 * 1024 * 1024;
 const MEMORY_TOOL_NAMES = new Set(["memory_search", "memory_get"]);
@@ -155,6 +159,15 @@ export async function handleToolsInvokeHttpRequest(
   });
   if (!authResult.ok) {
     sendGatewayAuthFailure(res, authResult);
+    return true;
+  }
+  // Tool invocation is an operator surface; end users reach the agent through
+  // the chat endpoints.
+  if (!isOperatorAuth(authResult)) {
+    sendJson(res, 403, {
+      ok: false,
+      error: { type: "forbidden", message: "tools.invoke requires operator credentials" },
+    });
     return true;
   }
 
@@ -281,6 +294,7 @@ export async function handleToolsInvokeHttpRequest(
     (name) => !gatewayToolsCfg?.allow?.includes(name),
   );
   const gatewayDenyNames = defaultGatewayDeny.concat(
+    FIXED_GATEWAY_HTTP_TOOL_DENY,
     Array.isArray(gatewayToolsCfg?.deny) ? gatewayToolsCfg.deny : [],
   );
   const gatewayDenySet = new Set(gatewayDenyNames);
