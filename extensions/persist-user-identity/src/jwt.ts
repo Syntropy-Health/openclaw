@@ -30,6 +30,9 @@ export type AuthConfig = {
 const AUTH_ENDPOINT_FIELDS = ["verifyEndpoint", "passcodeVerifyUrl", "userLookupUrl"] as const;
 const LOOPBACK_HOSTS = new Set(["localhost", "127.0.0.1", "[::1]"]);
 
+/** Auth requests never follow redirects: the configured endpoint is the only destination. */
+export const AUTH_FETCH_REDIRECT = "error" as const;
+
 /**
  * Auth endpoints carry pairing passcodes and the API token, so each one that
  * is set must be an https URL (plain http only for loopback, for local dev).
@@ -38,9 +41,6 @@ const LOOPBACK_HOSTS = new Set(["localhost", "127.0.0.1", "[::1]"]);
  * these endpoints also refuse redirects (see AUTH_FETCH_REDIRECT), so a
  * redirect cannot move a request body onto an insecure endpoint.
  */
-/** Auth requests never follow redirects: the configured endpoint is the only destination. */
-export const AUTH_FETCH_REDIRECT = "error" as const;
-
 export function assertSecureAuthEndpoints(config: AuthConfig | undefined): void {
   if (!config) {
     return;
