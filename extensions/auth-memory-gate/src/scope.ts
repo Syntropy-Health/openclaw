@@ -32,16 +32,6 @@ type IdentityRow = {
 };
 
 // ---------------------------------------------------------------------------
-// Session key parsing — shared canonical module (oc-hygiene #7)
-// ---------------------------------------------------------------------------
-
-// Re-exported (not redefined) so the parsing convention stays identical across
-// persist-user-identity, syntropy, and this extension — and so existing
-// importers of `deriveChannel`/`derivePeerId` from "./scope.js" (index.ts,
-// scope.test.ts) keep working unchanged.
-export { deriveChannel, deriveIdentityPeer, derivePeerId } from "../../shared/session-key.js";
-
-// ---------------------------------------------------------------------------
 // Identity query — reads from persist-user-identity's lp_users table
 // ---------------------------------------------------------------------------
 
@@ -267,16 +257,6 @@ export function formatHardGateReplyAppend(): string {
     "<last_name>` sets up a chat-only profile. Both `/` and `!` work."
   );
 }
-
-/**
- * HTTP surfaces (`x-openclaw-channel` allowlist, src/gateway/http-utils.ts). They
- * go straight to the agent with NO plugin-command dispatch, so `!identify` /
- * `!verify` cannot run there; a gated HTTP user verifies by signing in (Clerk),
- * which binds the device ([G1]). Their gate message says so.
- *
- * Re-exported from the shared module so the syntropy data gate uses the SAME set.
- */
-export { HTTP_GATE_CHANNELS };
 
 /**
  * The user-facing reply for a hard-gated turn, sent INSTEAD of a model answer via

@@ -1,5 +1,4 @@
 import { describe, expect, it, vi } from "vitest";
-import { HTTP_GATE_CHANNELS as AUTH_GATE_HTTP_CHANNELS } from "../../auth-memory-gate/src/scope.js";
 import { HTTP_GATE_CHANNELS } from "../../shared/http-channels.js";
 import { TtlCache } from "./cache.js";
 import type { SyntropyToolResult } from "./client.js";
@@ -226,8 +225,8 @@ describe("SYNTROPY_GATE on HTTP channels (CTO #16865)", () => {
     },
   );
 
-  it("the HTTP channel list is the SAME set the identity gate uses (cannot drift)", () => {
-    expect(AUTH_GATE_HTTP_CHANNELS).toBe(HTTP_GATE_CHANNELS);
+  // Both gates import the ONE shared set (extensions/shared/http-channels.ts).
+  it("the HTTP channel list is the shared set", () => {
     expect([...HTTP_GATE_CHANNELS].sort()).toEqual(["shrinemobile", "webchat"]);
   });
 

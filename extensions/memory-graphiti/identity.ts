@@ -9,49 +9,8 @@
 import type postgres from "postgres";
 import { isHttpShapedSession } from "../shared/http-channels.js";
 import { deriveScopeKey } from "../shared/scope-key.js";
-import { deriveIdentityPeer } from "../shared/session-key.js";
+import { deriveChannel, deriveIdentityPeer } from "../shared/session-key.js";
 import type { GroupIdContext } from "./config.js";
-
-// ---------------------------------------------------------------------------
-// Session key parsing — mirrors persist-user-identity / auth-memory-gate
-// ---------------------------------------------------------------------------
-
-/**
- * Extract the channel name from a session key.
- * Format: `agent:{agentId}:{channel}:{...}`
- */
-export function deriveChannel(sessionKey: string): string {
-  const parts = sessionKey.split(":");
-  if (parts.length >= 3 && parts[0] === "agent") {
-    return parts[2];
-  }
-  return "unknown";
-}
-
-/**
- * Extract the peer-specific portion of a session key.
- *
- * Session key formats:
- *   agent:{agentId}:direct:{peerId}
- *   agent:{agentId}:{channel}:direct:{peerId}
- *   agent:{agentId}:{channel}:{peerId...}
- *   agent:{agentId}:main  (shared session — no peer)
- */
-export function derivePeerId(sessionKey: string): string {
-  const parts = sessionKey.split(":");
-  if (parts.length < 3 || parts[0] !== "agent") {
-    return sessionKey;
-  }
-  const rest = parts.slice(2);
-  const directIdx = rest.indexOf("direct");
-  if (directIdx >= 0 && directIdx < rest.length - 1) {
-    return rest.slice(directIdx + 1).join(":");
-  }
-  if (rest.length >= 2) {
-    return rest.slice(1).join(":");
-  }
-  return rest[0] ?? sessionKey;
-}
 
 /**
  * Prefer the verified external caller identity (e.g. the Clerk JWT `sub` for
