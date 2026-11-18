@@ -27,6 +27,52 @@ export type AuthConfig = {
   audience?: string;
 };
 
+const AUTH_ENDPOINT_FIELDS = ["verifyEndpoint", "passcodeVerifyUrl", "userLookupUrl"] as const;
+const LOOPBACK_HOSTS = new Set(["localhost", "127.0.0.1", "[::1]"]);
+
+/**
+ * Auth endpoints carry pairing passcodes and the API token, so each one that
+ * is set must be an https URL (plain http only for loopback, for local dev).
+ * A blank or whitespace-padded value, or one with embedded credentials, is
+ * refused. Throws naming the setting (never its value). The requests made to
+ * these endpoints also refuse redirects (see AUTH_FETCH_REDIRECT), so a
+ * redirect cannot move a request body onto an insecure endpoint.
+ */
+/** Auth requests never follow redirects: the configured endpoint is the only destination. */
+export const AUTH_FETCH_REDIRECT = "error" as const;
+
+export function assertSecureAuthEndpoints(config: AuthConfig | undefined): void {
+  if (!config) {
+    return;
+  }
+  for (const field of AUTH_ENDPOINT_FIELDS) {
+    const value = config[field];
+    if (value === undefined) {
+      continue;
+    }
+    let ok = false;
+    if (typeof value === "string" && value.length > 0 && value.trim() === value) {
+      try {
+        const url = new URL(value);
+        // Embedded credentials would be rejected by fetch at call time (and
+        // could reach logs), so they are refused here.
+        ok =
+          url.username === "" &&
+          url.password === "" &&
+          (url.protocol === "https:" ||
+            (url.protocol === "http:" && LOOPBACK_HOSTS.has(url.hostname)));
+      } catch {
+        ok = false;
+      }
+    }
+    if (!ok) {
+      throw new Error(
+        `persist-user-identity: auth.${field} must be an https URL without credentials (http only for localhost)`,
+      );
+    }
+  }
+}
+
 export type UserLookupResult = {
   userId: string;
   firstName: string;
@@ -145,6 +191,7 @@ async function verifyViaEndpoint(
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ token }),
+      redirect: AUTH_FETCH_REDIRECT,
       signal: AbortSignal.timeout(10_000),
     });
     if (!res.ok) {
@@ -188,6 +235,7 @@ export async function verifyViaPasscode(
     const res = await fetch(config.passcodeVerifyUrl, {
       method: "POST",
       headers,
+      redirect: AUTH_FETCH_REDIRECT,
       body: JSON.stringify({
         code,
         user_identifier: userIdentifier ?? "",
@@ -236,6 +284,7 @@ export async function lookupUserByName(
     const res = await fetch(url, {
       method: "GET",
       headers,
+      redirect: AUTH_FETCH_REDIRECT,
       signal: AbortSignal.timeout(10_000),
     });
     if (!res.ok) {

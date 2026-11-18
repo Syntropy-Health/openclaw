@@ -11,7 +11,7 @@ description: "Multi-channel health AI gateway with identity-scoped memory and 9 
 version_constraint: ">=2026.4.2"
 language: nodejs
 license: Proprietary
-homepage: "https://syntropyhealth.com"
+homepage: "https://github.com/Syntropy-Health/openclaw"
 
 # ── Binary & process ────────────────────────────────────────────
 install_method: npm
@@ -76,12 +76,14 @@ inference:
   proxy_support: explicit
 
 # ── Phone-home hosts ───────────────────────────────────────────
-# OpenClaw defaults plus Syntropy-specific endpoints.
+# OpenClaw defaults plus Syntropy-specific endpoints. The Syntropy API host
+# has no default: scripts/render-endpoints.sh renders it from the required
+# SYNTROPY_API_BASE_URL. Unrendered, this names no real host.
 phone_home_hosts:
   - openclaw.ai
   - docs.openclaw.ai
   - clawhub.ai
-  - api.syntropyhealth.com
+  - __SYNTROPY_API_HOST__
   - api.getzep.com
 
 # ── Package registry ───────────────────────────────────────────

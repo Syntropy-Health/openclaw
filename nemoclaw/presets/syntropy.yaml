@@ -10,10 +10,12 @@ preset:
   description: "Syntropy Health API — pairing verification, MCP health tools"
 
 network_policies:
+  # The host has no default: scripts/render-endpoints.sh renders it from the
+  # required SYNTROPY_API_BASE_URL. Unrendered, this names no real host.
   syntropy_api:
     name: syntropy_api
     endpoints:
-      - host: api.syntropyhealth.com
+      - host: __SYNTROPY_API_HOST__
         port: 443
         protocol: rest
         enforcement: enforce

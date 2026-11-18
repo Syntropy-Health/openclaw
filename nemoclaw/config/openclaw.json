@@ -1,5 +1,5 @@
 {
-  "$comment": "Sandbox-adapted config for NemoClaw deployment. Credentials are injected by OpenShell into the gateway process — never hardcode secrets here. Production URLs replace localhost references from the dev config.",
+  "$comment": "Sandbox-adapted config for NemoClaw deployment. Credentials are injected by OpenShell into the gateway process — never hardcode secrets here. The Syntropy service endpoint has no default: staging (scripts/render-endpoints.sh) requires SYNTROPY_API_BASE_URL and renders it into the deployed copy. Loaded unrendered, this file references the variable, and the gateway refuses to start when it is unset or empty.",
   "agents": {
     "defaults": {
       "model": {
@@ -41,8 +41,8 @@
         "config": {
           "auth": {
             "mode": "passcode-endpoint",
-            "passcodeVerifyUrl": "https://api.syntropyhealth.com/api/ext/pairing/verify",
-            "userLookupUrl": "https://api.syntropyhealth.com/api/ext/users/search",
+            "passcodeVerifyUrl": "${SYNTROPY_API_BASE_URL}/api/ext/pairing/verify",
+            "userLookupUrl": "${SYNTROPY_API_BASE_URL}/api/ext/users/search",
             "apiToken": ""
           }
         }
@@ -95,7 +95,7 @@
       "syntropy": {
         "enabled": true,
         "config": {
-          "syntropyBaseUrl": "https://api.syntropyhealth.com"
+          "syntropyBaseUrl": "${SYNTROPY_API_BASE_URL}"
         }
       }
     },
