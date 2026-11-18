@@ -402,3 +402,28 @@ describe("McpSession mcpPath (mono #539 — SJ needs /mcp/, a bare /mcp 307s)", 
     expect(callsByMethod("tools/list")[0]!.url).toBe(`${BASE_URL}/mcp/`);
   });
 });
+
+describe("MCP transport never follows redirects", () => {
+  beforeEach(() => {
+    vi.stubGlobal("fetch", vi.fn());
+  });
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    vi.restoreAllMocks();
+  });
+
+  it("initialize, notification, list and call all set redirect: error", async () => {
+    vi.mocked(globalThis.fetch).mockImplementation(fakeMcpServer({ sessionIds: ["sess-1"] }));
+    const session = new McpSession(BASE_URL, { mcpPath: "/mcp/" });
+    await listMcpTools(BASE_URL, TOKEN, { label: LABEL, session });
+    await callMcpTool(BASE_URL, TOKEN, "kg_query", {}, { label: LABEL, session });
+    const calls = vi.mocked(globalThis.fetch).mock.calls;
+    expect(calls.length).toBe(4);
+    expect(calls.map((c) => (c[1] as RequestInit | undefined)?.redirect)).toEqual([
+      "error",
+      "error",
+      "error",
+      "error",
+    ]);
+  });
+});

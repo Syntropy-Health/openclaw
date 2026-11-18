@@ -29,7 +29,7 @@ import {
   findUserByChannelPeer,
   unlinkChannelPeerForUser,
 } from "./db.js";
-import type { AuthConfig } from "./jwt.js";
+import { assertSecureAuthEndpoints, type AuthConfig } from "./jwt.js";
 import { createMobileSignoutHandler, SIGNOUT_ROUTE_PATH } from "./signout-route.js";
 
 /**
@@ -59,6 +59,9 @@ const persistUserIdentityPlugin = {
     }
 
     const authConfig = api.pluginConfig?.auth as AuthConfig | undefined;
+    // Refuse before any connection is opened: an insecure auth endpoint would
+    // carry pairing passcodes and the API token in cleartext.
+    assertSecureAuthEndpoints(authConfig);
 
     // Track pending !identify results so !verify can use the email as user_identifier
     const pendingIdentify = new Map<string, { email: string; userId: string; expiresAt: number }>();
