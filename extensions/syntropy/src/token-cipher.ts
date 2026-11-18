@@ -153,6 +153,8 @@ export function gcpKmsUnwrapper(opts: {
         method: "POST",
         headers: { authorization: `Bearer ${token}`, "content-type": "application/json" },
         body: JSON.stringify({ ciphertext: wrappedDekB64 }),
+        // The decrypt request goes only to the KMS endpoint; never follow redirects.
+        redirect: "error",
       });
     } catch (err) {
       throw new TokenCipherError("kek_unwrap_failed", err instanceof Error ? err.name : "error");

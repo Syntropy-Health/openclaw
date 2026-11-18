@@ -9,7 +9,7 @@
  */
 
 import { describe, expect, it } from "vitest";
-import { deriveChannel, derivePeerId } from "./session-key.js";
+import { deriveChannel, derivePeerId } from "../../shared/session-key.js";
 
 describe("deriveChannel", () => {
   it.each([
