@@ -251,3 +251,48 @@ describe("parseSyntropyConfig", () => {
     });
   });
 });
+
+// Every call to these URLs carries a Bearer token, so they must be https.
+// Plain http is accepted only for loopback (local dev).
+describe("parseSyntropyConfig: service URLs must be https", () => {
+  const PROD = { NODE_ENV: "production" };
+  for (const field of ["syntropyBaseUrl", "kgBaseUrl"] as const) {
+    const base = {
+      syntropyBaseUrl: "https://api.syntropy.example",
+      databaseUrl: "postgres://localhost/db",
+    };
+
+    for (const bad of [
+      "http://api.syntropy.example",
+      "http://10.0.0.5:3000",
+      "   ",
+      " https://api.syntropy.example",
+      "ftp://api.syntropy.example",
+      "api.syntropy.example",
+      "https://user:secret@api.syntropy.example",
+      "https://user@api.syntropy.example",
+    ]) {
+      test(`${field}=${JSON.stringify(bad)} is refused, naming the field`, () => {
+        expect(() => parseSyntropyConfig({ ...base, [field]: bad }, PROD)).toThrow(`/${field}`);
+      });
+    }
+
+    test(`${field}: the refusal does not echo the value`, () => {
+      expect(() =>
+        parseSyntropyConfig({ ...base, [field]: "https://user:secret@api.syntropy.example" }, PROD),
+      ).not.toThrow(/secret/);
+    });
+
+    for (const ok of [
+      "https://api.syntropy.example",
+      "http://localhost:3000",
+      "http://127.0.0.1:3000",
+      "http://[::1]:3000",
+    ]) {
+      test(`${field}=${ok} is accepted verbatim`, () => {
+        const cfg = parseSyntropyConfig({ ...base, [field]: ok }, PROD);
+        expect(cfg[field]).toBe(ok);
+      });
+    }
+  }
+});

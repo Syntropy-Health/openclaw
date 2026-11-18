@@ -127,6 +127,8 @@ export const clerkBapiMint: MintFn = async (cfg) => {
       // The audience-equivalent custom claim. Byte-identical to SJ's /mcp URI.
       claims: { resource: cfg.resource },
     }),
+    // The token mint is sent only to the configured Clerk API; never follow redirects.
+    redirect: "error",
     signal: AbortSignal.timeout(15_000),
   });
 
