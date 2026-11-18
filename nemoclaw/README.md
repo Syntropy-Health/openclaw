@@ -26,6 +26,9 @@ nemoclaw/
 ## Quick Start
 
 ```bash
+# Required: the https base URL of the Syntropy API (no default)
+export SYNTROPY_API_BASE_URL=https://<your Syntropy API host>
+
 # Full deployment
 ./scripts/deploy-syntropy.sh
 
@@ -38,14 +41,14 @@ nemoclaw/
 
 ## Network Policy Summary
 
-| Policy         | Endpoint                       | Protocol     | Purpose                          |
-| -------------- | ------------------------------ | ------------ | -------------------------------- |
-| `syntropy_api` | `api.syntropyhealth.com:443`   | REST         | MCP health tools, pairing verify |
-| `zep_cloud`    | `api.getzep.com:443`           | REST         | Graph memory backend             |
-| `whatsapp`     | `web.whatsapp.com:443`         | CONNECT      | WebSocket message transport      |
-| `whatsapp`     | `mmg.whatsapp.net:443`         | REST         | Media CDN                        |
-| `postgresql`   | `monorail.proxy.rlwy.net:5432` | TCP          | Identity DB, tokens, messages    |
-| `slack`        | `*.slack.com:443`              | REST+CONNECT | Slack API + Socket Mode          |
+| Policy         | Endpoint                          | Protocol     | Purpose                          |
+| -------------- | --------------------------------- | ------------ | -------------------------------- |
+| `syntropy_api` | `$SYNTROPY_API_BASE_URL` host:443 | REST         | MCP health tools, pairing verify |
+| `zep_cloud`    | `api.getzep.com:443`              | REST         | Graph memory backend             |
+| `whatsapp`     | `web.whatsapp.com:443`            | CONNECT      | WebSocket message transport      |
+| `whatsapp`     | `mmg.whatsapp.net:443`            | REST         | Media CDN                        |
+| `postgresql`   | `monorail.proxy.rlwy.net:5432`    | TCP          | Identity DB, tokens, messages    |
+| `slack`        | `*.slack.com:443`                 | REST+CONNECT | Slack API + Socket Mode          |
 
 Plus base NemoClaw policies: Anthropic, NVIDIA, ClawHub, OpenClaw, npm, Telegram, Discord.
 
@@ -62,11 +65,16 @@ Required credentials (set on host):
 - `SLACK_APP_TOKEN` — Slack app-level token (Socket Mode)
 - `OPENCLAW_GATEWAY_TOKEN` — Gateway auth token
 
+Required setting (no default):
+
+- `SYNTROPY_API_BASE_URL` — https base URL of the Syntropy API. `deploy-syntropy.sh` renders it into every staged artifact and refuses to stage without it. The repo files carry only placeholders.
+
 ## Adding New Endpoints
 
 1. Create a preset in `presets/<name>.yaml` following the existing format
 2. Add the preset entries to `policies/syntropy-sandbox.yaml`
-3. Re-apply: `openshell policy set --policy policies/syntropy-sandbox.yaml shrine-openclaw`
+3. Re-stage, then apply the rendered copy (the repo file carries only placeholders):
+   `./scripts/deploy-syntropy.sh --stage-only && openshell policy set --policy "${NEMOCLAW_HOME:-$HOME/.nemoclaw}/policies/syntropy-sandbox.yaml" shrine-openclaw`
 
 ## Updating Extensions
 

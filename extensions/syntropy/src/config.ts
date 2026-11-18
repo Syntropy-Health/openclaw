@@ -59,13 +59,32 @@ const ConfigSchema = Type.Object({
 // at startup and falls back to legacy plaintext when they're not yet
 // installed. See vault.ts.
 
-function isValidUrl(s: string): boolean {
+const LOOPBACK_HOSTS = new Set(["localhost", "127.0.0.1", "[::1]"]);
+
+/**
+ * Every call to these URLs carries a Bearer token, so they must be https.
+ * Plain http is accepted only for loopback (the local dev default). A value
+ * with surrounding whitespace is refused rather than silently trimmed.
+ */
+function isSecureServiceUrl(s: string): boolean {
+  if (s.length === 0 || s.trim() !== s) {
+    return false;
+  }
+  let url: URL;
   try {
-    new URL(s);
-    return true;
+    url = new URL(s);
   } catch {
     return false;
   }
+  // Embedded credentials would be logged with the base URL at startup and
+  // rejected by fetch at call time, so they are refused here.
+  if (url.username !== "" || url.password !== "") {
+    return false;
+  }
+  if (url.protocol === "https:") {
+    return true;
+  }
+  return url.protocol === "http:" && LOOPBACK_HOSTS.has(url.hostname);
 }
 
 export type SyntropyConfig = Static<typeof ConfigSchema>;
@@ -170,15 +189,15 @@ export function parseSyntropyConfig(
     throw new Error(`syntropy plugin config invalid (NODE_ENV=${envLabel}): ${fields}`);
   }
 
-  if (!isValidUrl(candidate.syntropyBaseUrl as string)) {
+  if (!isSecureServiceUrl(candidate.syntropyBaseUrl as string)) {
     throw new Error(
-      `syntropy plugin config invalid (NODE_ENV=${envLabel}): /syntropyBaseUrl: must be a parseable URL`,
+      `syntropy plugin config invalid (NODE_ENV=${envLabel}): /syntropyBaseUrl: must be an https URL without credentials (http only for localhost)`,
     );
   }
 
-  if (candidate.kgBaseUrl !== undefined && !isValidUrl(candidate.kgBaseUrl as string)) {
+  if (candidate.kgBaseUrl !== undefined && !isSecureServiceUrl(candidate.kgBaseUrl as string)) {
     throw new Error(
-      `syntropy plugin config invalid (NODE_ENV=${envLabel}): /kgBaseUrl: must be a parseable URL`,
+      `syntropy plugin config invalid (NODE_ENV=${envLabel}): /kgBaseUrl: must be an https URL without credentials (http only for localhost)`,
     );
   }
 
