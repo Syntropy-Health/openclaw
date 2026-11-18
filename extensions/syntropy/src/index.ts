@@ -24,6 +24,7 @@
 import { createRetryingInit, openPluginPool, type OpenClawPluginApi } from "openclaw/plugin-sdk";
 import postgres from "postgres";
 import { isHttpGateChannel, isHttpShapedSession } from "../../shared/http-channels.js";
+import { deriveChannel, derivePeerId } from "../../shared/session-key.js";
 import { TtlCache } from "./cache.js";
 import { callSyntropyTool, type SyntropyToolResult } from "./client.js";
 import { parseSyntropyConfig } from "./config.js";
@@ -35,7 +36,6 @@ import {
 } from "./db.js";
 import { createAllKgTools } from "./kg-tools.js";
 import { resolveProfileContext } from "./profile-context.js";
-import { deriveChannel, derivePeerId } from "./session-key.js";
 import { tokenCipherFromEnv, TokenCipherError, type TokenCipher } from "./token-cipher.js";
 import { createAllTools } from "./tools.js";
 import { createBraintrustTracer, type TracedFn, type Tracer } from "./tracer.js";

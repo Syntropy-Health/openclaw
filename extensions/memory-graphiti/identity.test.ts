@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
-import { deriveChannel, derivePeerId, externalIdScopeKey } from "./identity.js";
+import { deriveChannel, derivePeerId } from "../shared/session-key.js";
+import { externalIdScopeKey } from "./identity.js";
 
 // ============================================================================
 // Session key parsing
