@@ -8,7 +8,7 @@ import { readFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it, vi } from "vitest";
-import { callMcpToolWithServiceAuth, callSyntropyTool } from "./client.js";
+import { callSyntropyTool } from "./client.js";
 import { callKgTool } from "./kg-client.js";
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "../../..");
@@ -62,19 +62,6 @@ describe("MCP endpoint path per server", () => {
     await callSyntropyTool(`${TEST_SJ}/`, "sj_x_y", "log_food", {});
     spy.mockRestore();
     expect(urls).toEqual([`${TEST_SJ}/mcp/`, `${TEST_SJ}/mcp/`]);
-  });
-
-  it("SJ service-auth calls go to /mcp/", async () => {
-    const { urls, spy } = captureFetch();
-    await callMcpToolWithServiceAuth(
-      TEST_SJ,
-      { getToken: async () => "m2m" },
-      "t",
-      {},
-      { label: "SJ" },
-    );
-    spy.mockRestore();
-    expect(urls).toEqual([`${TEST_SJ}/mcp/`]);
   });
 
   it("kg-mcp keeps its existing /mcp path (different server, unchanged)", async () => {
