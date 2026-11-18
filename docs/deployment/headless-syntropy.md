@@ -31,10 +31,13 @@ At minimum one channel must be enabled:
 | `OPENCLAW_GATEWAY_TOKEN` | Yes         | Gateway auth token                                   |
 | LLM API key              | Yes         | Provider-specific (e.g., `ANTHROPIC_API_KEY`)        |
 | Channel tokens           | Per channel | `SLACK_BOT_TOKEN`, WhatsApp credentials, etc.        |
+| `SYNTROPY_API_BASE_URL`  | Yes         | https base URL of the Syntropy API (no default)      |
 
 **No `OPENCLAW_SERVICE_KEY` needed** — auth is per-user via Syntropy ApiTokens.
 
 ## Minimal `openclaw.json`
+
+The Syntropy endpoints have no default. `${SYNTROPY_API_BASE_URL}` is resolved by the gateway at startup, which refuses to start (naming the setting) when it is unset or empty. Under NemoClaw, `deploy-syntropy.sh` renders it into the staged config instead.
 
 ```json
 {
@@ -56,8 +59,8 @@ At minimum one channel must be enabled:
         "config": {
           "auth": {
             "mode": "passcode-endpoint",
-            "passcodeVerifyUrl": "https://api.syntropyhealth.com/api/ext/pairing/verify",
-            "userLookupUrl": "https://api.syntropyhealth.com/api/ext/users/search",
+            "passcodeVerifyUrl": "${SYNTROPY_API_BASE_URL}/api/ext/pairing/verify",
+            "userLookupUrl": "${SYNTROPY_API_BASE_URL}/api/ext/users/search",
             "apiToken": ""
           }
         }
@@ -69,7 +72,7 @@ At minimum one channel must be enabled:
       },
       "syntropy": {
         "enabled": true,
-        "config": { "syntropyBaseUrl": "https://api.syntropyhealth.com" }
+        "config": { "syntropyBaseUrl": "${SYNTROPY_API_BASE_URL}" }
       },
       "memory-graphiti": {
         "enabled": true,
@@ -147,13 +150,13 @@ Or step by step:
 
 ```bash
 # 1. Stage config artifacts
-./scripts/deploy-syntropy.sh --stage-only
+SYNTROPY_API_BASE_URL=https://<your Syntropy API host> ./scripts/deploy-syntropy.sh --stage-only
 
 # 2. Onboard with Syntropy agent
 nemoclaw onboard --agent syntropy-openclaw --inference-provider anthropic
 
 # 3. Apply combined network policy
-openshell policy set --policy nemoclaw/policies/syntropy-sandbox.yaml shrine-openclaw
+openshell policy set --policy "${NEMOCLAW_HOME:-$HOME/.nemoclaw}/policies/syntropy-sandbox.yaml" shrine-openclaw
 
 # 4. Validate
 ./scripts/deploy-syntropy.sh --validate-only
@@ -163,14 +166,14 @@ openshell policy set --policy nemoclaw/policies/syntropy-sandbox.yaml shrine-ope
 
 The combined policy (`nemoclaw/policies/syntropy-sandbox.yaml`) allows egress to:
 
-| Endpoint                  | Protocol         | Purpose                          |
-| ------------------------- | ---------------- | -------------------------------- |
-| `api.syntropyhealth.com`  | REST             | MCP health tools, pairing verify |
-| `api.getzep.com`          | REST             | Graph memory (Zep Cloud)         |
-| `web.whatsapp.com`        | WebSocket        | WhatsApp message transport       |
-| `monorail.proxy.rlwy.net` | TCP              | PostgreSQL database              |
-| `*.slack.com`             | REST + WebSocket | Slack API + Socket Mode          |
-| `api.anthropic.com`       | REST             | Inference (Anthropic)            |
+| Endpoint                      | Protocol         | Purpose                          |
+| ----------------------------- | ---------------- | -------------------------------- |
+| `$SYNTROPY_API_BASE_URL` host | REST             | MCP health tools, pairing verify |
+| `api.getzep.com`              | REST             | Graph memory (Zep Cloud)         |
+| `web.whatsapp.com`            | WebSocket        | WhatsApp message transport       |
+| `monorail.proxy.rlwy.net`     | TCP              | PostgreSQL database              |
+| `*.slack.com`                 | REST + WebSocket | Slack API + Socket Mode          |
+| `api.anthropic.com`           | REST             | Inference (Anthropic)            |
 
 All other egress is blocked. See `nemoclaw/README.md` for full details.
 

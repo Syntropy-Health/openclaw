@@ -2,8 +2,10 @@
 # Merges the base NemoClaw OpenClaw sandbox policy with Syntropy-specific
 # presets: syntropy API, Zep Cloud, WhatsApp, PostgreSQL, and Slack.
 #
-# Apply with:
-#   openshell policy set --policy syntropy-sandbox.yaml shrine-openclaw
+# Do not apply this file directly: its Syntropy API host is a placeholder.
+# Stage it (renders the host from SYNTROPY_API_BASE_URL), then apply the copy:
+#   ./scripts/deploy-syntropy.sh --stage-only
+#   openshell policy set --policy "${NEMOCLAW_HOME:-$HOME/.nemoclaw}/policies/syntropy-sandbox.yaml" shrine-openclaw
 #
 # Base policy: NemoClaw/nemoclaw-blueprint/policies/openclaw-sandbox.yaml
 # Additional presets: syntropy, zep, whatsapp, postgresql, slack
@@ -198,11 +200,13 @@ network_policies:
 
   # ── Syntropy-specific policies ─────────────────────────────────
 
-  # Syntropy Health API — MCP health tools + pairing verification
+  # Syntropy Health API — MCP health tools + pairing verification.
+  # The host has no default: scripts/render-endpoints.sh renders it from the
+  # required SYNTROPY_API_BASE_URL. Unrendered, this names no real host.
   syntropy_api:
     name: syntropy_api
     endpoints:
-      - host: api.syntropyhealth.com
+      - host: __SYNTROPY_API_HOST__
         port: 443
         protocol: rest
         enforcement: enforce
