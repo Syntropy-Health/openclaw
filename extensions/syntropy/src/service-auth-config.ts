@@ -149,7 +149,7 @@ export function resolveServiceAuthConfig(
     throw new ServiceAuthConfigError(
       "missing-resource",
       "syntropy service-auth config: missing `resource` — set the canonical " +
-        "SJ /mcp URI via pluginConfig.serviceAuthResource or SYNTROPY_MCP_RESOURCE_URL " +
+        "SJ /mcp URI via the syntropy-mcp server's `resource` or SYNTROPY_MCP_RESOURCE_URL " +
         "(the M2M `resource` claim must equal SJ's validated /mcp URI).",
     );
   }

@@ -23,9 +23,12 @@ app = "sh -c 'node /app/scripts/fly/bootstrap-config.mjs && exec node dist/index
 [http_service]
 internal_port = 3000
 force_https = true
-auto_stop_machines = false # Keep running for persistent connections
-auto_start_machines = true
-min_machines_running = 1
+# Scale to zero and stay there: no machine is kept running, idle machines
+# stop, and incoming requests never start one. Running the app is a
+# deliberate act (a manual deploy or machine start), not a side effect.
+auto_stop_machines = "stop"
+auto_start_machines = false
+min_machines_running = 0
 processes = ["app"]
 
 [[vm]]

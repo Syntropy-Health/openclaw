@@ -18,6 +18,18 @@ export const DEFAULT_GATEWAY_HTTP_TOOL_DENY = [
 ] as const;
 
 /**
+ * Tools never offered over Gateway HTTP `POST /tools/invoke`, whatever
+ * `gateway.tools.allow` says. Graph memory tools are scoped to an agent run's
+ * session, and an HTTP call has no run.
+ */
+export const FIXED_GATEWAY_HTTP_TOOL_DENY = [
+  "memory_recall",
+  "memory_store",
+  "graphiti_search",
+  "graphiti_episodes",
+] as const;
+
+/**
  * ACP tools that should always require explicit user approval.
  * ACP is an automation surface; we never want "silent yes" for mutating/execution tools.
  */

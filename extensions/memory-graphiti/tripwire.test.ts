@@ -329,16 +329,18 @@ const QA_NUMBERS = ["+1000000001", "+1000000002"];
 
 // A QA sender / a real sender driving the per-sender gate. The gate keys on
 // ctx.senderE164 (the host-resolved canonical sender), NOT the session key —
-// note the sessionKey here intentionally collapses to `main` (the default
-// dmScope DOES this), which is exactly why senderE164 must be the gate input.
+// so the session key here names a DIFFERENT peer than the sender, which is
+// exactly why senderE164 must be the gate input. (A shared main session gets
+// no memory at all, so it cannot exercise the gate.)
+const GATE_SESSION_KEY = "agent:main:whatsapp:direct:unrelated-peer";
 const QA_SENDER_CTX = {
   messageProvider: "whatsapp",
-  sessionKey: "agent:main:main",
+  sessionKey: GATE_SESSION_KEY,
   senderE164: "+1000000001",
 };
 const REAL_SENDER_CTX = {
   messageProvider: "whatsapp",
-  sessionKey: "agent:main:main",
+  sessionKey: GATE_SESSION_KEY,
   senderE164: "+15551234567",
 };
 
@@ -374,8 +376,16 @@ function makeFakeApi(opts: {
     pluginConfig: opts.pluginConfig,
     runtime: {} as Record<string, unknown>,
     logger,
+    // Tools are factories of the calling session; resolve with a test session.
     registerTool: vi.fn((tool: unknown) => {
-      const t = tool as { name?: string; execute?: (id: string, p: unknown) => unknown };
+      const t = (
+        typeof tool === "function"
+          ? (tool as (ctx: unknown) => unknown)({
+              sessionKey: "agent:main:telegram:direct:tester",
+              messageChannel: "telegram",
+            })
+          : tool
+      ) as { name?: string; execute?: (id: string, p: unknown) => unknown };
       if (t?.name && typeof t.execute === "function") {
         tools[t.name] = t.execute;
       }
@@ -754,11 +764,14 @@ describe("per-sender gate: graphiti_* tools (no sender ctx ⇒ fail-closed on cl
   it("SELF-HOSTED: graphiti_search is NOT gated — client is called", async () => {
     const searchSpy = vi.spyOn(GraphitiRestClient.prototype, "searchFacts").mockResolvedValue([]);
     try {
+      // A static userId gives the tool a group without a recorded session, so this
+      // isolates the tripwire (session scoping: memory-tool-scope.test.ts).
       const { tools } = await registerWith({
         pluginConfig: {
           backend: "self-hosted",
           serverUrl: "http://localhost:8000",
           groupIdStrategy: "channel-sender",
+          userId: "u-1",
         },
         whatsapp: REAL_WHATSAPP,
       });
