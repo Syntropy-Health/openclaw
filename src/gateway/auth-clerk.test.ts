@@ -231,6 +231,38 @@ describe("authorizeGatewayConnect — clerk wiring (fail-closed invariants)", ()
     expect(res.externalId).toBeUndefined();
   });
 
+  // The chat endpoints pick the end-user agent when externalId is set, so an
+  // authorised clerk-jwt result must always carry a non-empty externalId, and a
+  // token with an empty sub must never authorise as anything.
+  it("INV-1: a valid signature with an empty sub is refused, not authorised by any method", async () => {
+    const token = mintToken(freshClaims({ sub: "" }), { kid: KID, privateKey });
+    const res = await authorizeGatewayConnect({
+      auth: { mode: "token", token: SHARED, allowTailscale: false, clerk: CLERK },
+      connectAuth: { token },
+      fetchClerkJwks: jwksFetcher(),
+    });
+    expect(res.ok).toBe(false);
+    expect(res.reason).toBe("clerk_jwt_invalid");
+    expect(res.method).toBeUndefined();
+    expect(res.externalId).toBeUndefined();
+  });
+
+  it("INV-1: an authorised clerk-jwt result always carries a non-empty externalId", async () => {
+    for (const sub of ["user_2abc", "u", "user_2xyz/with:odd chars"]) {
+      const token = mintToken(freshClaims({ sub }), { kid: KID, privateKey });
+      const res = await authorizeGatewayConnect({
+        auth: { mode: "token", token: SHARED, allowTailscale: false, clerk: CLERK },
+        connectAuth: { token },
+        fetchClerkJwks: jwksFetcher(),
+      });
+      expect(res.ok).toBe(true);
+      expect(res.method).toBe("clerk-jwt");
+      expect(typeof res.externalId).toBe("string");
+      expect(res.externalId).toBe(sub);
+      expect(res.externalId?.length).toBeGreaterThan(0);
+    }
+  });
+
   it("INV-1: an expired Clerk JWT fails closed (401), even though the verifier is wired", async () => {
     const expired = mintToken(validClaims({ exp: Math.floor(Date.now() / 1000) - 3600 }), {
       kid: KID,

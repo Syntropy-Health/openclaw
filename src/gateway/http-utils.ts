@@ -100,7 +100,20 @@ export function resolveAgentIdFromModel(model: string | undefined): string | und
 export function resolveAgentIdForRequest(params: {
   req: IncomingMessage;
   model: string | undefined;
+  /**
+   * The verified Clerk `sub`, present only for an end-user (clerk-jwt) request.
+   * An end user always runs on the configured end-user agent; the agent header
+   * and the `model` routing apply to operator callers only.
+   */
+  externalId?: string | undefined;
+  env?: NodeJS.ProcessEnv;
+  /** The configured agent ids; an end-user agent not among them falls back to main. */
+  knownAgentIds?: readonly string[];
 }): string {
+  if (params.externalId) {
+    return resolveEndUserAgentId(params.env ?? process.env, params.knownAgentIds);
+  }
+
   const fromHeader = resolveAgentIdFromHeader(params.req);
   if (fromHeader) {
     return fromHeader;
@@ -108,6 +121,23 @@ export function resolveAgentIdForRequest(params: {
 
   const fromModel = resolveAgentIdFromModel(params.model);
   return fromModel ?? "main";
+}
+
+/**
+ * The agent end users (Clerk sign-ins) run on. ENV ONLY, like the Clerk trust
+ * anchors: config is writable by the agent's own gateway tool, so it must not
+ * be able to move end users onto another agent. Defaults to the main agent.
+ */
+export function resolveEndUserAgentId(
+  env: NodeJS.ProcessEnv,
+  knownAgentIds?: readonly string[],
+): string {
+  // normalizeAgentId maps an empty or all-invalid value to the main agent.
+  const agentId = normalizeAgentId(env.OPENCLAW_CLERK_AGENT_ID);
+  if (knownAgentIds && !knownAgentIds.includes(agentId)) {
+    return "main";
+  }
+  return agentId;
 }
 
 /** One opaque, structure-free session-key segment for a client-supplied hint. */
