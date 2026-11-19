@@ -26,6 +26,7 @@ Notes:
 - When `gateway.auth.mode="token"`, use `gateway.auth.token` (or `OPENCLAW_GATEWAY_TOKEN`).
 - When `gateway.auth.mode="password"`, use `gateway.auth.password` (or `OPENCLAW_GATEWAY_PASSWORD`).
 - If `gateway.auth.rateLimit` is configured and too many auth failures occur, the endpoint returns `429` with `Retry-After`.
+- This endpoint requires operator credentials. A request authenticated as an end user (a Clerk session token, when Clerk chat auth is configured) is refused with `403`; end users reach the agent through the chat endpoints.
 
 ## Request body
 
@@ -81,6 +82,8 @@ You can customize this deny list via `gateway.tools`:
 }
 ```
 
+The graph memory tools (`memory_recall`, `memory_store`, `graphiti_search`, `graphiti_episodes`) are never offered over this endpoint, and `gateway.tools.allow` does not re-enable them.
+
 To help group policies resolve context, you can optionally set:
 
 - `x-openclaw-message-channel: <channel>` (example: `slack`, `telegram`)
@@ -91,6 +94,7 @@ To help group policies resolve context, you can optionally set:
 - `200` → `{ ok: true, result }`
 - `400` → `{ ok: false, error: { type, message } }` (invalid request or tool input error)
 - `401` → unauthorized
+- `403` → caller is not an operator
 - `429` → auth rate-limited (`Retry-After` set)
 - `404` → tool not available (not found or not allowlisted)
 - `405` → method not allowed
