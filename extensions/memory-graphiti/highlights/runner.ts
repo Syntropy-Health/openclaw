@@ -5,7 +5,7 @@ type ModelRef = { provider: string; model: string };
 type ResolvedModel = { provider: string; id?: string; baseUrl?: string };
 
 /** Hosts the summariser may send facts to. */
-export const ANTHROPIC_HOSTS: readonly string[] = Object.freeze(["api.anthropic.com"]);
+const ANTHROPIC_HOSTS: readonly string[] = Object.freeze(["api.anthropic.com"]);
 
 function isAnthropicHost(baseUrl: string): boolean {
   try {

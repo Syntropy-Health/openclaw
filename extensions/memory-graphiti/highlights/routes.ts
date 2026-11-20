@@ -26,7 +26,7 @@ export const HIGHLIGHTS_CONTRACT = "memory-highlights/1";
 const MAX_BODY_BYTES = 4096;
 const HIGHLIGHT_ID = /^hl_[0-9a-f]{24}$/;
 /** The raw-fact fallback is reused for this long per group (bounds listFacts per user). */
-export const FALLBACK_CACHE_MS = 30_000;
+const FALLBACK_CACHE_MS = 30_000;
 const FALLBACK_CACHE_MAX = 1_000;
 
 type Reason = "backend_unsupported" | "store_error" | "summariser_error";

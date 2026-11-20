@@ -163,7 +163,7 @@ function externalIdsIn(file: string): Set<string> | null {
 }
 
 /** Decide which transcript files in `dir` are this user's. */
-export function userTranscriptFiles(
+function userTranscriptFiles(
   dir: string,
   user: { externalId: string | null; peers: Array<{ channel: string; peer: string }> },
 ): { files: string[]; sharedSkipped: number; vanished: number } {
@@ -201,7 +201,7 @@ export function userTranscriptFiles(
 }
 
 /** Hash-only tombstones for every user/assistant entry in these transcript files. */
-export function tombstonesFor(files: string[]): string[] {
+function tombstonesFor(files: string[]): string[] {
   const hashes = new Set<string>();
   for (const file of files) {
     for (const m of extractMessages(messagesIn(file) ?? [])) {

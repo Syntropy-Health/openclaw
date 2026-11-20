@@ -5,7 +5,7 @@
  */
 import fs from "node:fs";
 import { describe, expect, it } from "vitest";
-import { NARRATION_GUARD_SOURCE, checkNarration, isNarrationSafe } from "./narration-guard.js";
+import { NARRATION_GUARD_SOURCE, checkNarration } from "./narration-guard.js";
 
 type Corpus = {
   source: { blob: string; guard_version: string };
@@ -33,7 +33,7 @@ describe("narration guard: shared corpus", () => {
 
   for (const text of corpus.fail) {
     it(`rejects: ${JSON.stringify(text)}`, () => {
-      expect(isNarrationSafe(text)).toBe(false);
+      expect(checkNarration(text).ok).toBe(false);
     });
   }
 });
@@ -67,8 +67,8 @@ describe("narration guard: RED arm and result shape", () => {
 
   it("is stateless across calls (no global-regex lastIndex carry-over)", () => {
     for (let i = 0; i < 3; i++) {
-      expect(isNarrationSafe("We recommend rest.")).toBe(false);
-      expect(isNarrationSafe("This is not medical advice.")).toBe(true);
+      expect(checkNarration("We recommend rest.").ok).toBe(false);
+      expect(checkNarration("This is not medical advice.").ok).toBe(true);
     }
   });
 });

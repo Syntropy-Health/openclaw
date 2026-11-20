@@ -82,8 +82,8 @@ export type HighlightsConfig = {
 };
 
 /** Bounds for `highlights.rank`; the manifest schema carries the same ones. */
-export const RANK_HALF_LIFE_MAX_DAYS = 3650;
-export const RANK_WEIGHT_MAX = 10;
+const RANK_HALF_LIFE_MAX_DAYS = 3650;
+const RANK_WEIGHT_MAX = 10;
 
 export type RecallReranker = "rrf" | "mmr" | "cross_encoder";
 
@@ -99,8 +99,8 @@ export type RecallConfig = {
   mmrLambda?: number;
 };
 
-export const RECALL_TIMEOUT_MIN_MS = 50;
-export const RECALL_TIMEOUT_MAX_MS = 10_000;
+const RECALL_TIMEOUT_MIN_MS = 50;
+const RECALL_TIMEOUT_MAX_MS = 10_000;
 const VALID_RERANKERS: RecallReranker[] = ["rrf", "mmr", "cross_encoder"];
 
 export type PhiCloudApproval = {
@@ -173,7 +173,7 @@ function normalizeUrl(url: string): string {
  * Session key format: `agent:<agentId>:<channel>:<type>:<peerId>`
  * We take the last segment as the sender identifier.
  */
-export function extractSenderFromSessionKey(sessionKey: string): string | null {
+function extractSenderFromSessionKey(sessionKey: string): string | null {
   const parts = sessionKey.split(":").filter(Boolean);
   if (parts.length < 3 || parts[0] !== "agent") {
     return null;

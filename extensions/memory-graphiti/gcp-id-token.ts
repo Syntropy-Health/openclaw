@@ -232,7 +232,7 @@ export function createGcpIdTokenSource(cfg: GcpIdTokenConfig, deps: GcpIdTokenDe
 }
 
 /** Environment variables for the caller identity (all non-secret resource names). */
-export const GCP_ID_TOKEN_ENV = {
+const GCP_ID_TOKEN_ENV = {
   wifProvider: "OPENCLAW_GRAPHITI_WIF_PROVIDER",
   invokerServiceAccount: "OPENCLAW_GRAPHITI_INVOKER_SA",
   audience: "OPENCLAW_GRAPHITI_AUDIENCE",

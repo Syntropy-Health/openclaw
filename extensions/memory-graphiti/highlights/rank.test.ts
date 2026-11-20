@@ -10,8 +10,11 @@ import {
   type RankInput,
   deriveSignals,
   rankHighlights,
-  scoreHighlight,
 } from "./rank.js";
+
+// One entry's R3 score, as rankHighlights computes it.
+const scoreOf = (e: RankInput, now: Date): number =>
+  rankHighlights([e], now)[0]?.score ?? Number.NaN;
 
 const NOW = new Date("2026-10-29T12:00:00Z");
 const daysAgo = (d: number) => new Date(NOW.getTime() - d * 86_400_000).toISOString();
@@ -67,7 +70,7 @@ describe("deriveSignals", () => {
   });
 });
 
-describe("scoreHighlight", () => {
+describe("score (R3, via rankHighlights)", () => {
   it("matches the formula: importance x 0.5^(age/halfLife)", () => {
     // 4 episodes, symptoms (link bonus), high salience, last seen 14 days ago.
     const e = entry("x", [src(14, ["a", "b", "c", "d"])], {
@@ -75,13 +78,13 @@ describe("scoreHighlight", () => {
       salience: "high",
     });
     const importance = 1 + 0.5 * Math.log2(4) + 0.5 + 0.25;
-    expect(scoreHighlight(e, NOW)).toBeCloseTo(importance * 0.5, 12);
+    expect(scoreOf(e, NOW)).toBeCloseTo(importance * 0.5, 12);
   });
 
   it("goal_linked earns the same link bonus as symptoms, and they do not stack", () => {
-    const base = scoreHighlight(entry("a", [src(0, ["e"])]), NOW);
-    const goal = scoreHighlight(entry("b", [src(0, ["e"])], { goal_linked: true }), NOW);
-    const both = scoreHighlight(
+    const base = scoreOf(entry("a", [src(0, ["e"])]), NOW);
+    const goal = scoreOf(entry("b", [src(0, ["e"])], { goal_linked: true }), NOW);
+    const both = scoreOf(
       entry("c", [src(0, ["e"])], { goal_linked: true, category: "symptoms" }),
       NOW,
     );
@@ -91,13 +94,13 @@ describe("scoreHighlight", () => {
 
   it("a last_seen in the future (clock skew) is treated as now, never above full recency", () => {
     const e = entry("f", [src(-3, ["e"])]);
-    expect(scoreHighlight(e, NOW)).toBeCloseTo(1, 12);
+    expect(scoreOf(e, NOW)).toBeCloseTo(1, 12);
   });
 
   it("property: score never rises with age", () => {
     for (let age = 0; age < 200; age += 3) {
-      const younger = scoreHighlight(entry("y", [src(age, ["a", "b"])]), NOW);
-      const older = scoreHighlight(entry("o", [src(age + 1, ["a", "b"])]), NOW);
+      const younger = scoreOf(entry("y", [src(age, ["a", "b"])]), NOW);
+      const older = scoreOf(entry("o", [src(age + 1, ["a", "b"])]), NOW);
       expect(older).toBeLessThanOrEqual(younger);
     }
   });
@@ -105,8 +108,8 @@ describe("scoreHighlight", () => {
   it("property: score never falls with occurrences", () => {
     for (let k = 1; k < 40; k++) {
       const eps = (m: number) => Array.from({ length: m }, (_, i) => `ep${i}`);
-      const fewer = scoreHighlight(entry("a", [src(5, eps(k))]), NOW);
-      const more = scoreHighlight(entry("b", [src(5, eps(k + 1))]), NOW);
+      const fewer = scoreOf(entry("a", [src(5, eps(k))]), NOW);
+      const more = scoreOf(entry("b", [src(5, eps(k + 1))]), NOW);
       expect(more).toBeGreaterThanOrEqual(fewer);
     }
   });

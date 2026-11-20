@@ -22,7 +22,7 @@ export const INPUT_FACTS_MAX = 300;
 export const FACT_TEXT_MAX = 300;
 /** Most raw facts in the unavailable fallback (PVR F3). */
 export const FALLBACK_FACTS_MAX = 20;
-export const TITLE_MAX = 80;
+const TITLE_MAX = 80;
 /** One sentence: the served body is bounded and plain text. */
 export const BODY_MAX = 240;
 /** Markup never reaches the served payload, whatever the consumer does with it. */
