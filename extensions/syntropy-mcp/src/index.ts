@@ -43,6 +43,7 @@ import {
   ServiceAuthConfigError,
 } from "../../syntropy/src/service-auth-config.js";
 import { ServiceAuthProvider } from "../../syntropy/src/service-auth.js";
+import { toAgentResult } from "../../syntropy/src/tool-result.js";
 import {
   ToolCatalog,
   type CatalogEntry,
@@ -357,18 +358,6 @@ function toParameters(inputSchema?: Record<string, unknown>): TObject {
     shape[key] = required.includes(key) ? field : Type.Optional(field);
   }
   return Type.Object(shape, { additionalProperties: true });
-}
-
-/** Map an {@link McpToolResult} to the agent-loop result shape (kg-tools pattern). */
-function toAgentResult(res: McpToolResult): AgentToolResult<unknown> {
-  if (!res.ok) {
-    return {
-      content: [{ type: "text", text: `Error: ${res.error ?? "Unknown error"}` }],
-      details: { error: res.error },
-    };
-  }
-  const text = typeof res.data === "string" ? res.data : JSON.stringify(res.data, null, 2);
-  return { content: [{ type: "text", text }], details: res.data };
 }
 
 /** Server-side "no such tool" shapes that warrant one refresh-and-retry. */
