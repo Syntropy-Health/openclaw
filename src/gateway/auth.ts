@@ -8,6 +8,7 @@ import { readTailscaleWhoisIdentity, type TailscaleWhoisIdentity } from "../infr
 import { logInfo } from "../logger.js";
 import { safeEqualSecret } from "../security/secret-equal.js";
 import {
+  AUTH_RATE_LIMIT_SCOPE_CLERK_JWT,
   AUTH_RATE_LIMIT_SCOPE_SHARED_SECRET,
   type AuthRateLimiter,
   type RateLimitCheckResult,
@@ -618,6 +619,20 @@ export async function authorizeGatewayConnect(params: {
   // failed auth attempt (rate-limited) and returns unauthorized (fail-closed).
   // A non-JWS bearer is left to the legacy paths below (back-compat). ---
   if (auth.clerk && connectAuth?.token && looksLikeJws(connectAuth.token)) {
+    // Clerk attempts are counted in their own scope: a successful end-user
+    // sign-in must not clear the shared-secret failure count for this address.
+    const clerkScope = AUTH_RATE_LIMIT_SCOPE_CLERK_JWT;
+    if (limiter) {
+      const clerkCheck: RateLimitCheckResult = limiter.check(ip, clerkScope);
+      if (!clerkCheck.allowed) {
+        return {
+          ok: false,
+          reason: "rate_limited",
+          rateLimited: true,
+          retryAfterMs: clerkCheck.retryAfterMs,
+        };
+      }
+    }
     const clerkResult = await authorizeClerkJwt(connectAuth.token, auth.clerk, {
       fetchJwks: params.fetchClerkJwks,
     });
@@ -643,14 +658,14 @@ export async function authorizeGatewayConnect(params: {
           metric: params.sessionMetric,
         });
         if (!decision.ok) {
-          limiter?.recordFailure(ip, rateLimitScope);
+          limiter?.recordFailure(ip, clerkScope);
           return { ok: false, reason: `clerk_session_${decision.reason.replace(/-/g, "_")}` };
         }
       }
-      limiter?.reset(ip, rateLimitScope);
+      limiter?.reset(ip, clerkScope);
       return { ok: true, method: "clerk-jwt", externalId: clerkResult.externalId };
     }
-    limiter?.recordFailure(ip, rateLimitScope);
+    limiter?.recordFailure(ip, clerkScope);
     return { ok: false, reason: "clerk_jwt_invalid" };
   }
 
