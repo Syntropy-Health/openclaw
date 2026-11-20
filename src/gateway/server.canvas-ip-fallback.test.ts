@@ -1,5 +1,5 @@
 import type { IncomingMessage, ServerResponse } from "node:http";
-import { describe, expect, test, vi } from "vitest";
+import { afterEach, describe, expect, test, vi } from "vitest";
 import type { ResolvedGatewayAuth } from "./auth.js";
 import { attachGatewayUpgradeHandler, createGatewayHttpServer } from "./server-http.js";
 import { withTempConfig } from "./test-temp-config.js";
@@ -157,6 +157,90 @@ describe("canvas IP-based admission", () => {
         );
         expect(res.statusCode).toBe(401);
         expect(canvas).not.toHaveBeenCalled();
+      },
+    });
+  });
+});
+
+// OPENCLAW_CANVAS_ADDRESS_FALLBACK: the address fallback stays on only when the
+// variable is unset or exactly "on"; any other value turns it off.
+describe("canvas address fallback switch", () => {
+  afterEach(() => {
+    vi.unstubAllEnvs();
+  });
+
+  const run = async (
+    value: string | undefined,
+    check: (r: { http: number; upgradeOk: boolean }) => void,
+  ) => {
+    await withTempConfig({
+      cfg: { gateway: { trustedProxies: [] } },
+      prefix: "openclaw-canvas-switch-",
+      run: async () => {
+        if (value !== undefined) {
+          vi.stubEnv("OPENCLAW_CANVAS_ADDRESS_FALLBACK", value);
+        }
+        const { canvas, handleUpgrade, http, upgrade } = setup(PROXY);
+        const res = await http(request("/__openclaw__/canvas/index.html", PROXY));
+        await upgrade(request("/__openclaw__/ws", PROXY));
+        check({
+          http: res.statusCode,
+          upgradeOk: handleUpgrade.mock.calls.length === 1 && canvas.mock.calls.length <= 1,
+        });
+      },
+    });
+  };
+
+  for (const value of [undefined, "on"]) {
+    test(`${value === undefined ? "unset" : JSON.stringify(value)}: a direct private client is admitted (HTTP and upgrade)`, async () => {
+      await run(value, (r) => {
+        expect(r.http).toBe(200);
+        expect(r.upgradeOk).toBe(true);
+      });
+    });
+  }
+
+  for (const value of ["off", "false", "0", "no", "", "ON", "On", " on", "bogus"]) {
+    test(`${JSON.stringify(value)}: a direct private client is refused (HTTP and upgrade)`, async () => {
+      await run(value, (r) => {
+        expect(r.http).toBe(401);
+        expect(r.upgradeOk).toBe(false);
+      });
+    });
+  }
+
+  test("off: a request with operator credentials is still admitted", async () => {
+    await withTempConfig({
+      cfg: { gateway: { trustedProxies: [] } },
+      prefix: "openclaw-canvas-switch-",
+      run: async () => {
+        vi.stubEnv("OPENCLAW_CANVAS_ADDRESS_FALLBACK", "off");
+        const { canvas, http } = setup(PROXY);
+        const res = await http(
+          request("/__openclaw__/canvas/index.html", PROXY, { authorization: "Bearer test-token" }),
+        );
+        expect(res.statusCode).toBe(200);
+        expect(canvas).toHaveBeenCalledTimes(1);
+      },
+    });
+  });
+
+  test("off: a loopback local request is still admitted", async () => {
+    await withTempConfig({
+      cfg: { gateway: { trustedProxies: [] } },
+      prefix: "openclaw-canvas-switch-",
+      run: async () => {
+        vi.stubEnv("OPENCLAW_CANVAS_ADDRESS_FALLBACK", "off");
+        const { canvas, http } = setup("127.0.0.1");
+        const req = {
+          method: "GET",
+          url: "/__openclaw__/canvas/index.html",
+          headers: { host: "localhost" },
+          socket: { remoteAddress: "127.0.0.1" },
+        } as unknown as IncomingMessage;
+        const res = await http(req);
+        expect(res.statusCode).toBe(200);
+        expect(canvas).toHaveBeenCalledTimes(1);
       },
     });
   });

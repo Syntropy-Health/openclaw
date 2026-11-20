@@ -6,6 +6,10 @@ import type { OpenClawConfig } from "../config/config.js";
 import { resolveConfigPath, resolveStateDir } from "../config/paths.js";
 import { resolveGatewayAuth } from "../gateway/auth.js";
 import { buildGatewayConnectionDetails } from "../gateway/call.js";
+import {
+  CANVAS_ADDRESS_FALLBACK_ENV,
+  isCanvasAddressFallbackEnabled,
+} from "../gateway/canvas-address-fallback.js";
 import { resolveGatewayProbeAuth } from "../gateway/probe-auth.js";
 import { probeGateway } from "../gateway/probe.js";
 import { collectChannelSecurityFindings } from "./audit-channel.js";
@@ -310,6 +314,28 @@ function collectGatewayConfigFindings(
         "so local-client checks cannot be spoofed.",
       remediation:
         "Set gateway.trustedProxies to your proxy IPs or keep the Control UI local-only.",
+    });
+  }
+
+  const canvasHostEnabled = cfg.canvasHost?.enabled !== false;
+  if (
+    bind !== "loopback" &&
+    canvasHostEnabled &&
+    trustedProxies.length === 0 &&
+    isCanvasAddressFallbackEnabled(env)
+  ) {
+    findings.push({
+      checkId: "gateway.canvas_address_admission_unverified",
+      severity: "warn",
+      title: "Canvas host admits by client address",
+      detail:
+        `gateway.bind="${bind}", the canvas host is enabled and gateway.trustedProxies is empty. ` +
+        "The canvas host admits a client without credentials when an authorised control client " +
+        "is connected from the same private address; behind a reverse proxy, every client " +
+        "shares the proxy's address.",
+      remediation:
+        "Set gateway.trustedProxies to your reverse proxy addresses, or set " +
+        `${CANVAS_ADDRESS_FALLBACK_ENV}=off to require credentials for every canvas request.`,
     });
   }
 
