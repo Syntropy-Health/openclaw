@@ -33,7 +33,7 @@ export const RECALL_CAP_PER_GROUP = 5;
 /** How long a forget refuses recall writes for the group (longer than the TTL). */
 export const RECALL_BLOCK_MINUTES = 11;
 /** At most this many expired rows (and blocks) one write sweeps. */
-export const RECALL_SWEEP_BATCH = 200;
+const RECALL_SWEEP_BATCH = 200;
 
 /** One injected fact, as the panel serves it. Key order is part of the contract. */
 export type RecallItem = {

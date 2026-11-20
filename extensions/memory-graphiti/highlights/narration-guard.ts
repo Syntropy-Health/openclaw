@@ -29,7 +29,7 @@ export const NARRATION_GUARD_SOURCE = Object.freeze({
 });
 
 /** Clinical-efficacy vocabulary (SJ BANNED_LEXICON). */
-export const BANNED_LEXICON: readonly string[] = Object.freeze([
+const BANNED_LEXICON: readonly string[] = Object.freeze([
   "improve",
   "treat",
   "cure",
@@ -40,7 +40,7 @@ export const BANNED_LEXICON: readonly string[] = Object.freeze([
 ]);
 
 /** Advice and diagnosis framing (SJ BANNED_ADVICE_LEXICON). "consult" is allowed on purpose. */
-export const BANNED_ADVICE_LEXICON: readonly string[] = Object.freeze([
+const BANNED_ADVICE_LEXICON: readonly string[] = Object.freeze([
   "recommend",
   "diagnos",
   "prescrib",
@@ -134,7 +134,7 @@ const casefold = (s: string): string =>
   s.toLowerCase().replace(/ß/g, "ss").replace(/ẞ/g, "ss").replace(/ς/g, "σ");
 
 /** SJ _fold: casefold + confusables, NFKC, drop Cf/Mn, then casefold + confusables again. */
-export function foldForGuard(text: string): string {
+function foldForGuard(text: string): string {
   const prefolded = translate(casefold(text));
   const stripped = prefolded.normalize("NFKC").replace(/[\p{Cf}\p{Mn}]/gu, "");
   return translate(casefold(stripped));
@@ -159,8 +159,4 @@ export function checkNarration(text: string): NarrationCheck {
     return { ok: false, kind: "imperative_dose", term: dose[0] };
   }
   return { ok: true };
-}
-
-export function isNarrationSafe(text: string): boolean {
-  return checkNarration(text).ok;
 }

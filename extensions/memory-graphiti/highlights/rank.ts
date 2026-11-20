@@ -20,7 +20,7 @@ export const DEFAULT_RANK_CONFIG: Readonly<RankConfig> = Object.freeze({
 export const MAX_HIGHLIGHTS = 7;
 
 /** Episodes at which a highlight is marked recurring. */
-export const RECURRING_MIN_OCCURRENCES = 3;
+const RECURRING_MIN_OCCURRENCES = 3;
 
 /** What ranking needs from a validated highlight entry. */
 export type RankInput = {
@@ -96,15 +96,6 @@ function score(
   const importance =
     1 + cfg.wOcc * Math.log2(signals.occurrences) + cfg.wLink * linked + cfg.wSal * high;
   return importance * recency;
-}
-
-/** R3 score: importance x recency (A&D §4.3). */
-export function scoreHighlight(
-  entry: RankInput,
-  now: Date,
-  cfg: Readonly<RankConfig> = DEFAULT_RANK_CONFIG,
-): number {
-  return score(entry, deriveSignals(entry.sources), now, cfg);
 }
 
 /**

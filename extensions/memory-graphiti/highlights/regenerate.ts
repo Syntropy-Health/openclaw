@@ -8,7 +8,7 @@ import type { HighlightStore } from "./store.js";
  */
 export const LIST_PAGES_MAX = 1;
 /** The regeneration lease: longer than a listing plus the 30 s summariser budget. */
-export const REGEN_LEASE_SEC = 120;
+const REGEN_LEASE_SEC = 120;
 
 export type RegenerateOutcome =
   | "ready"
