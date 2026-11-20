@@ -20,23 +20,13 @@
 
 import type { AgentToolResult } from "@mariozechner/pi-agent-core";
 import { Type, type TObject } from "@sinclair/typebox";
-import { callKgTool, type KgToolResult } from "./kg-client.js";
+import { callKgTool } from "./kg-client.js";
+import { toAgentResult } from "./tool-result.js";
 import type { Tracer } from "./tracer.js";
 
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
-
-function toAgentResult(res: KgToolResult): AgentToolResult<unknown> {
-  if (!res.ok) {
-    return {
-      content: [{ type: "text", text: `Error: ${res.error ?? "Unknown error"}` }],
-      details: { error: res.error },
-    };
-  }
-  const text = typeof res.data === "string" ? res.data : JSON.stringify(res.data, null, 2);
-  return { content: [{ type: "text", text }], details: res.data };
-}
 
 // ---------------------------------------------------------------------------
 // Tool descriptor
