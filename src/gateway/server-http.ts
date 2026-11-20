@@ -51,7 +51,11 @@ import {
 } from "./hooks.js";
 import { sendGatewayAuthFailure } from "./http-common.js";
 import { getBearerToken, getHeader } from "./http-utils.js";
-import { isPrivateOrLoopbackAddress, resolveGatewayClientIp } from "./net.js";
+import {
+  isPrivateOrLoopbackAddress,
+  isTrustedProxyAddress,
+  resolveGatewayClientIp,
+} from "./net.js";
 import { handleOpenAiHttpRequest } from "./openai-http.js";
 import { handleOpenResponsesHttpRequest } from "./openresponses-http.js";
 import { isOperatorAuth } from "./operator-auth.js";
@@ -155,6 +159,17 @@ async function authorizeCanvasRequest(params: {
   // Only allow IP-based fallback for private/loopback addresses to prevent
   // cross-session access in shared-IP environments (corporate NAT, cloud).
   if (!isPrivateOrLoopbackAddress(clientIp)) {
+    return lastAuthFailure ?? { ok: false, reason: "unauthorized" };
+  }
+  // A forwarded request from a peer that is not a configured trusted proxy
+  // resolves to the proxy's own address, which every client behind it shares,
+  // so the address does not identify the client: no IP-based fallback.
+  const hasForwarded = Boolean(
+    getHeader(req, "x-forwarded-for") ||
+    getHeader(req, "x-real-ip") ||
+    getHeader(req, "x-forwarded-host"),
+  );
+  if (hasForwarded && !isTrustedProxyAddress(req.socket?.remoteAddress, trustedProxies)) {
     return lastAuthFailure ?? { ok: false, reason: "unauthorized" };
   }
   if (hasAuthorizedWsClientForIp(clients, clientIp)) {
