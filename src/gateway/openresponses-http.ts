@@ -8,11 +8,13 @@
 
 import { randomUUID } from "node:crypto";
 import type { IncomingMessage, ServerResponse } from "node:http";
+import { listAgentIds } from "../agents/agent-scope.js";
 import { isImageInputUnsupportedError } from "../agents/image-input-error.js";
 import type { ClientToolDefinition } from "../agents/pi-embedded-runner/run/params.js";
 import { createDefaultDeps } from "../cli/deps.js";
 import { agentCommand } from "../commands/agent.js";
 import type { ImageContent } from "../commands/agent/types.js";
+import { loadConfig } from "../config/config.js";
 import type { GatewayHttpResponsesConfig } from "../config/types.gateway.js";
 import { emitAgentEvent, onAgentEvent } from "../infra/agent-events.js";
 import { logWarn } from "../logger.js";
@@ -721,7 +723,12 @@ export async function handleOpenResponsesHttpRequest(
     });
     return true;
   }
-  const agentId = resolveAgentIdForRequest({ req, model });
+  const agentId = resolveAgentIdForRequest({
+    req,
+    model,
+    externalId: handled.externalId,
+    knownAgentIds: handled.externalId ? listAgentIds(loadConfig()) : undefined,
+  });
   // L1 user_scope is server-derived from the verified Clerk `sub` (never the
   // client-sent `user` field). When present it partitions the session/memory.
   const userScope = deriveUserScopeFromSub(handled.externalId);

@@ -1,7 +1,9 @@
 import { randomUUID } from "node:crypto";
 import type { IncomingMessage, ServerResponse } from "node:http";
+import { listAgentIds } from "../agents/agent-scope.js";
 import { createDefaultDeps } from "../cli/deps.js";
 import { agentCommand } from "../commands/agent.js";
+import { loadConfig } from "../config/config.js";
 import { emitAgentEvent, onAgentEvent } from "../infra/agent-events.js";
 import { logWarn } from "../logger.js";
 import { defaultRuntime } from "../runtime.js";
@@ -176,7 +178,12 @@ export async function handleOpenAiHttpRequest(
   const model = typeof payload.model === "string" ? payload.model : "openclaw";
   const user = typeof payload.user === "string" ? payload.user : undefined;
 
-  const agentId = resolveAgentIdForRequest({ req, model });
+  const agentId = resolveAgentIdForRequest({
+    req,
+    model,
+    externalId: handled.externalId,
+    knownAgentIds: handled.externalId ? listAgentIds(loadConfig()) : undefined,
+  });
   // L1 user_scope server-derived from the verified Clerk `sub` (never body `user`).
   const userScope = deriveUserScopeFromSub(handled.externalId);
   const sessionKey = resolveOpenAiSessionKey({ req, agentId, user, userScope });

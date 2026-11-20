@@ -17,7 +17,9 @@ import { derivePeerId } from "../../extensions/shared/session-key.js";
 import {
   createStructuralHintReporter,
   deriveUserScopeFromSub,
+  resolveAgentIdForRequest,
   resolveChannelFromHeader,
+  resolveEndUserAgentId,
   resolveSessionKey,
 } from "./http-utils.js";
 
@@ -376,5 +378,63 @@ describe("resolveSessionKey — structural-hint attempt detection", () => {
       "openresponses: session hint carried structural tokens (direct=true colon=true main=false)",
       "openresponses: session hint carried structural tokens (direct=false colon=true main=true) suppressed=3",
     ]);
+  });
+});
+
+describe("resolveAgentIdForRequest — end users run on the end-user agent", () => {
+  const routed = reqWith({ "x-openclaw-agent-id": "beta" });
+
+  it("operator: the agent header routes", () => {
+    expect(resolveAgentIdForRequest({ req: routed, model: "openclaw" })).toBe("beta");
+  });
+
+  it("operator: the model routes when there is no header", () => {
+    expect(resolveAgentIdForRequest({ req: reqWith(), model: "openclaw:beta" })).toBe("beta");
+    expect(resolveAgentIdForRequest({ req: reqWith(), model: "agent:beta" })).toBe("beta");
+  });
+
+  for (const [label, req, model] of [
+    ["the agent-id header", reqWith({ "x-openclaw-agent-id": "beta" }), "openclaw"],
+    ["the agent header", reqWith({ "x-openclaw-agent": "beta" }), "openclaw"],
+    ["an openclaw: model", reqWith(), "openclaw:beta"],
+    ["an agent: model", reqWith(), "agent:beta"],
+  ] as const) {
+    it(`end user: ${label} does not change the agent`, () => {
+      expect(resolveAgentIdForRequest({ req, model, externalId: "user_2abc", env: {} })).toBe(
+        "main",
+      );
+    });
+  }
+
+  it("end user: OPENCLAW_CLERK_AGENT_ID names the end-user agent", () => {
+    expect(
+      resolveAgentIdForRequest({
+        req: routed,
+        model: "openclaw:beta",
+        externalId: "user_2abc",
+        env: { OPENCLAW_CLERK_AGENT_ID: " Shrine " },
+      }),
+    ).toBe("shrine");
+  });
+
+  it("an OPENCLAW_CLERK_AGENT_ID that normalises to empty falls back to the main agent", () => {
+    for (const value of [undefined, "", "  ", "!!!", "---"]) {
+      expect(resolveEndUserAgentId({ OPENCLAW_CLERK_AGENT_ID: value })).toBe("main");
+    }
+  });
+
+  it("an OPENCLAW_CLERK_AGENT_ID naming no configured agent falls back to the main agent", () => {
+    const known = ["main", "shrine"];
+    expect(resolveEndUserAgentId({ OPENCLAW_CLERK_AGENT_ID: "shrine" }, known)).toBe("shrine");
+    expect(resolveEndUserAgentId({ OPENCLAW_CLERK_AGENT_ID: "ops" }, known)).toBe("main");
+    expect(
+      resolveAgentIdForRequest({
+        req: reqWith({ "x-openclaw-agent-id": "ops" }),
+        model: "openclaw:ops",
+        externalId: "user_2abc",
+        env: { OPENCLAW_CLERK_AGENT_ID: "ops" },
+        knownAgentIds: known,
+      }),
+    ).toBe("main");
   });
 });
