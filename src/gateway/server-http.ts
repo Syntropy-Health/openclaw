@@ -26,6 +26,7 @@ import {
   type GatewayAuthResult,
   type ResolvedGatewayAuth,
 } from "./auth.js";
+import { isCanvasAddressFallbackEnabled } from "./canvas-address-fallback.js";
 import {
   handleControlUiAvatarRequest,
   handleControlUiHttpRequest,
@@ -172,7 +173,7 @@ async function authorizeCanvasRequest(params: {
   if (hasForwarded && !isTrustedProxyAddress(req.socket?.remoteAddress, trustedProxies)) {
     return lastAuthFailure ?? { ok: false, reason: "unauthorized" };
   }
-  if (hasAuthorizedWsClientForIp(clients, clientIp)) {
+  if (isCanvasAddressFallbackEnabled() && hasAuthorizedWsClientForIp(clients, clientIp)) {
     return { ok: true };
   }
   return lastAuthFailure ?? { ok: false, reason: "unauthorized" };

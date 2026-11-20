@@ -2017,6 +2017,7 @@ See [Plugins](/tools/plugin).
 - `remote.transport`: `ssh` (default) or `direct` (ws/wss). For `direct`, `remote.url` must be `ws://` or `wss://`.
 - `gateway.remote.token` is for remote CLI calls only; does not enable local gateway auth.
 - `trustedProxies`: reverse proxy IPs that terminate TLS. Only list proxies you control.
+- Canvas host: a client without credentials is admitted when an authorised control client is connected from the same private address. Behind a reverse proxy, list the proxy in `trustedProxies` so clients are matched on their real address, or set `OPENCLAW_CANVAS_ADDRESS_FALLBACK=off` (environment only) to require credentials for every canvas request. Any value other than `on` turns the fallback off.
 - `gateway.tools.deny`: extra tool names blocked for HTTP `POST /tools/invoke` (extends default deny list).
 - `gateway.tools.allow`: remove tool names from the default HTTP deny list.
 
