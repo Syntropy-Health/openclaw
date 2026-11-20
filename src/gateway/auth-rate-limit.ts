@@ -36,6 +36,8 @@ export interface RateLimitConfig {
 export const AUTH_RATE_LIMIT_SCOPE_DEFAULT = "default";
 export const AUTH_RATE_LIMIT_SCOPE_SHARED_SECRET = "shared-secret";
 export const AUTH_RATE_LIMIT_SCOPE_DEVICE_TOKEN = "device-token";
+/** End-user (Clerk) sign-ins: kept apart so they never clear the shared-secret count. */
+export const AUTH_RATE_LIMIT_SCOPE_CLERK_JWT = "clerk-jwt";
 
 export interface RateLimitEntry {
   /** Timestamps (epoch ms) of recent failed attempts inside the window. */

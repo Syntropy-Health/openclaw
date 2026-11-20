@@ -20,6 +20,7 @@
 
 import { generateKeyPairSync, type KeyObject, sign as cryptoSign } from "node:crypto";
 import { describe, expect, it, vi } from "vitest";
+import { createAuthRateLimiter } from "./auth-rate-limit.js";
 import {
   authorizeClerkJwt,
   authorizeGatewayConnect,
@@ -364,3 +365,68 @@ describe("authorizeGatewayConnect — clerk wiring (fail-closed invariants)", ()
 // NOTE: the sid deny-list revocation tests were REMOVED — that control is
 // WITHDRAWN (A&D §7.4b-A). Revocation is now server-side session validation,
 // covered by clerk-session-validation.test.ts + the live QA harness.
+
+describe("authorizeGatewayConnect — Clerk sign-ins and the shared-secret limit", () => {
+  const PASSWORD = "shared-password";
+  const IP = "203.0.113.9";
+  const auth = {
+    mode: "password" as const,
+    password: PASSWORD,
+    allowTailscale: false,
+    clerk: CLERK,
+  };
+  const attempt = (
+    limiter: ReturnType<typeof createAuthRateLimiter>,
+    connectAuth: { token?: string; password?: string },
+  ) =>
+    authorizeGatewayConnect({
+      auth,
+      connectAuth,
+      clientIp: IP,
+      rateLimiter: limiter,
+      fetchClerkJwks: jwksFetcher(),
+    });
+
+  it("valid Clerk sign-ins between password guesses do not reset the password failure count", async () => {
+    const limiter = createAuthRateLimiter({ maxAttempts: 3, windowMs: 60_000, lockoutMs: 60_000 });
+    const valid = mintToken(freshClaims(), { kid: KID, privateKey });
+    // guess, sign-in, guess, sign-in, guess: three failures reach the limit.
+    for (let i = 0; i < 3; i++) {
+      expect((await attempt(limiter, { password: `guess-${i}` })).ok).toBe(false);
+      if (i < 2) {
+        expect((await attempt(limiter, { token: valid })).ok).toBe(true);
+      }
+    }
+    const locked = await attempt(limiter, { password: PASSWORD });
+    expect(locked.ok).toBe(false);
+    expect(locked.rateLimited).toBe(true);
+    // A locked-out address is locked out on every path, the Clerk one included.
+    const lockedClerk = await attempt(limiter, { token: valid });
+    expect(lockedClerk.ok).toBe(false);
+    expect(lockedClerk.rateLimited).toBe(true);
+  });
+
+  it("failed Clerk tokens are limited in their own scope, not the password scope", async () => {
+    const limiter = createAuthRateLimiter({ maxAttempts: 3, windowMs: 60_000, lockoutMs: 60_000 });
+    const bad = mintToken(validClaims({ aud: "wrong-audience" }), { kid: KID, privateKey });
+    for (let i = 0; i < 3; i++) {
+      expect((await attempt(limiter, { token: bad })).ok).toBe(false);
+    }
+    const clerkLocked = await attempt(limiter, { token: bad });
+    expect(clerkLocked.rateLimited).toBe(true);
+    // The operator password is unaffected by end-user token failures.
+    const operator = await attempt(limiter, { password: PASSWORD });
+    expect(operator.ok).toBe(true);
+    expect(operator.method).toBe("password");
+  });
+
+  it("valid Clerk sign-ins on their own are never limited", async () => {
+    const limiter = createAuthRateLimiter({ maxAttempts: 3, windowMs: 60_000, lockoutMs: 60_000 });
+    const valid = mintToken(freshClaims(), { kid: KID, privateKey });
+    for (let i = 0; i < 6; i++) {
+      const res = await attempt(limiter, { token: valid });
+      expect(res.ok).toBe(true);
+      expect(res.method).toBe("clerk-jwt");
+    }
+  });
+});
