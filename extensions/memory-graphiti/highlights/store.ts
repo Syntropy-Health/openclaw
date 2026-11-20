@@ -1,14 +1,10 @@
+import type { Sql } from "../sql.js";
 import {
   isHighlightCategory,
   type Highlight,
   type HighlightCacheState,
   type HighlightSource,
 } from "./types.js";
-
-type Sql = <T = Record<string, unknown>>(
-  strings: TemplateStringsArray,
-  ...values: unknown[]
-) => Promise<T[]>;
 
 export type HighlightRow = {
   state: HighlightCacheState;

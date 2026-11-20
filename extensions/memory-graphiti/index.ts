@@ -80,6 +80,7 @@ import {
   tombstoneKey,
   type ReceiptLedger,
 } from "./receipts.js";
+import type { Sql } from "./sql.js";
 import { computeIsQaOnly, senderZepAllowed, type TripwireBreach } from "./tripwire.js";
 import { ZepCloudClient } from "./zep-cloud-client.js";
 
@@ -370,16 +371,12 @@ const memoryPlugin = {
     // The plugin's lp_memory_* tables, created once on first use (retried on failure).
     let schema: Promise<void> | null = null;
     const ready = () =>
-      (schema ??= ensureReceiptSchema(
-        identitySql as unknown as Parameters<typeof ensureReceiptSchema>[0],
-      ).catch((err) => {
+      (schema ??= ensureReceiptSchema(identitySql as unknown as Sql).catch((err) => {
         schema = null;
         throw err;
       }));
     if (identitySql) {
-      const pg = createPgReceiptLedger(
-        identitySql as unknown as Parameters<typeof createPgReceiptLedger>[0],
-      );
+      const pg = createPgReceiptLedger(identitySql as unknown as Sql);
       const guarded = afterReady(pg, ready);
       ledger = {
         ...guarded,
@@ -407,9 +404,7 @@ const memoryPlugin = {
     // can serve the panel. Without the identity database no record is kept.
     let recallStore: RecallStore | null = null;
     if (identitySql) {
-      const pgRecall = createPgRecallStore(
-        identitySql as unknown as Parameters<typeof createPgRecallStore>[0],
-      );
+      const pgRecall = createPgRecallStore(identitySql as unknown as Sql);
       recallStore = afterReady(pgRecall, ready);
     }
     const recallReranker = cfg.recall?.reranker ?? "rrf";
@@ -445,21 +440,15 @@ const memoryPlugin = {
     let highlightStore: HighlightStore | null = null;
     let highlightScheduler: HighlightScheduler | null = null;
     const sweepRecall = identitySql
-      ? async () => (
-          await ready(),
-          sweepExpiredRecall(identitySql as unknown as Parameters<typeof sweepExpiredRecall>[0])
-        )
+      ? async () => (await ready(), sweepExpiredRecall(identitySql as unknown as Sql))
       : null;
     if (identitySql && !memoryRefused) {
-      const pgHighlights = createPgHighlightStore(
-        identitySql as unknown as Parameters<typeof createPgHighlightStore>[0],
-        {
-          onUnknownCategory: (count) =>
-            api.logger.warn(
-              `memory-highlights: ${count} stored highlight(s) with an unknown or malformed category not served; row queued for regeneration`,
-            ),
-        },
-      );
+      const pgHighlights = createPgHighlightStore(identitySql as unknown as Sql, {
+        onUnknownCategory: (count) =>
+          api.logger.warn(
+            `memory-highlights: ${count} stored highlight(s) with an unknown or malformed category not served; row queued for regeneration`,
+          ),
+      });
       highlightStore = afterReady(pgHighlights, ready);
     }
     if (highlightStore && approval !== undefined) {
@@ -951,7 +940,7 @@ const memoryPlugin = {
           identitySql && !memoryRefused
             ? (externalId) =>
                 forgetByExternalId({
-                  sql: identitySql as unknown as Parameters<typeof forgetByExternalId>[0]["sql"],
+                  sql: identitySql as unknown as Sql,
                   client,
                   ledger,
                   recall: recallStore ?? undefined,
@@ -1066,7 +1055,7 @@ const memoryPlugin = {
             let r: Awaited<ReturnType<typeof forgetUser>>;
             try {
               r = await forgetUser({
-                sql: identitySql as unknown as Parameters<typeof forgetUser>[0]["sql"],
+                sql: identitySql as unknown as Sql,
                 client,
                 ledger,
                 recall: recallStore ?? undefined,

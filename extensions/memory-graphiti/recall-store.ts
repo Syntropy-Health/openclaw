@@ -27,6 +27,7 @@
  * controls as lp_memory_receipts. forget and remove delete them.
  */
 import type { RankedFact } from "./client.js";
+import type { Sql } from "./sql.js";
 
 export const RECALL_TTL_MINUTES = 10;
 export const RECALL_CAP_PER_GROUP = 5;
@@ -93,11 +94,6 @@ export function canonicalRecallItems(raw: unknown): RecallItem[] {
     last_seen: typeof x.last_seen === "string" ? x.last_seen : null,
   }));
 }
-
-type Sql = <T = Record<string, unknown>>(
-  strings: TemplateStringsArray,
-  ...values: unknown[]
-) => Promise<T[]>;
 
 type Row = { turn_id: string; items: unknown; state: string; at: Date | string };
 
