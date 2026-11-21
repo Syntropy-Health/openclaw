@@ -4,7 +4,7 @@
  *
  * Config lives at `cfg.channels.sms` (ChannelsConfig has an index signature, so
  * a plugin channel needs no core config-type change) and falls back to the
- * `TWILIO_*` env vars via {@link resolveTwilioSmsConfig}. v1 is a single-account
+ * `TWILIO_*` env vars via {@link resolveSmsCredentials}. v1 is a single-account
  * channel (one subaccount / one sender number). The channel stays INERT until
  * credential-complete — matching the fail-closed "no partial wiring" posture.
  */
@@ -12,8 +12,7 @@
 import { DEFAULT_ACCOUNT_ID } from "openclaw/plugin-sdk";
 import type { ChannelConfigAdapter, OpenClawConfig } from "openclaw/plugin-sdk";
 import {
-  missingSmsCredentials,
-  resolveTwilioSmsConfig,
+  resolveSmsCredentials,
   TwilioSmsConfigSchema,
   type ResolvedTwilioSmsConfig,
 } from "./config.js";
@@ -49,12 +48,12 @@ export function resolveSmsAccount(
   const raw = readRawSmsConfig(cfg);
   const parsed = raw ? TwilioSmsConfigSchema.safeParse(raw) : null;
   const input = parsed?.success ? parsed.data : undefined;
-  const config = resolveTwilioSmsConfig(input, env);
+  const { config, missing } = resolveSmsCredentials(input, env);
   return {
     accountId: id,
     config,
     configured: config !== null,
-    missing: config ? [] : missingSmsCredentials(input, env),
+    missing,
   };
 }
 
