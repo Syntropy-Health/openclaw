@@ -6,7 +6,7 @@ import { describe, expect, it, vi } from "vitest";
 import { MemoryCapabilityError, type ListFactsResult, type MemoryFact } from "../client.js";
 import { FakeHighlightStore } from "../testing/fake-highlight-store.js";
 import type { GenerateResult } from "./generate.js";
-import { LIST_PAGES_MAX, regenerateGroup } from "./regenerate.js";
+import { regenerateGroup } from "./regenerate.js";
 import type { Highlight } from "./types.js";
 
 const G = "ok_g";
@@ -105,15 +105,29 @@ describe("regenerateGroup", () => {
     expect((await store.get(G))?.payload.map((h) => h.id)).toEqual(["hl_1"]);
   });
 
-  it(`reads at most ${LIST_PAGES_MAX} listing call(s) (the backend's own per-user ceiling)`, async () => {
+  it("a listing the backend marks truncated is partial even with no cursor left", async () => {
+    const { deps, store } = setup();
+    deps.client.listFacts = vi.fn(
+      async (): Promise<ListFactsResult> => ({
+        facts: [fact("e_1")],
+        nextCursor: null,
+        truncated: true,
+      }),
+    );
+    await store.claimOnDemand(G, 3, { create: true });
+    expect(await regenerateGroup(G, deps)).toBe("ready");
+    expect(await store.get(G)).toMatchObject({ partial: true, factsRead: 1 });
+  });
+
+  it("reads one listing call (the backend's own per-user ceiling)", async () => {
     const { deps, store, listFacts, generate } = setup([[fact("a")], [fact("b")], [fact("c")]]);
     await store.claimOnDemand(G, 3, { create: true });
     await regenerateGroup(G, deps);
-    expect(listFacts).toHaveBeenCalledTimes(LIST_PAGES_MAX);
+    expect(listFacts).toHaveBeenCalledTimes(1);
     expect(listFacts.mock.calls[0][1]).toMatchObject({ includeInvalid: false });
     expect(generate.mock.calls[0][0].map((f) => f.id)).toEqual(["a"]);
-    // Our own page cap stopped the read with a cursor left (the backend did not say
-    // truncated): still partial, never served as complete.
+    // A cursor was left (the backend did not say truncated): still partial, never
+    // served as complete.
     expect(await store.get(G)).toMatchObject({ partial: true, factsRead: 1 });
   });
 

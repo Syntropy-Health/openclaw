@@ -2,11 +2,6 @@ import { MemoryCapabilityError, type MemoryFact, type MemoryFactSurface } from "
 import type { GenerateResult } from "./generate.js";
 import type { HighlightStore } from "./store.js";
 
-/**
- * listFacts calls per regeneration. One call reads up to the backend's own ceiling
- * (2,000 on Zep), the per-user bound A&D §4.1/§7 set; the newest 300 go to the model.
- */
-export const LIST_PAGES_MAX = 1;
 /** The regeneration lease: longer than a listing plus the 30 s summariser budget. */
 const REGEN_LEASE_SEC = 120;
 
@@ -69,20 +64,12 @@ async function regenerateLeased(
   // never saw them. Stored with the result, so it is never served as complete.
   let partial = false;
   try {
-    let cursor: string | undefined;
-    let exhausted = false;
-    for (let page = 0; page < LIST_PAGES_MAX; page++) {
-      const res = await deps.client.listFacts(groupId, { includeInvalid: false, cursor });
-      facts.push(...res.facts);
-      partial = res.truncated === true;
-      if (!res.nextCursor) {
-        exhausted = true;
-        break;
-      }
-      cursor = res.nextCursor;
-    }
-    // Our own page cap stopped the read with facts left: partial, whatever the backend said.
-    partial ||= !exhausted;
+    // ONE listing call: it reads up to the backend's own ceiling (2,000 on Zep), the
+    // per-user bound A&D §4.1/§7 set; the newest 300 go to the model. A cursor left
+    // means facts remain unread: partial, whatever the backend said.
+    const res = await deps.client.listFacts(groupId, { includeInvalid: false });
+    facts.push(...res.facts);
+    partial = res.truncated === true || Boolean(res.nextCursor);
   } catch (err) {
     if (err instanceof MemoryCapabilityError) {
       return "backend_unsupported";
