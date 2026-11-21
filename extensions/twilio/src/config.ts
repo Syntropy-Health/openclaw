@@ -115,42 +115,29 @@ function envCredentials(env: NodeJS.ProcessEnv) {
   };
 }
 
-/**
- * The credential/number env NAMES still missing for SMS to run — names only, never
- * values — so an enabled-but-inert surface can say exactly what to provision.
- * Empty when the config is credential-complete.
- */
-export function missingSmsCredentials(
-  input: TwilioSmsConfig | undefined,
-  env: NodeJS.ProcessEnv = process.env,
-): string[] {
-  const parsed = input ?? TwilioSmsConfigSchema.parse({});
-  const names = credentialEnvNames(env);
-  const fromEnv = envCredentials(env);
-  const missing: string[] = [];
-  // Iterate the CREDENTIAL keys only: the generic name map also has smsNumber.
-  for (const k of Object.keys(SMS_ENV) as Array<keyof CredentialNames>) {
-    if (!(parsed[k] ?? fromEnv[k])) missing.push(names[k]);
-  }
-  if (!(parsed.smsNumber ?? envValue(env, ENV.smsNumber))) missing.push(ENV.smsNumber);
-  return missing;
-}
+/** The outcome of resolving the SMS channel: credential-complete, or what is missing. */
+export type SmsCredentialResolution =
+  | { config: ResolvedTwilioSmsConfig; missing: [] }
+  | { config: null; missing: string[] };
 
 /**
- * Merge config + env fallback and decide whether the SMS channel is CREDENTIAL-
- * COMPLETE. Returns the resolved config only when EVERY required credential +
- * the sender number is present — otherwise `null` (channel stays INERT, registers
- * nothing). This is the fail-closed "no partial Twilio wiring" gate: a half-set
- * config never half-activates.
+ * Merge config + env fallback ONCE and decide whether the SMS channel is
+ * CREDENTIAL-COMPLETE. When every required credential + the sender number is
+ * present, returns the resolved config; otherwise `config: null` (channel stays
+ * INERT, registers nothing) plus the env NAMES still missing — names only, never
+ * values — so an enabled-but-inert surface can say exactly what to provision.
+ * This is the fail-closed "no partial Twilio wiring" gate: a half-set config
+ * never half-activates.
  *
  * The `authToken` (webhook-signature key) is REQUIRED here: an SMS channel with no
  * way to validate inbound `X-Twilio-Signature` must not run (§4.3 non-negotiable).
  */
-export function resolveTwilioSmsConfig(
+export function resolveSmsCredentials(
   input: TwilioSmsConfig | undefined,
   env: NodeJS.ProcessEnv = process.env,
-): ResolvedTwilioSmsConfig | null {
+): SmsCredentialResolution {
   const parsed = input ?? TwilioSmsConfigSchema.parse({});
+  const names = credentialEnvNames(env);
   const fromEnv = envCredentials(env);
   const accountSid = parsed.accountSid ?? fromEnv.accountSid;
   const apiKeySid = parsed.apiKeySid ?? fromEnv.apiKeySid;
@@ -158,16 +145,42 @@ export function resolveTwilioSmsConfig(
   const authToken = parsed.authToken ?? fromEnv.authToken;
   const smsNumber = parsed.smsNumber ?? envValue(env, ENV.smsNumber);
 
-  if (!accountSid || !apiKeySid || !apiKeySecret || !authToken || !smsNumber) {
-    return null;
+  if (accountSid && apiKeySid && apiKeySecret && authToken && smsNumber) {
+    return {
+      config: {
+        accountSid,
+        apiKeySid,
+        apiKeySecret,
+        authToken,
+        smsNumber,
+        inbound: parsed.inbound,
+        allowFrom: parsed.allowFrom,
+      },
+      missing: [],
+    };
   }
-  return {
-    accountSid,
-    apiKeySid,
-    apiKeySecret,
-    authToken,
-    smsNumber,
-    inbound: parsed.inbound,
-    allowFrom: parsed.allowFrom,
-  };
+  const present = { accountSid, apiKeySid, apiKeySecret, authToken };
+  const missing: string[] = [];
+  // Iterate the CREDENTIAL keys only: the generic name map also has smsNumber.
+  for (const k of Object.keys(SMS_ENV) as Array<keyof CredentialNames>) {
+    if (!present[k]) missing.push(names[k]);
+  }
+  if (!smsNumber) missing.push(ENV.smsNumber);
+  return { config: null, missing };
+}
+
+/** The env NAMES still missing for SMS to run; empty when credential-complete. */
+export function missingSmsCredentials(
+  input: TwilioSmsConfig | undefined,
+  env: NodeJS.ProcessEnv = process.env,
+): string[] {
+  return resolveSmsCredentials(input, env).missing;
+}
+
+/** The credential-complete config, or `null` while the channel is inert. */
+export function resolveTwilioSmsConfig(
+  input: TwilioSmsConfig | undefined,
+  env: NodeJS.ProcessEnv = process.env,
+): ResolvedTwilioSmsConfig | null {
+  return resolveSmsCredentials(input, env).config;
 }
