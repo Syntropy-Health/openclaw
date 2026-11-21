@@ -29,11 +29,7 @@ import type { MemoryClient } from "./client.js";
 import { extractMessages } from "./messages.js";
 import { leadingIdentityExternalId, minimiseForMemory } from "./minimise.js";
 import { entryHash, type ReceiptLedger } from "./receipts.js";
-
-type Sql = <T = Record<string, unknown>>(
-  strings: TemplateStringsArray,
-  ...values: unknown[]
-) => Promise<T[]>;
+import type { Sql } from "./sql.js";
 
 export type ForgetResult = {
   userFound: boolean;

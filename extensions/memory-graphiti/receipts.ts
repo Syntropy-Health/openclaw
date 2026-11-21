@@ -14,6 +14,7 @@
  */
 import { createHash, createHmac } from "node:crypto";
 import { retryDdlRace } from "openclaw/plugin-sdk";
+import type { Sql as TaggedSql } from "./sql.js";
 
 export type IngestItem = { role: "user" | "assistant"; text: string };
 
@@ -119,10 +120,8 @@ export interface ReceiptLedger {
   ): Promise<{ hashes: string[]; untracked: number }>;
 }
 
-type Sql = {
-  <T = Record<string, unknown>>(strings: TemplateStringsArray, ...values: unknown[]): Promise<T[]>;
-  json?: (v: unknown) => unknown;
-};
+/** The store's query shape, plus the `json` helper a `postgres` pool provides. */
+type Sql = TaggedSql & { json?: (v: unknown) => unknown };
 
 export async function ensureReceiptSchema(sql: Sql): Promise<void> {
   await retryDdlRace(
